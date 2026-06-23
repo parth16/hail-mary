@@ -40,7 +40,10 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     word_haystack = _word_haystack(path, text_sample)
     filename_word_haystack = _word_haystack(Path(path.name), "")
 
-    if _is_platform_deal_page(path, text_sample, file_type):
+    if _is_text_confirmed_platform_deal_page(text_sample, file_type):
+        return DocumentType.PLATFORM_DEAL_PAGE
+
+    if _is_filename_platform_deal_page(path, file_type):
         return DocumentType.PLATFORM_DEAL_PAGE
 
     legal_markers = [
@@ -85,6 +88,18 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     ):
         return DocumentType.FINANCIAL_MODEL
 
+    if file_type in {FileType.DOCX, FileType.PDF} and any(
+        _contains_phrase(word_haystack, marker)
+        for marker in [
+            "investment memo",
+            "investment memorandum",
+            "investment committee memo",
+            "investment committee memorandum",
+            "diligence memo",
+        ]
+    ):
+        return DocumentType.MEMO
+
     if any(
         _contains_phrase(word_haystack, marker)
         for marker in [
@@ -100,18 +115,6 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         ]
     ):
         return DocumentType.CUSTOMER_DOCUMENT
-
-    if file_type in {FileType.DOCX, FileType.PDF} and any(
-        _contains_phrase(word_haystack, marker)
-        for marker in [
-            "investment memo",
-            "investment memorandum",
-            "investment committee memo",
-            "investment committee memorandum",
-            "diligence memo",
-        ]
-    ):
-        return DocumentType.MEMO
 
     if file_type == FileType.HTML:
         return DocumentType.WEB_PAGE
@@ -133,13 +136,12 @@ def _contains_phrase(word_haystack: str, phrase: str) -> bool:
     return f" {phrase_words} " in word_haystack
 
 
-def _is_platform_deal_page(path: Path, text_sample: str, file_type: FileType) -> bool:
+def _is_filename_platform_deal_page(path: Path, file_type: FileType) -> bool:
     if file_type not in {FileType.PDF, FileType.HTML}:
         return False
 
     filename = path.name.lower().replace("_", " ").replace("-", " ")
     filename_stem = path.stem.lower().replace("_", " ").replace("-", " ")
-    text = text_sample.lower().replace("_", " ").replace("-", " ")
     platform_filename_markers = [
         " angellist",
         "angel list",
@@ -155,9 +157,14 @@ def _is_platform_deal_page(path: Path, text_sample: str, file_type: FileType) ->
         return True
     if _filename_has_document_type_marker(filename_stem):
         return False
-    if any(marker in filename for marker in platform_filename_markers):
-        return True
+    return any(marker in filename for marker in platform_filename_markers)
 
+
+def _is_text_confirmed_platform_deal_page(text_sample: str, file_type: FileType) -> bool:
+    if file_type not in {FileType.PDF, FileType.HTML}:
+        return False
+
+    text = text_sample.lower().replace("_", " ").replace("-", " ")
     has_angellist_text = any(
         marker in text for marker in ["angellist", "angel list", "portal.angellist.com"]
     )

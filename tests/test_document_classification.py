@@ -65,6 +65,23 @@ def test_angellist_source_name_does_not_override_legal_document() -> None:
     assert classify_document(path) == DocumentType.LEGAL_DOCUMENT
 
 
+def test_text_confirmed_platform_page_overrides_guarded_filename() -> None:
+    assert (
+        classify_document(
+            Path("Acme/Acme diligence.html"),
+            text_sample="AngelList investment opportunity. Invest now.",
+        )
+        == DocumentType.PLATFORM_DEAL_PAGE
+    )
+    assert (
+        classify_document(
+            Path("Acme/Acme memo.pdf"),
+            text_sample="Meridian portal company profile and view deal page.",
+        )
+        == DocumentType.PLATFORM_DEAL_PAGE
+    )
+
+
 def test_classifies_legal_docx_from_content() -> None:
     path = Path("Example/closing.docx")
 
@@ -133,6 +150,16 @@ def test_classifies_customer_diligence_documents() -> None:
 def test_classifies_pdf_and_docx_investment_memos() -> None:
     assert classify_document(Path("Acme/Investment Memo.pdf")) == DocumentType.MEMO
     assert classify_document(Path("Acme/Investment Committee Memorandum.docx")) == DocumentType.MEMO
+
+
+def test_memo_filename_overrides_customer_section_text() -> None:
+    assert (
+        classify_document(
+            Path("Acme/Investment Memo.pdf"),
+            text_sample="Customer references and case studies are included.",
+        )
+        == DocumentType.MEMO
+    )
 
 
 def test_series_stock_purchase_agreement_is_legal_document() -> None:
