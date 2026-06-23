@@ -20,7 +20,11 @@ FILE_TYPE_BY_SUFFIX: dict[str, FileType] = {
 }
 
 
-SUPPORTED_SUFFIXES = set(FILE_TYPE_BY_SUFFIX)
+SUPPORTED_SUFFIXES = {
+    suffix
+    for suffix, file_type in FILE_TYPE_BY_SUFFIX.items()
+    if file_type not in {FileType.PNG, FileType.JPG}
+}
 
 
 def classify_file_type(path: Path) -> FileType:
@@ -46,8 +50,8 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         "subscription documents",
     ]
     legal_abbreviations = ["lpa", "ppm"]
-    if file_type in {FileType.DOCX, FileType.PDF} and (
-        any(marker in normalized_haystack for marker in legal_markers)
+    if file_type in {FileType.DOCX, FileType.PDF} and any(
+        _contains_phrase(word_haystack, marker) for marker in legal_markers
     ):
         return DocumentType.LEGAL_DOCUMENT
 

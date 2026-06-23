@@ -276,7 +276,15 @@ def _extract_csv(path: Path) -> ExtractionResult:
         )
 
     rows = csv.reader(io.StringIO(csv_text))
-    raw_text = "\n".join(" | ".join(cell.strip() for cell in row) for row in rows)
+    try:
+        raw_text = "\n".join(" | ".join(cell.strip() for cell in row) for row in rows)
+    except csv.Error as exc:
+        return ExtractionResult(
+            pages=[],
+            page_count=None,
+            extraction_quality=ExtractionQuality.LOW,
+            notes=f"Could not parse the CSV file: {exc}",
+        )
     return _single_page_result(raw_text, page_count=1, notes=notes)
 
 

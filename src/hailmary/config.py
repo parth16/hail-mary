@@ -11,6 +11,11 @@ class ConfigError(ValueError):
     """Configuration could not be used safely."""
 
 
+CHECK_SIZE_TIERS = (0, 1_000, 2_500, 5_000, 7_500, 10_000)
+MAX_CHECK_SIZE = max(CHECK_SIZE_TIERS)
+CHECK_SIZE_TIER_TEXT = "$0, $1K, $2.5K, $5K, $7.5K, or $10K"
+
+
 class AppConfig(BaseModel):
     """Runtime settings for local Hail Mary commands."""
 
@@ -104,8 +109,9 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
     """Load config from environment variables and command options."""
 
     saved_values = {} if ignore_saved else _read_local_config(AppConfig().config_path)
-    resolved_data_dir = data_dir or Path(
-        os.getenv("HAILMARY_DATA_DIR") or saved_values.get("data_dir", "./data")
+    resolved_data_dir = _expand_path(
+        data_dir
+        or Path(os.getenv("HAILMARY_DATA_DIR") or saved_values.get("data_dir", "./data"))
     )
     local_only = (
         _env_bool("HAILMARY_LOCAL_ONLY", True)
@@ -113,7 +119,7 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         else _config_bool(saved_values, "local_only", True)
     )
 
-    return AppConfig(
+    config = AppConfig(
         data_dir=resolved_data_dir,
         local_only=local_only,
         log_level=os.getenv("HAILMARY_LOG_LEVEL", saved_values.get("log_level", "INFO")),
@@ -142,11 +148,15 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             else _config_bool(saved_values, "enable_web_research", False)
         ),
     )
+    _ensure_investment_limits(config)
+    return config
 
 
 def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     """Create local folders used for generated output."""
 
+    config = _expand_config_paths(config)
+    _ensure_investment_limits(config)
     _ensure_generated_path_not_current_or_root(config.data_dir, purpose="data directory")
     _ensure_dedicated_data_dir(config.data_dir)
     _ensure_generated_path_not_current_or_root(
@@ -164,6 +174,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config.data_dir / "processed",
         config.data_dir / "reports",
         config.data_dir / "browser-profiles",
+        config.meridian_profile_dir,
         config.config_dir,
     ]
     for folder in folders:
@@ -195,13 +206,45 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
 def _meridian_profile_dir(data_dir: Path, saved_values: dict[str, str]) -> Path:
     env_value = os.getenv("HAILMARY_MERIDIAN_PROFILE_DIR")
     if env_value is not None and env_value.strip():
-        return Path(env_value)
+        return _expand_path(Path(env_value))
 
     saved_value = saved_values.get("meridian_profile_dir")
     if saved_value:
-        return Path(saved_value)
+        return _expand_path(Path(saved_value))
 
     return data_dir / "browser-profiles" / "meridian"
+
+
+def _expand_config_paths(config: AppConfig) -> AppConfig:
+    default_config = AppConfig()
+    meridian_profile_dir = config.meridian_profile_dir
+    if (
+        config.data_dir != default_config.data_dir
+        and config.meridian_profile_dir == default_config.meridian_profile_dir
+    ):
+        meridian_profile_dir = config.data_dir / "browser-profiles" / "meridian"
+
+    return config.model_copy(
+        update={
+            "data_dir": _expand_path(config.data_dir),
+            "meridian_profile_dir": _expand_path(meridian_profile_dir),
+        }
+    )
+
+
+def _expand_path(path: Path) -> Path:
+    return path.expanduser()
+
+
+def _ensure_investment_limits(config: AppConfig) -> None:
+    if config.max_check > MAX_CHECK_SIZE:
+        raise ConfigError("The maximum check size cannot be above $10K.")
+    if config.max_check not in CHECK_SIZE_TIERS:
+        raise ConfigError(f"The maximum check size must be one of {CHECK_SIZE_TIER_TEXT}.")
+    if config.min_check not in CHECK_SIZE_TIERS:
+        raise ConfigError(f"The minimum check size must be one of {CHECK_SIZE_TIER_TEXT}.")
+    if config.min_check > config.max_check:
+        raise ConfigError("The minimum check size cannot be higher than the maximum check size.")
 
 
 def _read_local_config(path: Path) -> dict[str, str]:

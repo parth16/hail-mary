@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import zipfile
 from pathlib import Path
 
@@ -69,6 +70,22 @@ def test_csv_extraction_records_table_text(tmp_path: Path) -> None:
     assert result.pages
     assert "year | revenue" in result.combined_text
     assert "2026 | 100" in result.combined_text
+
+
+def test_csv_parser_error_is_recorded_without_crashing(tmp_path: Path) -> None:
+    csv_path = tmp_path / "model.csv"
+    csv_path.write_text(f"notes\n{'A' * 32}\n", encoding="utf-8")
+    original_limit = csv.field_size_limit()
+    csv.field_size_limit(10)
+    try:
+        result = extract_document(csv_path)
+    finally:
+        csv.field_size_limit(original_limit)
+
+    assert result.pages == []
+    assert result.extraction_quality == ExtractionQuality.LOW
+    assert result.notes is not None
+    assert "Could not parse the CSV file" in result.notes
 
 
 def test_xlsx_extraction_records_table_text(tmp_path: Path) -> None:

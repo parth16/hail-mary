@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -13,6 +14,13 @@ from hailmary.config import AppConfig
 from hailmary.ingest import folder_loader
 from hailmary.ingest.folder_loader import IngestionError, ingest_folder
 from hailmary.schemas.documents import DocumentType, ExtractionQuality, FileType
+
+
+def _deal_id(deal_name: str) -> str:
+    digest = hashlib.sha256(deal_name.encode("utf-8")).hexdigest()[:8]
+    slug = "".join(character.lower() if character.isalnum() else "-" for character in deal_name)
+    normalized_slug = "-".join(part for part in slug.split("-") if part) or "unknown"
+    return f"{normalized_slug}-{digest}"
 
 
 def _write_docx(path: Path, lines: list[str]) -> None:
@@ -53,7 +61,7 @@ def test_ingest_folder_groups_documents_and_writes_outputs(tmp_path: Path) -> No
     assert all(path.exists() for path in output_paths)
 
     saved_summary = json.loads(summary.summary_path.read_text(encoding="utf-8"))
-    assert saved_summary["deals"][0]["id"] == "exampleco"
+    assert saved_summary["deals"][0]["id"] == _deal_id("ExampleCo")
 
 
 def test_invalid_pdf_is_recorded_without_crashing(tmp_path: Path) -> None:
@@ -161,6 +169,19 @@ def test_spreadsheets_are_recorded_with_extracted_text(tmp_path: Path) -> None:
     assert all(doc.pages for doc in summary.deals[0].documents)
 
 
+def test_images_are_skipped_until_ocr_exists(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "ImageCo"
+    company.mkdir(parents=True)
+    (company / "scan.png").write_bytes(b"not real image bytes")
+    (company / "photo.jpg").write_bytes(b"not real image bytes")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert summary.document_count == 0
+    assert summary.skipped_files == ["ImageCo/photo.jpg", "ImageCo/scan.png"]
+
+
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
 def test_output_directory_symlink_outside_data_dir_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
@@ -229,6 +250,27 @@ def test_colliding_deal_folder_slugs_stay_separate(tmp_path: Path) -> None:
     assert len(summary.deals) == 2
     assert len(deal_ids) == 2
     assert company_names == {"Acme.AI", "Acme AI"}
+
+
+def test_existing_deal_id_stays_stable_when_slug_collision_is_added(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    original = root / "Acme.AI"
+    original.mkdir(parents=True)
+    (original / "memo.txt").write_text("Memo about Acme.AI.", encoding="utf-8")
+
+    first_summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+    first_deal_id = first_summary.deals[0].id
+
+    new_collision = root / "Acme AI"
+    new_collision.mkdir(parents=True)
+    (new_collision / "memo.txt").write_text("Memo about Acme AI.", encoding="utf-8")
+
+    second_summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+    original_deal = next(
+        deal for deal in second_summary.deals if deal.company_name == "Acme.AI"
+    )
+
+    assert original_deal.id == first_deal_id
 
 
 def test_confidentiality_detection_uses_raw_text_before_cleanup(tmp_path: Path) -> None:

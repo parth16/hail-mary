@@ -33,6 +33,7 @@ def test_local_state_uses_owner_only_permissions(
     create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
 
     assert stat.S_IMODE((tmp_path / "local-data").stat().st_mode) == 0o700
+    assert (tmp_path / "local-data" / "browser-profiles" / "meridian").is_dir()
     assert stat.S_IMODE((tmp_path / ".hailmary").stat().st_mode) == 0o700
     assert stat.S_IMODE((tmp_path / ".hailmary" / "config.yaml").stat().st_mode) == 0o600
 
@@ -164,6 +165,93 @@ def test_custom_data_dir_derives_default_meridian_profile_dir(
     config = load_config(data_dir=Path("local-data"))
 
     assert config.meridian_profile_dir == Path("local-data/browser-profiles/meridian")
+
+
+def test_configured_paths_expand_home_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config(data_dir=Path("~/hm-data"))
+
+    assert config.data_dir == home / "hm-data"
+    assert config.meridian_profile_dir == home / "hm-data" / "browser-profiles" / "meridian"
+
+
+def test_init_expands_home_directory_before_creating_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+
+    result = create_local_state(
+        AppConfig(
+            data_dir=Path("~/hm-data"),
+            meridian_profile_dir=Path("~/hm-profile"),
+        ),
+        force=True,
+    )
+
+    assert result.data_dir == home / "hm-data"
+    assert (home / "hm-data").is_dir()
+    assert (home / "hm-profile").is_dir()
+
+
+def test_init_creates_custom_meridian_profile_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    create_local_state(
+        AppConfig(data_dir=Path("local-data"), meridian_profile_dir=Path("local-profile")),
+        force=True,
+    )
+
+    assert (tmp_path / "local-profile").is_dir()
+    assert stat.S_IMODE((tmp_path / "local-profile").stat().st_mode) == 0o700
+
+
+def test_max_check_above_allowed_tier_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_MAX_CHECK", "25000")
+
+    with pytest.raises(ConfigError, match="maximum check size cannot be above \\$10K"):
+        load_config()
+
+
+def test_init_rejects_max_check_above_allowed_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="maximum check size cannot be above \\$10K"):
+        create_local_state(AppConfig(max_check=25_000), force=True)
+
+
+def test_non_tier_check_sizes_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_MAX_CHECK", "6000")
+
+    with pytest.raises(ConfigError, match="maximum check size must be one of"):
+        load_config()
+
+
+def test_min_check_cannot_exceed_max_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="minimum check size cannot be higher"):
+        create_local_state(AppConfig(min_check=10_000, max_check=1_000), force=True)
 
 
 def test_invalid_boolean_env_value_fails_closed(

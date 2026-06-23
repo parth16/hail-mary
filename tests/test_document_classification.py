@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hailmary.ingest.document_classifier import (
+    SUPPORTED_SUFFIXES,
     classify_document,
     classify_file_type,
     is_ignored_path,
@@ -57,6 +58,14 @@ def test_classifies_legal_pdf_from_content() -> None:
     assert document_type == DocumentType.LEGAL_DOCUMENT
 
 
+def test_classifies_legal_pdf_from_line_broken_content() -> None:
+    path = Path("Example/closing.pdf")
+
+    document_type = classify_document(path, text_sample="PRIVATE PLACEMENT\nMEMORANDUM")
+
+    assert document_type == DocumentType.LEGAL_DOCUMENT
+
+
 def test_classifies_standalone_legal_abbreviations_from_filename() -> None:
     assert classify_document(Path("Example/PPM.pdf")) == DocumentType.LEGAL_DOCUMENT
     assert classify_document(Path("Example/LPA.docx")) == DocumentType.LEGAL_DOCUMENT
@@ -77,6 +86,14 @@ def test_classifies_pitch_deck_from_investor_overview_name() -> None:
 def test_pitch_deck_markers_must_be_words() -> None:
     assert classify_document(Path("PitchBook/terms.pdf")) == DocumentType.UNKNOWN
     assert classify_document(Path("Deckard/customer.pdf")) == DocumentType.UNKNOWN
+
+
+def test_images_are_recognized_but_not_supported_for_ingestion() -> None:
+    assert classify_file_type(Path("scan.png")) == FileType.PNG
+    assert classify_file_type(Path("photo.jpg")) == FileType.JPG
+    assert ".png" not in SUPPORTED_SUFFIXES
+    assert ".jpg" not in SUPPORTED_SUFFIXES
+    assert ".jpeg" not in SUPPORTED_SUFFIXES
 
 
 def test_series_financing_pdf_is_not_automatically_a_pitch_deck() -> None:

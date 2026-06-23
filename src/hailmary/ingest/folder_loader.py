@@ -38,8 +38,8 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
 
     run_started_at = datetime.now(UTC)
     deals_by_id: dict[str, IngestedDeal] = {}
-    deal_ids_by_name: dict[str, str] = {}
     skipped_files: list[str] = []
+    candidate_files: list[tuple[Path, str]] = []
 
     for path in sorted(root_path.rglob("*")):
         relative_path = path.relative_to(root_path)
@@ -57,11 +57,15 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
             continue
 
         deal_name = _deal_name_for_path(relative_path)
-        deal_id = _deal_id_for_name(
-            deal_name,
-            deal_ids_by_name=deal_ids_by_name,
-            used_deal_ids=set(deals_by_id),
-        )
+        candidate_files.append((path, deal_name))
+
+    deal_ids_by_name = {
+        deal_name: _deal_id_for_name(deal_name)
+        for deal_name in {deal_name for _, deal_name in candidate_files}
+    }
+
+    for path, deal_name in candidate_files:
+        deal_id = deal_ids_by_name[deal_name]
         extraction = extract_document(path)
         document = _build_document(path, root_path, deal_id, extraction, run_started_at)
 
@@ -96,29 +100,10 @@ def _deal_name_for_path(relative_path: Path) -> str:
     return relative_path.stem
 
 
-def _deal_id_for_name(
-    deal_name: str,
-    *,
-    deal_ids_by_name: dict[str, str],
-    used_deal_ids: set[str],
-) -> str:
-    existing_deal_id = deal_ids_by_name.get(deal_name)
-    if existing_deal_id is not None:
-        return existing_deal_id
-
+def _deal_id_for_name(deal_name: str) -> str:
     base_deal_id = slugify(deal_name)
-    deal_id = base_deal_id
-    if deal_id in used_deal_ids:
-        digest = hashlib.sha256(deal_name.encode("utf-8")).hexdigest()[:8]
-        deal_id = f"{base_deal_id}-{digest}"
-
-    suffix = 2
-    while deal_id in used_deal_ids:
-        deal_id = f"{base_deal_id}-{suffix}"
-        suffix += 1
-
-    deal_ids_by_name[deal_name] = deal_id
-    return deal_id
+    digest = hashlib.sha256(deal_name.encode("utf-8")).hexdigest()[:8]
+    return f"{base_deal_id}-{digest}"
 
 
 def _build_document(
