@@ -153,10 +153,11 @@ def _extract_docx(path: Path) -> ExtractionResult:
         notes=None,
     )
 
+    pages = _pages_with_raw_text(page)
     return ExtractionResult(
-        pages=[page] if clean_text else [],
+        pages=pages,
         page_count=None,
-        extraction_quality=_quality_from_pages([page] if clean_text else []),
+        extraction_quality=_quality_from_pages(pages),
     )
 
 
@@ -224,10 +225,11 @@ def _extract_text_file(path: Path) -> ExtractionResult:
         notes=notes,
     )
 
+    pages = _pages_with_raw_text(page)
     return ExtractionResult(
-        pages=[page] if clean_text else [],
+        pages=pages,
         page_count=1,
-        extraction_quality=_quality_from_pages([page] if clean_text else []),
+        extraction_quality=_quality_from_pages(pages),
         notes=notes,
     )
 
@@ -262,10 +264,11 @@ def _extract_html(path: Path) -> ExtractionResult:
         notes=notes,
     )
 
+    pages = _pages_with_raw_text(page)
     return ExtractionResult(
-        pages=[page] if clean_text else [],
+        pages=pages,
         page_count=1,
-        extraction_quality=_quality_from_pages([page] if clean_text else []),
+        extraction_quality=_quality_from_pages(pages),
         notes=notes,
     )
 
@@ -409,9 +412,16 @@ def _single_page_result(
         notes=notes,
     )
 
+    pages = _pages_with_raw_text(page)
     return ExtractionResult(
-        pages=[page] if clean_text else [],
+        pages=pages,
         page_count=page_count,
-        extraction_quality=_quality_from_pages([page] if clean_text else []),
+        extraction_quality=_quality_from_pages(pages),
         notes=notes,
     )
+
+
+def _pages_with_raw_text(page: ExtractedPage) -> list[ExtractedPage]:
+    if page.clean_text or page.raw_text.strip():
+        return [page]
+    return []

@@ -69,6 +69,15 @@ def test_local_state_rejects_current_folder_outside_git(
         create_local_state(AppConfig(data_dir=Path(".")), force=True)
 
 
+def test_init_rejects_config_directory_as_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="cannot be the local config directory"):
+        create_local_state(AppConfig(data_dir=Path(".hailmary")), force=True)
+
+
 def test_local_state_rejects_existing_shared_data_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

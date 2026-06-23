@@ -48,6 +48,8 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         "private placement memorandum",
         "subscription agreement",
         "subscription documents",
+        "stock purchase agreement",
+        "stock purchase agreements",
     ]
     legal_abbreviations = ["lpa", "ppm"]
     if file_type in {FileType.DOCX, FileType.PDF} and any(
@@ -71,7 +73,15 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
 
     if file_type in {FileType.XLSX, FileType.CSV} and any(
         _contains_phrase(word_haystack, marker)
-        for marker in ["model", "forecast", "financial", "revenue"]
+        for marker in [
+            "model",
+            "forecast",
+            "financial",
+            "financials",
+            "projection",
+            "projections",
+            "revenue",
+        ]
     ):
         return DocumentType.FINANCIAL_MODEL
 
@@ -173,11 +183,16 @@ def _filename_has_document_type_marker(filename_stem: str) -> bool:
         "private placement memorandum",
         "subscription agreement",
         "subscription documents",
+        "stock purchase agreement",
+        "stock purchase agreements",
         "lpa",
         "ppm",
         "model",
         "forecast",
         "financial",
+        "financials",
+        "projection",
+        "projections",
         "revenue",
         "customer reference",
         "customer references",

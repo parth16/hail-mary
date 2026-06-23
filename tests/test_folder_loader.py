@@ -81,6 +81,23 @@ def test_invalid_pdf_is_recorded_without_crashing(tmp_path: Path) -> None:
     assert document.notes is not None
 
 
+def test_confidentiality_marker_survives_watermark_cleanup(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "WatermarkCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Not for distribution\nNot for distribution\nNot for distribution\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    document = summary.deals[0].documents[0]
+    assert document.source.confidentiality_detected
+    assert document.pages
+    assert document.pages[0].clean_text == ""
+
+
 def test_duplicate_files_get_distinct_output_paths(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "DuplicateCo"

@@ -130,10 +130,15 @@ def test_classifies_customer_diligence_documents() -> None:
     )
 
 
-def test_series_financing_pdf_is_not_automatically_a_pitch_deck() -> None:
+def test_series_stock_purchase_agreement_is_legal_document() -> None:
     path = Path("Acme/Series Seed Preferred Stock Purchase Agreement.pdf")
 
-    assert classify_document(path) == DocumentType.UNKNOWN
+    assert classify_document(path) == DocumentType.LEGAL_DOCUMENT
+
+
+def test_classifies_financials_and_projection_spreadsheets() -> None:
+    assert classify_document(Path("Acme/Acme Financials.xlsx")) == DocumentType.FINANCIAL_MODEL
+    assert classify_document(Path("Acme/2026 projections.csv")) == DocumentType.FINANCIAL_MODEL
 
 
 def test_ignores_local_noise_paths() -> None:

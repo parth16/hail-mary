@@ -175,6 +175,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     config = _expand_config_paths(config)
     _ensure_investment_limits(config)
     _ensure_generated_path_not_current_or_root(config.data_dir, purpose="data directory")
+    _ensure_data_dir_not_config_dir(config)
     _ensure_dedicated_data_dir(config.data_dir)
     _ensure_generated_path_not_current_or_root(
         config.meridian_profile_dir, purpose="Meridian browser profile directory"
@@ -360,6 +361,14 @@ def _ensure_generated_path_not_current_or_root(path: Path, *, purpose: str) -> N
     if resolved_path.parent == resolved_path:
         raise ConfigError(
             f"The {purpose} cannot be the filesystem root. Choose a generated-data folder."
+        )
+
+
+def _ensure_data_dir_not_config_dir(config: AppConfig) -> None:
+    if _absolute_resolved_path(config.data_dir) == _absolute_resolved_path(config.config_dir):
+        raise ConfigError(
+            "The data directory cannot be the local config directory. "
+            "Choose a separate generated-data folder."
         )
 
 

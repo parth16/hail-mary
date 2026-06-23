@@ -98,6 +98,20 @@ def test_missing_text_file_is_recorded_without_crashing(tmp_path: Path) -> None:
     assert "Could not read the text file" in result.notes
 
 
+def test_raw_only_text_page_is_kept_after_watermark_cleanup(tmp_path: Path) -> None:
+    text_path = tmp_path / "watermark.txt"
+    text_path.write_text(
+        "Not for distribution\nNot for distribution\nNot for distribution\n",
+        encoding="utf-8",
+    )
+
+    result = extract_document(text_path)
+
+    assert result.pages
+    assert result.pages[0].clean_text == ""
+    assert "Not for distribution" in result.combined_raw_text
+
+
 def test_csv_extraction_records_table_text(tmp_path: Path) -> None:
     csv_path = tmp_path / "model.csv"
     csv_path.write_text("year,revenue\n2026,100\n", encoding="utf-8")
