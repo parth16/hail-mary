@@ -12,5 +12,9 @@ Rules for all future Codex runs:
 - Do not bypass authenticated access controls, CAPTCHA, 2FA, paywalls, or platform restrictions.
 - Do not upload confidential documents to third-party services except the explicitly configured LLM provider.
 - Use synthetic fixtures for committed tests. Do not commit real deal documents.
-- After the initial main push, use `codex/<short-description>` branches and draft PRs by default.
-- Run relevant tests and quality checks before committing code changes.
+- After the initial main push, use `codex/<short-description>` branches and open ready-for-review PRs. Do not share draft PRs with the operator.
+- Use plain English in all user-facing output. Avoid unnecessary jargon; explain any required technical, legal, or finance term the first time it appears.
+- Treat testing as a first-class requirement focused on logical and functional correctness. Add or update tests with the code, including success paths, edge cases, and failure modes.
+- Ship robust user-facing functionality. Handle invalid inputs deliberately, produce clear error messages, and surface missing or uncertain evidence instead of hiding it.
+- Self-review every code change before pushing. Check correctness, privacy, user-facing text, test coverage, and staged files.
+- Run relevant tests and quality checks before committing code changes, and state clearly if a check cannot run.
