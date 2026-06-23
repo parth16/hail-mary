@@ -310,7 +310,7 @@ def _extract_xlsx(path: Path) -> ExtractionResult:
                 _xlsx_sheet_text(workbook.read(sheet_name), shared_strings)
                 for sheet_name in sheet_names
             ]
-    except (OSError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+    except (OSError, RuntimeError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
         return ExtractionResult(
             pages=[],
             page_count=None,

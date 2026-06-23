@@ -42,6 +42,17 @@ def test_meridian_company_text_does_not_trigger_platform_page() -> None:
     assert document_type == DocumentType.PITCH_DECK
 
 
+def test_angellist_text_requires_page_marker_for_platform_page() -> None:
+    path = Path("Example/research.pdf")
+
+    document_type = classify_document(
+        path,
+        text_sample="The company may invest in go-to-market after AngelList outreach.",
+    )
+
+    assert document_type == DocumentType.UNKNOWN
+
+
 def test_classifies_legal_docx_from_content() -> None:
     path = Path("Example/closing.docx")
 
@@ -94,6 +105,17 @@ def test_images_are_recognized_but_not_supported_for_ingestion() -> None:
     assert ".png" not in SUPPORTED_SUFFIXES
     assert ".jpg" not in SUPPORTED_SUFFIXES
     assert ".jpeg" not in SUPPORTED_SUFFIXES
+
+
+def test_classifies_customer_diligence_documents() -> None:
+    assert (
+        classify_document(Path("Acme/customer-reference-notes.pdf"))
+        == DocumentType.CUSTOMER_DOCUMENT
+    )
+    assert (
+        classify_document(Path("Acme/contracts.docx"), text_sample="Customer contract")
+        == DocumentType.CUSTOMER_DOCUMENT
+    )
 
 
 def test_series_financing_pdf_is_not_automatically_a_pitch_deck() -> None:

@@ -265,6 +265,19 @@ def test_init_allows_existing_marked_meridian_profile_dir(
     assert stat.S_IMODE(profile_dir.stat().st_mode) == 0o700
 
 
+def test_init_rejects_meridian_profile_reserved_data_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    for profile_dir in [Path("local-data"), Path("local-data/raw")]:
+        with pytest.raises(ConfigError, match="Meridian browser profile directory cannot"):
+            create_local_state(
+                AppConfig(data_dir=Path("local-data"), meridian_profile_dir=profile_dir),
+                force=True,
+            )
+
+
 def test_max_check_above_allowed_tier_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

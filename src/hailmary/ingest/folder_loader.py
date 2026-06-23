@@ -36,6 +36,7 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
     if not root_path.is_dir():
         raise NotADirectoryError(f"This is not a folder: {root_path}")
 
+    allow_private_raw_root = _is_private_raw_root(root_path, config)
     run_started_at = datetime.now(UTC)
     deals_by_id: dict[str, IngestedDeal] = {}
     skipped_files: list[str] = []
@@ -50,7 +51,11 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
             continue
         if (
             is_ignored_path(relative_path)
-            or _is_generated_output_path(path, config)
+            or _is_generated_output_path(
+                path,
+                config,
+                allow_private_raw=allow_private_raw_root,
+            )
             or path.suffix.lower() not in SUPPORTED_SUFFIXES
         ):
             skipped_files.append(str(relative_path))
@@ -187,13 +192,23 @@ def _write_summary(summary: IngestionSummary) -> None:
     )
 
 
-def _is_generated_output_path(path: Path, config: AppConfig) -> bool:
+def _is_generated_output_path(
+    path: Path,
+    config: AppConfig,
+    *,
+    allow_private_raw: bool = False,
+) -> bool:
     resolved_path = path.resolve(strict=False)
     generated_roots = [
         config.data_dir,
+        config.data_dir / "processed",
+        config.data_dir / "reports",
+        config.data_dir / "browser-profiles",
         config.meridian_profile_dir,
     ]
     for generated_root in generated_roots:
+        if allow_private_raw and generated_root == config.data_dir:
+            continue
         resolved_root = (
             generated_root if generated_root.is_absolute() else Path.cwd() / generated_root
         ).resolve(strict=False)
@@ -203,6 +218,19 @@ def _is_generated_output_path(path: Path, config: AppConfig) -> bool:
         except ValueError:
             continue
     return False
+
+
+def _is_private_raw_root(root_path: Path, config: AppConfig) -> bool:
+    raw_root = (
+        config.data_dir / "raw"
+        if config.data_dir.is_absolute()
+        else Path.cwd() / config.data_dir / "raw"
+    ).resolve(strict=False)
+    try:
+        root_path.relative_to(raw_root)
+    except ValueError:
+        return False
+    return True
 
 
 def _ensure_private_directory(path: Path, *, private_root: Path) -> None:

@@ -134,3 +134,32 @@ def test_xlsx_extraction_records_table_text(tmp_path: Path) -> None:
 
     assert result.pages
     assert "Revenue | 100" in result.combined_text
+
+
+def test_xlsx_worksheet_read_failure_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    xlsx_path = tmp_path / "encrypted.xlsx"
+    xlsx_path.write_bytes(b"placeholder")
+
+    class BrokenWorkbook:
+        def __enter__(self) -> BrokenWorkbook:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def namelist(self) -> list[str]:
+            return ["xl/worksheets/sheet1.xml"]
+
+        def read(self, name: str) -> bytes:
+            raise RuntimeError(f"{name} is encrypted")
+
+    monkeypatch.setattr(zipfile, "ZipFile", lambda _: BrokenWorkbook())
+
+    result = extract_document(xlsx_path)
+
+    assert result.pages == []
+    assert result.extraction_quality == ExtractionQuality.LOW
+    assert result.notes is not None
+    assert "Could not read the XLSX file" in result.notes

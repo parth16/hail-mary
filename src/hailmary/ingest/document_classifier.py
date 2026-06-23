@@ -75,6 +75,22 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     ):
         return DocumentType.FINANCIAL_MODEL
 
+    if any(
+        _contains_phrase(word_haystack, marker)
+        for marker in [
+            "customer reference",
+            "customer references",
+            "customer call",
+            "customer calls",
+            "customer contract",
+            "customer contracts",
+            "customer diligence",
+            "case study",
+            "case studies",
+        ]
+    ):
+        return DocumentType.CUSTOMER_DOCUMENT
+
     if file_type == FileType.HTML:
         return DocumentType.WEB_PAGE
 
@@ -123,7 +139,13 @@ def _is_platform_deal_page(path: Path, text_sample: str, file_type: FileType) ->
     )
     has_platform_page_text = any(
         marker in text
-        for marker in ["invest", "investment opportunity", "deal page", "company profile"]
+        for marker in [
+            "investment opportunity",
+            "deal page",
+            "company profile",
+            "view deal",
+            "invest now",
+        ]
     )
     has_meridian_page_text = any(
         marker in text

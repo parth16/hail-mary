@@ -137,6 +137,21 @@ def test_configured_output_folder_inside_scan_root_is_skipped(tmp_path: Path) ->
     assert "generated-data/old-output.txt" in summary.skipped_files
 
 
+def test_private_raw_folder_can_be_ingested(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    raw_company = data_dir / "raw" / "RawCo"
+    raw_company.mkdir(parents=True)
+    (raw_company / "memo.txt").write_text("Memo about RawCo.", encoding="utf-8")
+    processed_folder = data_dir / "processed"
+    processed_folder.mkdir()
+    (processed_folder / "old-output.txt").write_text("Generated output.", encoding="utf-8")
+
+    summary = ingest_folder(data_dir / "raw", config=AppConfig(data_dir=data_dir))
+
+    assert summary.document_count == 1
+    assert summary.deals[0].company_name == "RawCo"
+
+
 def test_spreadsheets_are_recorded_with_extracted_text(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "SpreadsheetCo"

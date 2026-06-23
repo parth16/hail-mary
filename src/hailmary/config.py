@@ -163,6 +163,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     _ensure_generated_path_not_current_or_root(
         config.meridian_profile_dir, purpose="Meridian browser profile directory"
     )
+    _ensure_meridian_profile_not_reserved_data_path(config)
     _ensure_dedicated_meridian_profile_dir(config.meridian_profile_dir)
     _ensure_folder_path(config.data_dir)
     _ensure_folder_path(config.meridian_profile_dir)
@@ -307,6 +308,43 @@ def _ensure_dedicated_data_dir(path: Path) -> None:
             f"The data directory at {path} already contains other files. "
             "Choose a new generated-data folder or an existing Hail Mary data folder."
         )
+
+
+def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
+    data_dir = _absolute_resolved_path(config.data_dir)
+    profile_dir = _absolute_resolved_path(config.meridian_profile_dir)
+    reserved_paths = {
+        data_dir,
+        data_dir / "raw",
+        data_dir / "processed",
+        data_dir / "reports",
+    }
+    allowed_profile_root = data_dir / "browser-profiles"
+
+    for reserved_path in reserved_paths:
+        if profile_dir == reserved_path:
+            raise ConfigError(
+                "The Meridian browser profile directory cannot be the data, raw, "
+                "processed, or reports folder. Choose a separate generated-data folder."
+            )
+        try:
+            profile_dir.relative_to(reserved_path)
+        except ValueError:
+            continue
+        try:
+            profile_dir.relative_to(allowed_profile_root)
+        except ValueError:
+            pass
+        else:
+            continue
+        raise ConfigError(
+            "The Meridian browser profile directory cannot be inside a reserved Hail Mary "
+            "data folder. Choose a separate generated-data folder."
+        )
+
+
+def _absolute_resolved_path(path: Path) -> Path:
+    return (path if path.is_absolute() else Path.cwd() / path).resolve(strict=False)
 
 
 def _ensure_dedicated_meridian_profile_dir(path: Path) -> None:
