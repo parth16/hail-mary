@@ -47,14 +47,28 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         return DocumentType.PLATFORM_DEAL_PAGE
 
     legal_markers = [
+        "convertible note",
+        "convertible notes",
         "limited partnership agreement",
         "private placement memorandum",
+        "safe agreement",
+        "safe financing",
+        "simple agreement for future equity",
         "subscription agreement",
         "subscription documents",
         "stock purchase agreement",
         "stock purchase agreements",
     ]
-    legal_abbreviations = ["lpa", "ppm"]
+    legal_abbreviations = ["lpa", "ppm", "safe"]
+    if file_type == FileType.PDF and (
+        any(_contains_phrase(filename_word_haystack, marker) for marker in ["pitch", "deck"])
+        or any(
+            _contains_phrase(filename_word_haystack, marker)
+            for marker in ["investor overview", "series deck"]
+        )
+    ):
+        return DocumentType.PITCH_DECK
+
     if file_type in {FileType.DOCX, FileType.PDF} and any(
         _contains_phrase(word_haystack, marker) for marker in legal_markers
     ):
@@ -200,12 +214,18 @@ def _filename_has_document_type_marker(filename_stem: str) -> bool:
         "series deck",
         "limited partnership agreement",
         "private placement memorandum",
+        "safe agreement",
+        "safe financing",
+        "simple agreement for future equity",
         "subscription agreement",
         "subscription documents",
         "stock purchase agreement",
         "stock purchase agreements",
         "lpa",
         "ppm",
+        "safe",
+        "convertible note",
+        "convertible notes",
         "model",
         "forecast",
         "financial",

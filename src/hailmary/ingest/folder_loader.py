@@ -65,7 +65,7 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
             skipped_files.append(str(relative_path))
             continue
 
-        deal_name = _deal_name_for_path(relative_path)
+        deal_name = _deal_name_for_path(relative_path, root_path=root_path)
         candidate_files.append((path, deal_name))
 
     deal_ids_by_name = {
@@ -150,10 +150,10 @@ def _relative_display_path(path: Path, root_path: Path) -> str:
         return str(path)
 
 
-def _deal_name_for_path(relative_path: Path) -> str:
+def _deal_name_for_path(relative_path: Path, *, root_path: Path) -> str:
     if len(relative_path.parts) > 1:
         return relative_path.parts[0]
-    return relative_path.stem
+    return root_path.name
 
 
 def _deal_id_for_name(deal_name: str) -> str:
@@ -339,6 +339,8 @@ def _reject_output_symlink_escape(path: Path, *, resolved_root: Path) -> None:
 
 
 def _write_private_text(path: Path, text: str, *, description: str) -> None:
+    if path.is_symlink():
+        raise IngestionError(f"Could not write {description} at {path}: output file is a symlink.")
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         if hasattr(os, "O_NOFOLLOW"):

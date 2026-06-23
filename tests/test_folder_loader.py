@@ -113,6 +113,19 @@ def test_duplicate_files_get_distinct_output_paths(tmp_path: Path) -> None:
     assert all(path.exists() for path in output_paths)
 
 
+def test_direct_company_folder_scan_uses_root_folder_name(tmp_path: Path) -> None:
+    root = tmp_path / "Acme"
+    root.mkdir()
+    (root / "deck.pdf").write_text("not a real pdf", encoding="utf-8")
+    (root / "memo.txt").write_text("Memo about Acme.", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert summary.document_count == 2
+    assert len(summary.deals) == 1
+    assert summary.deals[0].company_name == "Acme"
+
+
 def test_top_level_deal_named_data_is_ingested(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "Data"
@@ -230,6 +243,25 @@ def test_output_directory_symlink_outside_data_dir_is_rejected(tmp_path: Path) -
 
     with pytest.raises(IngestionError, match="outside the private data directory"):
         ingest_folder(root, config=AppConfig(data_dir=data_dir))
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_final_summary_symlink_is_rejected_before_write(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "PrivateCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Memo about PrivateCo.", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    summary_dir = data_dir / "processed"
+    summary_dir.mkdir(parents=True)
+    outside_file = tmp_path / "outside-summary.json"
+    outside_file.write_text("do not overwrite", encoding="utf-8")
+    (summary_dir / "ingestion_summary.json").symlink_to(outside_file)
+
+    with pytest.raises(IngestionError, match="output file is a symlink"):
+        ingest_folder(root, config=AppConfig(data_dir=data_dir))
+
+    assert outside_file.read_text(encoding="utf-8") == "do not overwrite"
 
 
 def test_relative_data_dir_with_parent_segments_writes_outputs(
