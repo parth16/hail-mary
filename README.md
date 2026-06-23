@@ -32,6 +32,18 @@ The implementation prompt is in `hail-mary-codex-prompt.md`. It defines:
 - GitHub branch and PR workflow
 - optional future data-provider adapters
 
+## Current Commands
+
+This first build includes:
+
+```bash
+uv sync
+uv run hailmary init
+uv run hailmary ingest-folder ./pitch-decks
+```
+
+`init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts basic text when supported, and saves a JSON summary under `data/processed/`.
+
 ## GitHub Workflow
 
 The first safe build may be pushed directly to `main`.

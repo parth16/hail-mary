@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from pytest import MonkeyPatch
+from typer.testing import CliRunner
+
+from hailmary.cli import app
+
+runner = CliRunner()
+
+
+def test_init_creates_local_state(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "local-data"
+
+    result = runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "Created Hail Mary local folders" in result.output
+    assert (data_dir / "raw").is_dir()
+    assert (data_dir / "processed").is_dir()
+    assert (data_dir / "reports").is_dir()
+    assert (tmp_path / ".hailmary" / "config.yaml").is_file()
+
+
+def test_ingest_folder_command_writes_summary(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "pitch-decks" / "Acme"
+    source.mkdir(parents=True)
+    (source / "Acme memo.txt").write_text("Memo about Acme customer traction.", encoding="utf-8")
+    data_dir = tmp_path / "data"
+
+    result = runner.invoke(app, ["ingest-folder", str(source.parent), "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "Found 1 deal and 1 document" in result.output
+
+    summary_path = data_dir / "processed" / "ingestion_summary.json"
+    saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert saved_summary["deals"][0]["company_name"] == "Acme"
+
+
+def test_ingest_folder_missing_folder_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    missing_folder = tmp_path / "missing"
+
+    result = runner.invoke(app, ["ingest-folder", str(missing_folder)])
+
+    assert result.exit_code != 0
+    assert "The folder does not exist" in result.output
+    assert "Traceback" not in result.output

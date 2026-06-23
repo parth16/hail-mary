@@ -18,3 +18,10 @@ Rules for all future Codex runs:
 - Ship robust user-facing functionality. Handle invalid inputs deliberately, produce clear error messages, and surface missing or uncertain evidence instead of hiding it.
 - Self-review every code change before pushing. Check correctness, privacy, user-facing text, test coverage, and staged files.
 - Run relevant tests and quality checks before committing code changes, and state clearly if a check cannot run.
+
+## Review guidelines
+
+- Treat missing tests for user-facing behavior as a serious issue.
+- Treat unclear operator-facing errors as a serious issue.
+- Treat accidental staging of raw deal materials, generated reports, secrets, or local state as a blocking issue.
+- Check that claims about investment evidence remain source-linked or explicitly marked as uncertain.

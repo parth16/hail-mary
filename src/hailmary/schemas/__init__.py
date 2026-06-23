@@ -1,0 +1,1 @@
+"""Typed Hail Mary schemas."""
