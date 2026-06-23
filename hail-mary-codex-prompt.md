@@ -771,7 +771,7 @@ The first safe build may be pushed directly to `main`.
 After the first push:
 
 - create branches named `codex/<short-description>`
-- open draft PRs by default
+- open PRs as ready for review, not drafts
 - include summary, validation commands, privacy notes, and known limitations in every PR body
 - self-review every change before pushing; fix obvious correctness, safety, clarity, and test gaps before opening a PR
 - wait for GitHub/Codex review before merging unless explicitly instructed otherwise

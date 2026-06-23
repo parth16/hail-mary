@@ -39,7 +39,7 @@ The first safe build may be pushed directly to `main`.
 After the first push:
 
 - create branches named `codex/<short-description>`
-- open draft PRs by default
+- open PRs as ready for review, not drafts
 - self-review changes before pushing
 - include validation commands, test results, privacy notes, and known limitations in PR bodies
 - never stage raw investment docs or generated confidential output
