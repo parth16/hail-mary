@@ -55,6 +55,18 @@ def test_local_state_rejects_current_folder_outside_git(
         create_local_state(AppConfig(data_dir=Path(".")), force=True)
 
 
+def test_local_state_rejects_existing_shared_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    (shared_dir / "other-file.txt").write_text("not Hail Mary state", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="already contains other files"):
+        create_local_state(AppConfig(data_dir=shared_dir), force=True)
+
+
 def test_git_exclude_patterns_are_escaped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -70,6 +82,17 @@ def test_git_exclude_patterns_are_escaped(
     exclude_text = exclude_path.read_text(encoding="utf-8")
     assert "\\#data/" in exclude_text
     assert "\\!data/" in exclude_text
+
+
+def test_git_exclude_read_error_has_clear_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    exclude_path = tmp_path / ".git" / "info" / "exclude"
+    exclude_path.mkdir(parents=True)
+
+    with pytest.raises(ConfigError, match="Could not read local Git exclude file"):
+        create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
 
 
 def test_init_uses_git_exclude_path_in_worktrees(

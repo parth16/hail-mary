@@ -148,6 +148,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     """Create local folders used for generated output."""
 
     _ensure_generated_path_not_current_or_root(config.data_dir, purpose="data directory")
+    _ensure_dedicated_data_dir(config.data_dir)
     _ensure_generated_path_not_current_or_root(
         config.meridian_profile_dir, purpose="Meridian browser profile directory"
     )
@@ -239,6 +240,24 @@ def _ensure_generated_path_not_current_or_root(path: Path, *, purpose: str) -> N
         )
 
 
+def _ensure_dedicated_data_dir(path: Path) -> None:
+    if path.is_symlink():
+        raise ConfigError("The data directory cannot be a symlink. Choose a real folder.")
+    if not path.exists() or not path.is_dir():
+        return
+
+    allowed_entries = {"raw", "processed", "reports", "browser-profiles"}
+    try:
+        unknown_entries = {child.name for child in path.iterdir()} - allowed_entries
+    except OSError as exc:
+        raise ConfigError(f"Could not inspect data directory at {path}: {exc}") from exc
+    if unknown_entries:
+        raise ConfigError(
+            f"The data directory at {path} already contains other files. "
+            "Choose a new generated-data folder or an existing Hail Mary data folder."
+        )
+
+
 def _ensure_repo_local_path_ignored(path: Path, *, purpose: str) -> None:
     git_root = _find_git_root(Path.cwd())
     if git_root is None:
@@ -297,17 +316,30 @@ def _append_local_git_exclude(git_root: Path, pattern: str) -> None:
         return
 
     escaped_pattern = _escape_git_exclude_pattern(pattern)
-    exclude_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    try:
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    except OSError as exc:
+        raise ConfigError(
+            f"Could not read local Git exclude file at {exclude_path}: {exc}"
+        ) from exc
+
     existing_patterns = {line.strip() for line in existing.splitlines()}
     if escaped_pattern in existing_patterns:
         return
 
     newline = "" if existing.endswith("\n") or not existing else "\n"
-    exclude_path.write_text(f"{existing}{newline}{escaped_pattern}\n", encoding="utf-8")
+    try:
+        exclude_path.write_text(f"{existing}{newline}{escaped_pattern}\n", encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(
+            f"Could not update local Git exclude file at {exclude_path}: {exc}"
+        ) from exc
 
 
 def _ensure_folder_path(path: Path) -> None:
+    if path.is_symlink():
+        raise ConfigError(f"Hail Mary needs {path} to be a real folder, not a symlink.")
     if path.exists() and not path.is_dir():
         raise ConfigError(f"Hail Mary needs {path} to be a folder, but it is a file.")
 

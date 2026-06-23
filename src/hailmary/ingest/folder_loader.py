@@ -213,19 +213,23 @@ def _is_generated_output_path(path: Path, config: AppConfig) -> bool:
 
 
 def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
+    resolved_root = (
+        private_root if private_root.is_absolute() else Path.cwd() / private_root
+    ).resolve(strict=False)
+    _reject_output_symlink_escape(path, resolved_root=resolved_root)
+
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise IngestionError(f"Could not create private output folder at {path}: {exc}") from exc
 
     resolved_path = path.resolve(strict=False)
-    resolved_root = (
-        private_root if private_root.is_absolute() else Path.cwd() / private_root
-    ).resolve(strict=False)
     try:
         relative_parts = resolved_path.relative_to(resolved_root).parts
     except ValueError:
-        relative_parts = ()
+        raise IngestionError(
+            f"Output folder {path} resolves outside the private data directory."
+        ) from None
 
     directories = [resolved_root]
     current = resolved_root
@@ -240,6 +244,33 @@ def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
             raise IngestionError(
                 f"Could not make private output folder at {directory}: {exc}"
             ) from exc
+
+
+def _reject_output_symlink_escape(path: Path, *, resolved_root: Path) -> None:
+    absolute_path = path if path.is_absolute() else Path.cwd() / path
+    try:
+        relative_parts = absolute_path.relative_to(resolved_root).parts
+    except ValueError:
+        raise IngestionError(
+            f"Output folder {path} is outside the private data directory."
+        ) from None
+
+    current = resolved_root
+    if current.is_symlink():
+        raise IngestionError(
+            f"Output folder {path} uses a symlinked private data directory."
+        )
+
+    for part in relative_parts:
+        current = current / part
+        if not current.is_symlink():
+            continue
+        try:
+            current.resolve(strict=True).relative_to(resolved_root)
+        except ValueError:
+            raise IngestionError(
+                f"Output folder {path} resolves outside the private data directory."
+            ) from None
 
 
 def _write_private_text(path: Path, text: str, *, description: str) -> None:

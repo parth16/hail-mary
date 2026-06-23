@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from hailmary.schemas.documents import DocumentType, FileType
@@ -19,7 +20,7 @@ FILE_TYPE_BY_SUFFIX: dict[str, FileType] = {
 }
 
 
-SUPPORTED_SUFFIXES = {".pdf", ".docx", ".html", ".htm", ".txt", ".md"}
+SUPPORTED_SUFFIXES = set(FILE_TYPE_BY_SUFFIX)
 
 
 def classify_file_type(path: Path) -> FileType:
@@ -32,6 +33,7 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     file_type = classify_file_type(path)
     haystack = f"{path.as_posix()} {text_sample}".lower()
     normalized_haystack = haystack.replace("_", " ").replace("-", " ")
+    word_haystack = _word_haystack(path, text_sample)
 
     if _is_platform_deal_page(path, text_sample, file_type):
         return DocumentType.PLATFORM_DEAL_PAGE
@@ -41,22 +43,26 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         "private placement memorandum",
         "subscription agreement",
         "subscription documents",
-        " lpa",
-        " ppm",
     ]
-    if file_type in {FileType.DOCX, FileType.PDF} and any(
-        marker in normalized_haystack for marker in legal_markers
+    legal_abbreviations = ["lpa", "ppm"]
+    if file_type in {FileType.DOCX, FileType.PDF} and (
+        any(marker in normalized_haystack for marker in legal_markers)
+        or any(_contains_phrase(word_haystack, marker) for marker in legal_abbreviations)
     ):
         return DocumentType.LEGAL_DOCUMENT
 
     if file_type in {FileType.XLSX, FileType.CSV} and any(
-        marker in normalized_haystack for marker in ["model", "forecast", "financial", "revenue"]
+        _contains_phrase(word_haystack, marker)
+        for marker in ["model", "forecast", "financial", "revenue"]
     ):
         return DocumentType.FINANCIAL_MODEL
 
-    if file_type == FileType.PDF and any(
-        marker in normalized_haystack
-        for marker in ["pitch", "deck", "investor overview", "series deck"]
+    if file_type == FileType.PDF and (
+        any(_contains_phrase(word_haystack, marker) for marker in ["pitch", "deck"])
+        or any(
+            _contains_phrase(word_haystack, marker)
+            for marker in ["investor overview", "series deck"]
+        )
     ):
         return DocumentType.PITCH_DECK
 
@@ -69,6 +75,15 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         return DocumentType.MEMO
 
     return DocumentType.UNKNOWN
+
+
+def _word_haystack(path: Path, text_sample: str) -> str:
+    return f" {re.sub(r'[^a-z0-9]+', ' ', f'{path.as_posix()} {text_sample}'.lower()).strip()} "
+
+
+def _contains_phrase(word_haystack: str, phrase: str) -> bool:
+    phrase_words = re.sub(r"[^a-z0-9]+", " ", phrase.lower()).strip()
+    return f" {phrase_words} " in word_haystack
 
 
 def _is_platform_deal_page(path: Path, text_sample: str, file_type: FileType) -> bool:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ from docx import Document
 
 from hailmary.config import AppConfig
 from hailmary.ingest import folder_loader
-from hailmary.ingest.folder_loader import ingest_folder
+from hailmary.ingest.folder_loader import IngestionError, ingest_folder
 from hailmary.schemas.documents import DocumentType, ExtractionQuality, FileType
 
 
@@ -127,17 +128,53 @@ def test_configured_output_folder_inside_scan_root_is_skipped(tmp_path: Path) ->
     assert "generated-data/old-output.txt" in summary.skipped_files
 
 
-def test_spreadsheets_are_skipped_until_extraction_exists(tmp_path: Path) -> None:
+def test_spreadsheets_are_recorded_with_extracted_text(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "SpreadsheetCo"
     company.mkdir(parents=True)
-    (company / "model.xlsx").write_text("not extracted yet", encoding="utf-8")
     (company / "revenue.csv").write_text("year,revenue\n2026,100\n", encoding="utf-8")
+    with zipfile.ZipFile(company / "model.xlsx", "w") as workbook:
+        workbook.writestr(
+            "xl/sharedStrings.xml",
+            """
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <si><t>ARR</t></si>
+            </sst>
+            """,
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row><c t="s"><v>0</v></c><c><v>250</v></c></row>
+              </sheetData>
+            </worksheet>
+            """,
+        )
 
     summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
 
-    assert summary.document_count == 0
-    assert summary.skipped_files == ["SpreadsheetCo/model.xlsx", "SpreadsheetCo/revenue.csv"]
+    assert summary.document_count == 2
+    file_types = {doc.source.file_type for doc in summary.deals[0].documents}
+    assert file_types == {FileType.CSV, FileType.XLSX}
+    assert all(doc.pages for doc in summary.deals[0].documents)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_output_directory_symlink_outside_data_dir_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "PrivateCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Memo about PrivateCo.", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    outside_dir = tmp_path / "outside"
+    data_dir.mkdir()
+    outside_dir.mkdir()
+    (data_dir / "processed").symlink_to(outside_dir, target_is_directory=True)
+
+    with pytest.raises(IngestionError, match="resolves outside the private data directory"):
+        ingest_folder(root, config=AppConfig(data_dir=data_dir))
 
 
 def test_generated_outputs_are_owner_only(tmp_path: Path) -> None:

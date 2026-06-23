@@ -57,10 +57,20 @@ def test_classifies_legal_pdf_from_content() -> None:
     assert document_type == DocumentType.LEGAL_DOCUMENT
 
 
+def test_classifies_standalone_legal_abbreviations_from_filename() -> None:
+    assert classify_document(Path("Example/PPM.pdf")) == DocumentType.LEGAL_DOCUMENT
+    assert classify_document(Path("Example/LPA.docx")) == DocumentType.LEGAL_DOCUMENT
+
+
 def test_classifies_pitch_deck_from_investor_overview_name() -> None:
     path = Path("Wild West/Wild_West_Systems_Investor_Overview_June26.pdf")
 
     assert classify_document(path) == DocumentType.PITCH_DECK
+
+
+def test_pitch_deck_markers_must_be_words() -> None:
+    assert classify_document(Path("PitchBook/terms.pdf")) == DocumentType.UNKNOWN
+    assert classify_document(Path("Deckard/customer.pdf")) == DocumentType.UNKNOWN
 
 
 def test_series_financing_pdf_is_not_automatically_a_pitch_deck() -> None:
