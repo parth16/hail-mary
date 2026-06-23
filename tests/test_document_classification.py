@@ -130,6 +130,11 @@ def test_classifies_customer_diligence_documents() -> None:
     )
 
 
+def test_classifies_pdf_and_docx_investment_memos() -> None:
+    assert classify_document(Path("Acme/Investment Memo.pdf")) == DocumentType.MEMO
+    assert classify_document(Path("Acme/Investment Committee Memorandum.docx")) == DocumentType.MEMO
+
+
 def test_series_stock_purchase_agreement_is_legal_document() -> None:
     path = Path("Acme/Series Seed Preferred Stock Purchase Agreement.pdf")
 

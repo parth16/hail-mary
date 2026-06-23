@@ -119,6 +119,7 @@ def _extract_pdf(path: Path) -> ExtractionResult:
         pages=pages,
         page_count=page_count,
         extraction_quality=_quality_from_pages(pages),
+        notes=_page_failure_notes(pages),
     )
 
 
@@ -198,6 +199,13 @@ def _table_text(tables: Iterable[Any]) -> list[str]:
             if cells:
                 table_text.append(" | ".join(cells))
     return table_text
+
+
+def _page_failure_notes(pages: list[ExtractedPage]) -> str | None:
+    page_notes = [page.notes for page in pages if page.notes]
+    if not page_notes:
+        return None
+    return " ".join(page_notes)
 
 
 def _extract_text_file(path: Path) -> ExtractionResult:

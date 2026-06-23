@@ -181,6 +181,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config.meridian_profile_dir, purpose="Meridian browser profile directory"
     )
     _ensure_meridian_profile_not_reserved_data_path(config)
+    _ensure_meridian_profile_not_config_path(config)
     _ensure_dedicated_meridian_profile_dir(config.meridian_profile_dir)
     _ensure_folder_path(config.data_dir)
     _ensure_folder_path(config.meridian_profile_dir)
@@ -431,6 +432,32 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
             "The Meridian browser profile directory cannot be inside a reserved Hail Mary "
             "data folder. Choose a separate generated-data folder."
         )
+
+
+def _ensure_meridian_profile_not_config_path(config: AppConfig) -> None:
+    profile_dir = _absolute_resolved_path(config.meridian_profile_dir)
+    config_dir = _absolute_resolved_path(config.config_dir)
+    if _paths_overlap(profile_dir, config_dir):
+        raise ConfigError(
+            "The Meridian browser profile directory cannot overlap the local config directory. "
+            "Choose a separate generated-data folder."
+        )
+
+
+def _paths_overlap(first_path: Path, second_path: Path) -> bool:
+    if first_path == second_path:
+        return True
+    try:
+        first_path.relative_to(second_path)
+    except ValueError:
+        pass
+    else:
+        return True
+    try:
+        second_path.relative_to(first_path)
+    except ValueError:
+        return False
+    return True
 
 
 def _absolute_resolved_path(path: Path) -> Path:

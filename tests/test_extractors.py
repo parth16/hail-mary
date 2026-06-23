@@ -52,6 +52,33 @@ def test_pdf_page_access_failure_is_recorded(
     assert "Could not read pages" in result.notes
 
 
+def test_pdf_page_extraction_failure_is_recorded_on_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "partial.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class BrokenPage:
+        def extract_text(self) -> str:
+            raise RuntimeError("page text is unavailable")
+
+    class GoodPage:
+        def extract_text(self) -> str:
+            return "Customer traction is strong."
+
+    class PartialReader:
+        pages = [BrokenPage(), GoodPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: PartialReader())
+
+    result = extract_document(pdf_path)
+
+    assert result.pages[0].notes is not None
+    assert "Could not extract text from page 1" in result.pages[0].notes
+    assert result.notes is not None
+    assert "Could not extract text from page 1" in result.notes
+
+
 def test_pdf_quality_is_capped_when_most_pages_need_ocr() -> None:
     pages = [
         ExtractedPage(

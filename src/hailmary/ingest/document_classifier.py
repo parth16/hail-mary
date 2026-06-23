@@ -101,6 +101,18 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     ):
         return DocumentType.CUSTOMER_DOCUMENT
 
+    if file_type in {FileType.DOCX, FileType.PDF} and any(
+        _contains_phrase(word_haystack, marker)
+        for marker in [
+            "investment memo",
+            "investment memorandum",
+            "investment committee memo",
+            "investment committee memorandum",
+            "diligence memo",
+        ]
+    ):
+        return DocumentType.MEMO
+
     if file_type == FileType.HTML:
         return DocumentType.WEB_PAGE
 
@@ -204,6 +216,11 @@ def _filename_has_document_type_marker(filename_stem: str) -> bool:
         "case study",
         "case studies",
         "memo",
+        "investment memo",
+        "investment memorandum",
+        "investment committee memo",
+        "investment committee memorandum",
+        "diligence memo",
         "note",
         "diligence",
     ]

@@ -506,6 +506,19 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
             )
 
 
+def test_init_rejects_meridian_profile_config_path_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    for profile_dir in [Path(".hailmary"), Path(".hailmary/profile")]:
+        with pytest.raises(ConfigError, match="cannot overlap the local config directory"):
+            create_local_state(
+                AppConfig(data_dir=Path("local-data"), meridian_profile_dir=profile_dir),
+                force=True,
+            )
+
+
 def test_init_rejects_meridian_profile_that_contains_data_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
