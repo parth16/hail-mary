@@ -36,9 +36,12 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
     skipped_files: list[str] = []
 
     for path in sorted(root_path.rglob("*")):
+        relative_path = path.relative_to(root_path)
+        if path.is_symlink():
+            skipped_files.append(str(relative_path))
+            continue
         if not path.is_file():
             continue
-        relative_path = path.relative_to(root_path)
         if is_ignored_path(relative_path) or path.suffix.lower() not in SUPPORTED_SUFFIXES:
             skipped_files.append(str(relative_path))
             continue
@@ -88,11 +91,13 @@ def _build_document(
 ) -> SourceDocument:
     sha256 = _sha256(path)
     text_sample = extraction.combined_text[:4_000]
+    raw_text_sample = extraction.combined_raw_text[:20_000]
     relative_path = path.relative_to(root_path)
     title = path.stem.strip()
+    path_digest = hashlib.sha256(relative_path.as_posix().encode("utf-8")).hexdigest()[:8]
 
     return SourceDocument(
-        id=f"doc_{sha256[:12]}",
+        id=f"doc_{sha256[:12]}_{path_digest}",
         deal_id=deal_id,
         path=relative_path,
         source_url=None,
@@ -106,7 +111,7 @@ def _build_document(
         retrieved_at=None,
         page_count=extraction.page_count,
         sha256=sha256,
-        confidentiality_detected=_has_confidentiality_marker(text_sample),
+        confidentiality_detected=_has_confidentiality_marker(raw_text_sample),
         extraction_quality=extraction.extraction_quality,
         notes=extraction.notes,
     )

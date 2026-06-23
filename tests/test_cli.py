@@ -53,3 +53,17 @@ def test_ingest_folder_missing_folder_has_plain_english_error(
     assert result.exit_code != 0
     assert "The folder does not exist" in result.output
     assert "Traceback" not in result.output
+
+
+def test_invalid_boolean_env_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "treu")
+
+    result = runner.invoke(app, ["init", "--data-dir", str(tmp_path / "data")])
+
+    assert result.exit_code != 0
+    assert "must be true or false" in result.output
+    assert "privacy settings should fail closed" in result.output
+    assert "Traceback" not in result.output

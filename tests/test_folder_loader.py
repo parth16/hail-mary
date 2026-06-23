@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import pytest
 from docx import Document
 
 from hailmary.config import AppConfig
@@ -64,3 +66,56 @@ def test_invalid_pdf_is_recorded_without_crashing(tmp_path: Path) -> None:
     assert document.document_type == DocumentType.PLATFORM_DEAL_PAGE
     assert document.extraction_quality == ExtractionQuality.LOW
     assert document.notes is not None
+
+
+def test_duplicate_files_get_distinct_output_paths(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "DuplicateCo"
+    company.mkdir(parents=True)
+    (company / "one.txt").write_text("Same diligence note.", encoding="utf-8")
+    (company / "two.txt").write_text("Same diligence note.", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+    output_paths = [doc.output_path for doc in summary.deals[0].documents]
+
+    assert len(output_paths) == 2
+    assert len(set(output_paths)) == 2
+    assert all(path.exists() for path in output_paths)
+
+
+def test_confidentiality_detection_uses_raw_text_before_cleanup(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "ConfidentialCo"
+    company.mkdir(parents=True)
+    (company / "ConfidentialCo memo.txt").write_text(
+        "\n".join(
+            [
+                "Confidential: Parth Shah",
+                "Business details.",
+                "Confidential: Parth Shah",
+                "More business details.",
+                "Confidential: Parth Shah",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    source = summary.deals[0].documents[0].source
+    assert source.confidentiality_detected is True
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_symlinked_files_are_skipped(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "SymlinkCo"
+    company.mkdir(parents=True)
+    outside_file = tmp_path / "outside-secret.txt"
+    outside_file.write_text("This should not be read.", encoding="utf-8")
+    (company / "deck.txt").symlink_to(outside_file)
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert summary.document_count == 0
+    assert summary.skipped_files == ["SymlinkCo/deck.txt"]

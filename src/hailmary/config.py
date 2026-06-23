@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+
+class ConfigError(ValueError):
+    """Configuration could not be used safely."""
 
 
 class AppConfig(BaseModel):
@@ -37,7 +42,26 @@ def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return _parse_bool(value, source=name)
+
+
+def _config_bool(values: dict[str, str], name: str, default: bool) -> bool:
+    value = values.get(name)
+    if value is None:
+        return default
+    return _parse_bool(value, source=f".hailmary/config.yaml field {name}")
+
+
+def _parse_bool(value: str, *, source: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(
+        f"{source} must be true or false. Got {value!r}. "
+        "Hail Mary did not guess because privacy settings should fail closed."
+    )
 
 
 def _env_int(name: str, default: int) -> int:
@@ -50,25 +74,47 @@ def _env_int(name: str, default: int) -> int:
 def load_config(data_dir: Path | None = None) -> AppConfig:
     """Load config from environment variables and command options."""
 
-    resolved_data_dir = data_dir or Path(os.getenv("HAILMARY_DATA_DIR", "./data"))
-    local_only = _env_bool("HAILMARY_LOCAL_ONLY", True)
+    saved_values = _read_local_config(AppConfig().config_path)
+    resolved_data_dir = data_dir or Path(
+        os.getenv("HAILMARY_DATA_DIR") or saved_values.get("data_dir", "./data")
+    )
+    local_only = (
+        _env_bool("HAILMARY_LOCAL_ONLY", True)
+        if "HAILMARY_LOCAL_ONLY" in os.environ
+        else _config_bool(saved_values, "local_only", True)
+    )
 
     return AppConfig(
         data_dir=resolved_data_dir,
         local_only=local_only,
-        log_level=os.getenv("HAILMARY_LOG_LEVEL", "INFO"),
-        capital_budget=_env_int("HAILMARY_CAPITAL_BUDGET", 100_000),
-        min_check=_env_int("HAILMARY_MIN_CHECK", 1_000),
-        max_check=_env_int("HAILMARY_MAX_CHECK", 10_000),
-        meridian_profile_dir=Path(
-            os.getenv("HAILMARY_MERIDIAN_PROFILE_DIR", "./data/browser-profiles/meridian")
+        log_level=os.getenv("HAILMARY_LOG_LEVEL", saved_values.get("log_level", "INFO")),
+        capital_budget=_env_int(
+            "HAILMARY_CAPITAL_BUDGET", int(saved_values.get("capital_budget", "100000"))
         ),
-        enable_web_research=_env_bool("HAILMARY_ENABLE_WEB_RESEARCH", False),
+        min_check=_env_int("HAILMARY_MIN_CHECK", int(saved_values.get("min_check", "1000"))),
+        max_check=_env_int("HAILMARY_MAX_CHECK", int(saved_values.get("max_check", "10000"))),
+        meridian_profile_dir=Path(
+            os.getenv(
+                "HAILMARY_MERIDIAN_PROFILE_DIR",
+                saved_values.get("meridian_profile_dir", "./data/browser-profiles/meridian"),
+            )
+        ),
+        enable_web_research=(
+            _env_bool("HAILMARY_ENABLE_WEB_RESEARCH", False)
+            if "HAILMARY_ENABLE_WEB_RESEARCH" in os.environ
+            else _config_bool(saved_values, "enable_web_research", False)
+        ),
     )
 
 
 def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     """Create local folders used for generated output."""
+
+    _ensure_repo_local_path_ignored(config.data_dir, purpose="data directory")
+    _ensure_repo_local_path_ignored(config.config_dir, purpose="local config directory")
+    _ensure_repo_local_path_ignored(
+        config.meridian_profile_dir, purpose="Meridian browser profile directory"
+    )
 
     folders = [
         config.data_dir,
@@ -90,6 +136,82 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config_path=config.config_path,
         config_created=config_created,
     )
+
+
+def _read_local_config(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def _ensure_repo_local_path_ignored(path: Path, *, purpose: str) -> None:
+    git_root = _find_git_root(Path.cwd())
+    if git_root is None:
+        return
+
+    resolved_path = path if path.is_absolute() else Path.cwd() / path
+    resolved_path = resolved_path.resolve(strict=False)
+    try:
+        relative_path = resolved_path.relative_to(git_root)
+    except ValueError:
+        return
+
+    if relative_path == Path("."):
+        raise ConfigError(
+            f"The {purpose} cannot be the repository root. Choose a generated-data folder."
+        )
+
+    relative_text = relative_path.as_posix().rstrip("/")
+    if _path_has_tracked_files(git_root, relative_text):
+        raise ConfigError(
+            f"The {purpose} overlaps tracked project files at {relative_text}. "
+            "Choose a separate generated-data folder."
+        )
+
+    _append_local_git_exclude(git_root, f"{relative_text}/")
+
+
+def _find_git_root(start: Path) -> Path | None:
+    current = start.resolve(strict=False)
+    for candidate in [current, *current.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _path_has_tracked_files(git_root: Path, relative_text: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(git_root), "ls-files", "--", relative_text],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return bool(result.stdout.strip())
+
+
+def _append_local_git_exclude(git_root: Path, pattern: str) -> None:
+    exclude_path = git_root / ".git" / "info" / "exclude"
+    if not exclude_path.parent.exists():
+        return
+
+    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    existing_patterns = {line.strip() for line in existing.splitlines()}
+    if pattern in existing_patterns:
+        return
+
+    newline = "" if existing.endswith("\n") or not existing else "\n"
+    exclude_path.write_text(f"{existing}{newline}{pattern}\n", encoding="utf-8")
 
 
 def _default_config_text(config: AppConfig) -> str:

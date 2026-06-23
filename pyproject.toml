@@ -5,6 +5,7 @@ description = "Local-first private startup diligence tooling"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.12",
     "pydantic>=2.8",
     "python-docx>=1.1",
     "pypdf>=5.0",

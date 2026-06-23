@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 from docx import Document
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -21,6 +22,10 @@ class ExtractionResult(BaseModel):
     def combined_text(self) -> str:
         return "\n\n".join(page.clean_text for page in self.pages if page.clean_text)
 
+    @property
+    def combined_raw_text(self) -> str:
+        return "\n\n".join(page.raw_text for page in self.pages if page.raw_text)
+
 
 def extract_document(path: Path) -> ExtractionResult:
     file_type = classify_file_type(path)
@@ -29,7 +34,9 @@ def extract_document(path: Path) -> ExtractionResult:
         return _extract_pdf(path)
     if file_type == FileType.DOCX:
         return _extract_docx(path)
-    if file_type in {FileType.TXT, FileType.MD, FileType.HTML}:
+    if file_type == FileType.HTML:
+        return _extract_html(path)
+    if file_type in {FileType.TXT, FileType.MD}:
         return _extract_text_file(path)
 
     return ExtractionResult(
@@ -64,19 +71,31 @@ def _extract_pdf(path: Path) -> ExtractionResult:
             notes=f"Could not read the PDF: {exc}",
         )
 
+    try:
+        pages_proxy = reader.pages
+        page_count = len(pages_proxy)
+    except Exception as exc:
+        return ExtractionResult(
+            pages=[],
+            page_count=None,
+            extraction_quality=ExtractionQuality.LOW,
+            notes=f"Could not read pages from the PDF: {exc}",
+        )
+
     pages: list[ExtractedPage] = []
-    for index, page in enumerate(reader.pages, start=1):
+    for index in range(page_count):
         try:
+            page = pages_proxy[index]
             raw_text = page.extract_text() or ""
             notes = None
         except Exception as exc:
             raw_text = ""
-            notes = f"Could not extract text from page {index}: {exc}"
+            notes = f"Could not extract text from page {index + 1}: {exc}"
 
         clean_text = clean_extracted_text(raw_text)
         pages.append(
             ExtractedPage(
-                page_number=index,
+                page_number=index + 1,
                 raw_text=raw_text,
                 clean_text=clean_text,
                 word_count=len(clean_text.split()),
@@ -87,7 +106,7 @@ def _extract_pdf(path: Path) -> ExtractionResult:
 
     return ExtractionResult(
         pages=pages,
-        page_count=len(reader.pages),
+        page_count=page_count,
         extraction_quality=_quality_from_pages(pages),
     )
 
@@ -139,6 +158,37 @@ def _extract_text_file(path: Path) -> ExtractionResult:
         raw_text = path.read_text(encoding="utf-8", errors="replace")
         notes = "Some characters could not be read and were replaced."
 
+    clean_text = clean_extracted_text(raw_text)
+    page = ExtractedPage(
+        page_number=None,
+        raw_text=raw_text,
+        clean_text=clean_text,
+        word_count=len(clean_text.split()),
+        needs_ocr=False,
+        notes=notes,
+    )
+
+    return ExtractionResult(
+        pages=[page] if clean_text else [],
+        page_count=1,
+        extraction_quality=_quality_from_pages([page] if clean_text else []),
+        notes=notes,
+    )
+
+
+def _extract_html(path: Path) -> ExtractionResult:
+    try:
+        html = path.read_text(encoding="utf-8")
+        notes = None
+    except UnicodeDecodeError:
+        html = path.read_text(encoding="utf-8", errors="replace")
+        notes = "Some characters could not be read and were replaced."
+
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup(["script", "style", "noscript"]):
+        element.decompose()
+
+    raw_text = soup.get_text(separator="\n")
     clean_text = clean_extracted_text(raw_text)
     page = ExtractedPage(
         page_number=None,

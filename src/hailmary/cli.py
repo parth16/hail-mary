@@ -6,7 +6,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from hailmary.config import AppConfig, create_local_state, load_config
+from hailmary.config import AppConfig, ConfigError, create_local_state, load_config
 from hailmary.ingest.folder_loader import ingest_folder as ingest_folder_path
 
 app = typer.Typer(
@@ -17,7 +17,11 @@ console = Console()
 
 
 def _config_from_options(data_dir: Path | None) -> AppConfig:
-    return load_config(data_dir=data_dir)
+    try:
+        return load_config(data_dir=data_dir)
+    except ConfigError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
 
 
 @app.command("init")

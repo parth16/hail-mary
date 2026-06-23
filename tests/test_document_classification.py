@@ -25,6 +25,14 @@ def test_classifies_legal_docx_from_content() -> None:
     assert document_type == DocumentType.LEGAL_DOCUMENT
 
 
+def test_classifies_legal_pdf_from_content() -> None:
+    path = Path("Example/closing.pdf")
+
+    document_type = classify_document(path, text_sample="PRIVATE PLACEMENT MEMORANDUM")
+
+    assert document_type == DocumentType.LEGAL_DOCUMENT
+
+
 def test_classifies_pitch_deck_from_investor_overview_name() -> None:
     path = Path("Wild West/Wild_West_Systems_Investor_Overview_June26.pdf")
 

@@ -46,7 +46,7 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         " lpa",
         " ppm",
     ]
-    if file_type == FileType.DOCX and any(
+    if file_type in {FileType.DOCX, FileType.PDF} and any(
         marker in normalized_haystack for marker in legal_markers
     ):
         return DocumentType.LEGAL_DOCUMENT
