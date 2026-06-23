@@ -174,9 +174,9 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         except OSError as exc:
             raise ConfigError(f"Could not create folder at {folder}: {exc}") from exc
 
+    _ensure_config_file_path(config.config_path)
     config_created = force or not config.config_path.exists()
     if config_created:
-        _ensure_config_file_path(config.config_path)
         try:
             config.config_path.write_text(_default_config_text(config), encoding="utf-8")
             config.config_path.chmod(0o600)
@@ -205,6 +205,8 @@ def _meridian_profile_dir(data_dir: Path, saved_values: dict[str, str]) -> Path:
 
 
 def _read_local_config(path: Path) -> dict[str, str]:
+    if path.is_symlink():
+        raise ConfigError(f"Hail Mary needs {path} to be a real file, not a symlink.")
     if not path.exists():
         return {}
     if not path.is_file():
@@ -353,6 +355,8 @@ def _ensure_folder_path(path: Path) -> None:
 
 
 def _ensure_config_file_path(path: Path) -> None:
+    if path.is_symlink():
+        raise ConfigError(f"Hail Mary needs {path} to be a real file, not a symlink.")
     if path.exists() and not path.is_file():
         raise ConfigError(f"Hail Mary needs {path} to be a file, but it is a folder.")
 

@@ -34,6 +34,7 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     haystack = f"{path.as_posix()} {text_sample}".lower()
     normalized_haystack = haystack.replace("_", " ").replace("-", " ")
     word_haystack = _word_haystack(path, text_sample)
+    filename_word_haystack = _word_haystack(Path(path.name), "")
 
     if _is_platform_deal_page(path, text_sample, file_type):
         return DocumentType.PLATFORM_DEAL_PAGE
@@ -47,15 +48,8 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     legal_abbreviations = ["lpa", "ppm"]
     if file_type in {FileType.DOCX, FileType.PDF} and (
         any(marker in normalized_haystack for marker in legal_markers)
-        or any(_contains_phrase(word_haystack, marker) for marker in legal_abbreviations)
     ):
         return DocumentType.LEGAL_DOCUMENT
-
-    if file_type in {FileType.XLSX, FileType.CSV} and any(
-        _contains_phrase(word_haystack, marker)
-        for marker in ["model", "forecast", "financial", "revenue"]
-    ):
-        return DocumentType.FINANCIAL_MODEL
 
     if file_type == FileType.PDF and (
         any(_contains_phrase(word_haystack, marker) for marker in ["pitch", "deck"])
@@ -65,6 +59,17 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         )
     ):
         return DocumentType.PITCH_DECK
+
+    if file_type in {FileType.DOCX, FileType.PDF} and any(
+        _contains_phrase(filename_word_haystack, marker) for marker in legal_abbreviations
+    ):
+        return DocumentType.LEGAL_DOCUMENT
+
+    if file_type in {FileType.XLSX, FileType.CSV} and any(
+        _contains_phrase(word_haystack, marker)
+        for marker in ["model", "forecast", "financial", "revenue"]
+    ):
+        return DocumentType.FINANCIAL_MODEL
 
     if file_type == FileType.HTML:
         return DocumentType.WEB_PAGE

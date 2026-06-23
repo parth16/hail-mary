@@ -173,8 +173,25 @@ def test_output_directory_symlink_outside_data_dir_is_rejected(tmp_path: Path) -
     outside_dir.mkdir()
     (data_dir / "processed").symlink_to(outside_dir, target_is_directory=True)
 
-    with pytest.raises(IngestionError, match="resolves outside the private data directory"):
+    with pytest.raises(IngestionError, match="outside the private data directory"):
         ingest_folder(root, config=AppConfig(data_dir=data_dir))
+
+
+def test_relative_data_dir_with_parent_segments_writes_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    root = workspace / "pitch-decks"
+    company = root / "RelativeCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Memo about RelativeCo.", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=Path("../hm-data")))
+
+    assert summary.document_count == 1
+    assert (tmp_path / "hm-data" / "processed" / "ingestion_summary.json").exists()
+    assert summary.deals[0].documents[0].output_path.exists()
 
 
 def test_generated_outputs_are_owner_only(tmp_path: Path) -> None:
@@ -245,6 +262,21 @@ def test_docx_header_confidentiality_is_detected(tmp_path: Path) -> None:
     document.sections[0].header.paragraphs[0].text = "Confidential"
     document.add_paragraph("Business details.")
     document.save(str(company / "memo.docx"))
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    source = summary.deals[0].documents[0].source
+    assert source.confidentiality_detected is True
+
+
+def test_confidentiality_detection_scans_all_raw_text(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "LongCo"
+    company.mkdir(parents=True)
+    (company / "long memo.txt").write_text(
+        f"{'A' * 21_000}\nNot for distribution.",
+        encoding="utf-8",
+    )
 
     summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
 

@@ -129,7 +129,6 @@ def _build_document(
     ingested_at: datetime,
 ) -> SourceDocument:
     text_sample = extraction.combined_text[:4_000]
-    raw_text_sample = extraction.combined_raw_text[:20_000]
     relative_path = path.relative_to(root_path)
     title = path.stem.strip()
     path_digest = hashlib.sha256(relative_path.as_posix().encode("utf-8")).hexdigest()[:8]
@@ -153,7 +152,7 @@ def _build_document(
         retrieved_at=None,
         page_count=extraction.page_count,
         sha256=sha256,
-        confidentiality_detected=_has_confidentiality_marker(raw_text_sample),
+        confidentiality_detected=_has_confidentiality_marker(extraction.combined_raw_text),
         extraction_quality=extraction.extraction_quality,
         notes=_join_notes(extraction.notes, hash_note),
     )
@@ -247,7 +246,7 @@ def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
 
 
 def _reject_output_symlink_escape(path: Path, *, resolved_root: Path) -> None:
-    absolute_path = path if path.is_absolute() else Path.cwd() / path
+    absolute_path = (path if path.is_absolute() else Path.cwd() / path).resolve(strict=False)
     try:
         relative_parts = absolute_path.relative_to(resolved_root).parts
     except ValueError:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -218,6 +219,23 @@ def test_local_state_rejects_config_path_directory(
         create_local_state(AppConfig(data_dir=Path("data")), force=True)
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_local_state_rejects_symlinked_config_file_before_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    target = tmp_path / "README.md"
+    target.write_text("do not overwrite", encoding="utf-8")
+    (config_dir / "config.yaml").symlink_to(target)
+
+    with pytest.raises(ConfigError, match="real file, not a symlink"):
+        create_local_state(AppConfig(data_dir=Path("data")), force=True)
+
+    assert target.read_text(encoding="utf-8") == "do not overwrite"
+
+
 def test_load_config_rejects_config_path_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,4 +244,32 @@ def test_load_config_rejects_config_path_directory(
     config_path.mkdir(parents=True)
 
     with pytest.raises(ConfigError, match="needs .hailmary/config.yaml to be a file"):
+        load_config()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_load_config_rejects_symlinked_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    target = tmp_path / "other-config.yaml"
+    target.write_text("data_dir: local-data\n", encoding="utf-8")
+    (config_dir / "config.yaml").symlink_to(target)
+
+    with pytest.raises(ConfigError, match="real file, not a symlink"):
+        load_config()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_load_config_rejects_broken_symlinked_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").symlink_to(tmp_path / "missing-config.yaml")
+
+    with pytest.raises(ConfigError, match="real file, not a symlink"):
         load_config()

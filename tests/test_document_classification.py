@@ -62,6 +62,12 @@ def test_classifies_standalone_legal_abbreviations_from_filename() -> None:
     assert classify_document(Path("Example/LPA.docx")) == DocumentType.LEGAL_DOCUMENT
 
 
+def test_company_name_legal_abbreviations_do_not_override_pitch_deck() -> None:
+    path = Path("PPM Labs/PPM Labs Pitch Deck.pdf")
+
+    assert classify_document(path) == DocumentType.PITCH_DECK
+
+
 def test_classifies_pitch_deck_from_investor_overview_name() -> None:
     path = Path("Wild West/Wild_West_Systems_Investor_Overview_June26.pdf")
 
