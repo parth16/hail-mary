@@ -74,8 +74,25 @@ def test_init_rejects_config_directory_as_data_dir(
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ConfigError, match="cannot be the local config directory"):
+    with pytest.raises(ConfigError, match="cannot overlap the local config directory"):
         create_local_state(AppConfig(data_dir=Path(".hailmary")), force=True)
+
+
+def test_init_rejects_config_file_as_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="cannot overlap the local config directory"):
+        create_local_state(
+            AppConfig(
+                data_dir=Path(".hailmary/config.yaml"),
+                meridian_profile_dir=Path("local-profile"),
+            ),
+            force=True,
+        )
+
+    assert not (tmp_path / ".hailmary" / "config.yaml").exists()
 
 
 def test_local_state_rejects_existing_shared_data_dir(
@@ -135,6 +152,28 @@ def test_git_exclude_symlink_is_rejected(
         create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
 
     assert readme.read_text(encoding="utf-8") == "do not edit\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_git_exclude_symlinked_parent_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _init_git_repo(tmp_path)
+    outside_info = tmp_path / "outside-info"
+    outside_info.mkdir()
+    exclude_path = outside_info / "exclude"
+    exclude_path.write_text("do not edit\n", encoding="utf-8")
+    git_info = tmp_path / ".git" / "info"
+    for child in git_info.iterdir():
+        child.unlink()
+    git_info.rmdir()
+    git_info.symlink_to(outside_info, target_is_directory=True)
+
+    with pytest.raises(ConfigError, match="symlinked parent folder"):
+        create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
+
+    assert exclude_path.read_text(encoding="utf-8") == "do not edit\n"
 
 
 def test_tracked_file_check_error_has_clear_config_error(

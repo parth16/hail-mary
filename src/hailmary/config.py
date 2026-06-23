@@ -366,9 +366,12 @@ def _ensure_generated_path_not_current_or_root(path: Path, *, purpose: str) -> N
 
 
 def _ensure_data_dir_not_config_dir(config: AppConfig) -> None:
-    if _absolute_resolved_path(config.data_dir) == _absolute_resolved_path(config.config_dir):
+    data_dir = _absolute_resolved_path(config.data_dir)
+    config_dir = _absolute_resolved_path(config.config_dir)
+    config_path = _absolute_resolved_path(config.config_path)
+    if _paths_overlap(data_dir, config_dir) or _paths_overlap(data_dir, config_path):
         raise ConfigError(
-            "The data directory cannot be the local config directory. "
+            "The data directory cannot overlap the local config directory. "
             "Choose a separate generated-data folder."
         )
 
@@ -587,6 +590,13 @@ def _append_local_git_exclude(git_root: Path, pattern: str) -> None:
         raise ConfigError(
             f"The local Git exclude file at {exclude_path} cannot be a symlink."
         )
+    for parent in exclude_path.parents:
+        if parent == git_root.parent:
+            break
+        if parent.is_symlink():
+            raise ConfigError(
+                f"The local Git exclude path cannot use a symlinked parent folder at {parent}."
+            )
 
     escaped_pattern = _escape_git_exclude_pattern(pattern)
     try:
