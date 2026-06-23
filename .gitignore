@@ -1,0 +1,44 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Python/build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+.hailmary/
+
+# Confidential investment materials and generated diligence output
+pitch-decks/
+pitch-decks.zip
+data/
+reports/
+browser-profiles/
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs and transient outputs
+*.log
+tmp/
+temp/
