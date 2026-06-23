@@ -131,6 +131,8 @@ def _is_platform_deal_page(path: Path, text_sample: str, file_type: FileType) ->
 
     if filename_stem in {"angellist", "angel list", "meridian"}:
         return True
+    if _filename_has_document_type_marker(filename_stem):
+        return False
     if any(marker in filename for marker in platform_filename_markers):
         return True
 
@@ -158,6 +160,39 @@ def _is_platform_deal_page(path: Path, text_sample: str, file_type: FileType) ->
         ]
     )
     return (has_angellist_text and has_platform_page_text) or has_meridian_page_text
+
+
+def _filename_has_document_type_marker(filename_stem: str) -> bool:
+    filename_words = f" {re.sub(r'[^a-z0-9]+', ' ', filename_stem).strip()} "
+    document_markers = [
+        "pitch",
+        "deck",
+        "investor overview",
+        "series deck",
+        "limited partnership agreement",
+        "private placement memorandum",
+        "subscription agreement",
+        "subscription documents",
+        "lpa",
+        "ppm",
+        "model",
+        "forecast",
+        "financial",
+        "revenue",
+        "customer reference",
+        "customer references",
+        "customer call",
+        "customer calls",
+        "customer contract",
+        "customer contracts",
+        "customer diligence",
+        "case study",
+        "case studies",
+        "memo",
+        "note",
+        "diligence",
+    ]
+    return any(_contains_phrase(filename_words, marker) for marker in document_markers)
 
 
 def is_ignored_path(path: Path) -> bool:

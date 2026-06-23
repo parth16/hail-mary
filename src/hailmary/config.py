@@ -92,7 +92,8 @@ def _setting_int(
     config_name: str,
     default: int,
 ) -> int:
-    if env_name in os.environ:
+    env_value = os.getenv(env_name)
+    if env_value is not None and env_value.strip() != "":
         return _env_int(env_name, default)
     return _config_int(config_values, config_name, default)
 
@@ -263,7 +264,20 @@ def _expand_project_path(path: Path) -> Path:
 
 
 def _project_root() -> Path:
-    return _find_git_root(Path.cwd()) or Path.cwd().resolve(strict=False)
+    return (
+        _find_git_root(Path.cwd())
+        or _find_config_root(Path.cwd())
+        or Path.cwd().resolve(strict=False)
+    )
+
+
+def _find_config_root(start: Path) -> Path | None:
+    current = start.resolve(strict=False)
+    for candidate in [current, *current.parents]:
+        config_path = candidate / ".hailmary" / "config.yaml"
+        if config_path.exists() or config_path.is_symlink():
+            return candidate
+    return None
 
 
 def _display_path_from_cwd(path: Path) -> Path:

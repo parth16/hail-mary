@@ -201,6 +201,32 @@ def test_load_config_uses_repo_root_from_subdirectory(
     assert config.meridian_profile_dir == repo_root / "local-data/browser-profiles/meridian"
 
 
+def test_load_config_finds_saved_config_from_subdirectory_without_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deals_root = tmp_path / "deals"
+    company_dir = deals_root / "Acme"
+    company_dir.mkdir(parents=True)
+    config_dir = deals_root / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "data_dir: local-data",
+                "local_only: true",
+                "meridian_profile_dir: local-data/browser-profiles/meridian",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(company_dir)
+
+    config = load_config()
+
+    assert config.data_dir == deals_root / "local-data"
+    assert config.meridian_profile_dir == deals_root / "local-data/browser-profiles/meridian"
+
+
 def test_blank_data_dir_env_uses_saved_project_path_from_subdirectory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -227,6 +253,32 @@ def test_blank_data_dir_env_uses_saved_project_path_from_subdirectory(
 
     assert config.data_dir == repo_root / "local-data"
     assert config.meridian_profile_dir == repo_root / "local-data/browser-profiles/meridian"
+
+
+def test_blank_numeric_env_uses_saved_config_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "data_dir: local-data",
+                "local_only: true",
+                "capital_budget: 25000",
+                "min_check: 1000",
+                "max_check: 5000",
+                "meridian_profile_dir: local-data/browser-profiles/meridian",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HAILMARY_MAX_CHECK", "")
+
+    config = load_config()
+
+    assert config.max_check == 5_000
 
 
 def test_init_from_subdirectory_anchors_explicit_relative_data_dir(

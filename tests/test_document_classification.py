@@ -53,6 +53,18 @@ def test_angellist_text_requires_page_marker_for_platform_page() -> None:
     assert document_type == DocumentType.UNKNOWN
 
 
+def test_angellist_source_name_does_not_override_pitch_deck() -> None:
+    path = Path("Acme/Acme AngelList Pitch Deck.pdf")
+
+    assert classify_document(path) == DocumentType.PITCH_DECK
+
+
+def test_angellist_source_name_does_not_override_legal_document() -> None:
+    path = Path("Acme/Acme AngelList Subscription Agreement.pdf")
+
+    assert classify_document(path) == DocumentType.LEGAL_DOCUMENT
+
+
 def test_classifies_legal_docx_from_content() -> None:
     path = Path("Example/closing.docx")
 

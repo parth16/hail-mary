@@ -376,8 +376,14 @@ def _xlsx_cell_value(cell: ElementTree.Element, shared_strings: list[str]) -> st
 
     if cell_type == "s":
         try:
-            return shared_strings[int(value)]
-        except (ValueError, IndexError):
+            shared_string_index = int(value)
+        except ValueError:
+            return value
+        if shared_string_index < 0:
+            return value
+        try:
+            return shared_strings[shared_string_index]
+        except IndexError:
             return value
     return value.strip()
 

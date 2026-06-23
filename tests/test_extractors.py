@@ -136,6 +136,35 @@ def test_xlsx_extraction_records_table_text(tmp_path: Path) -> None:
     assert "Revenue | 100" in result.combined_text
 
 
+def test_xlsx_negative_shared_string_index_is_left_raw(tmp_path: Path) -> None:
+    xlsx_path = tmp_path / "model.xlsx"
+    with zipfile.ZipFile(xlsx_path, "w") as workbook:
+        workbook.writestr(
+            "xl/sharedStrings.xml",
+            """
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <si><t>Do not use this string</t></si>
+            </sst>
+            """,
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row><c t="s"><v>-1</v></c></row>
+              </sheetData>
+            </worksheet>
+            """,
+        )
+
+    result = extract_document(xlsx_path)
+
+    assert result.pages
+    assert "-1" in result.combined_text
+    assert "Do not use this string" not in result.combined_text
+
+
 def test_xlsx_worksheet_read_failure_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
