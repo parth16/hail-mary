@@ -422,4 +422,5 @@ def test_unreadable_scan_folders_are_reported(
     summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
 
     assert summary.document_count == 1
-    assert "HiddenCo/Secret" in summary.skipped_files
+    assert summary.skipped_files == []
+    assert summary.unreadable_paths == ["HiddenCo/Secret"]

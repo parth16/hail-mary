@@ -8,7 +8,7 @@ import pytest
 
 from hailmary.ingest import extractors
 from hailmary.ingest.extractors import extract_document
-from hailmary.schemas.documents import ExtractionQuality
+from hailmary.schemas.documents import ExtractedPage, ExtractionQuality
 
 
 def test_html_extraction_removes_markup_and_scripts(tmp_path: Path) -> None:
@@ -50,6 +50,23 @@ def test_pdf_page_access_failure_is_recorded(
     assert result.extraction_quality == ExtractionQuality.LOW
     assert result.notes is not None
     assert "Could not read pages" in result.notes
+
+
+def test_pdf_quality_is_capped_when_most_pages_need_ocr() -> None:
+    pages = [
+        ExtractedPage(
+            page_number=1,
+            raw_text=" ".join(["traction"] * 220),
+            clean_text=" ".join(["traction"] * 220),
+            word_count=220,
+            needs_ocr=False,
+        ),
+        ExtractedPage(page_number=2, raw_text="", clean_text="", word_count=0, needs_ocr=True),
+        ExtractedPage(page_number=3, raw_text="", clean_text="", word_count=0, needs_ocr=True),
+        ExtractedPage(page_number=4, raw_text="", clean_text="", word_count=0, needs_ocr=True),
+    ]
+
+    assert extractors._quality_from_pages(pages) == ExtractionQuality.MEDIUM
 
 
 def test_docx_text_traversal_failure_is_recorded(

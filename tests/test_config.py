@@ -110,6 +110,24 @@ def test_git_exclude_read_error_has_clear_config_error(
         create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
 
 
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_git_exclude_symlink_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _init_git_repo(tmp_path)
+    readme = tmp_path / "README.md"
+    readme.write_text("do not edit\n", encoding="utf-8")
+    exclude_path = tmp_path / ".git" / "info" / "exclude"
+    exclude_path.unlink()
+    exclude_path.symlink_to(readme)
+
+    with pytest.raises(ConfigError, match="local Git exclude file.*cannot be a symlink"):
+        create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
+
+    assert readme.read_text(encoding="utf-8") == "do not edit\n"
+
+
 def test_tracked_file_check_error_has_clear_config_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -279,6 +297,30 @@ def test_blank_numeric_env_uses_saved_config_value(
     config = load_config()
 
     assert config.max_check == 5_000
+
+
+def test_data_dir_override_rebases_saved_default_meridian_profile_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    secure_data = tmp_path / "secure-data"
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "data_dir: data",
+                "local_only: true",
+                "meridian_profile_dir: data/browser-profiles/meridian",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(data_dir=secure_data)
+
+    assert config.data_dir == secure_data
+    assert config.meridian_profile_dir == secure_data / "browser-profiles" / "meridian"
 
 
 def test_init_from_subdirectory_anchors_explicit_relative_data_dir(
@@ -453,6 +495,21 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
                 AppConfig(data_dir=Path("local-data"), meridian_profile_dir=profile_dir),
                 force=True,
             )
+
+
+def test_init_rejects_meridian_profile_that_contains_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="cannot contain the data directory"):
+        create_local_state(
+            AppConfig(
+                data_dir=Path("local-state/data"),
+                meridian_profile_dir=Path("local-state"),
+            ),
+            force=True,
+        )
 
 
 def test_max_check_above_allowed_tier_is_rejected(

@@ -113,6 +113,9 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
 
     saved_values = {} if ignore_saved else _read_local_config(AppConfig().config_path)
     env_data_dir = os.getenv("HAILMARY_DATA_DIR")
+    data_dir_was_overridden = data_dir is not None or (
+        env_data_dir is not None and env_data_dir.strip() != ""
+    )
     if data_dir is not None:
         raw_data_dir = data_dir
     elif env_data_dir is not None and env_data_dir.strip() != "":
@@ -155,7 +158,11 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             config_name="max_check",
             default=10_000,
         ),
-        meridian_profile_dir=_meridian_profile_dir(resolved_data_dir, saved_values),
+        meridian_profile_dir=_meridian_profile_dir(
+            resolved_data_dir,
+            saved_values,
+            data_dir_was_overridden=data_dir_was_overridden,
+        ),
         enable_web_research=enable_web_research,
     )
     _ensure_investment_limits(config)
@@ -219,16 +226,35 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     )
 
 
-def _meridian_profile_dir(data_dir: Path, saved_values: dict[str, str]) -> Path:
+def _meridian_profile_dir(
+    data_dir: Path,
+    saved_values: dict[str, str],
+    *,
+    data_dir_was_overridden: bool,
+) -> Path:
     env_value = os.getenv("HAILMARY_MERIDIAN_PROFILE_DIR")
     if env_value is not None and env_value.strip():
         return _expand_project_path(Path(env_value))
 
     saved_value = saved_values.get("meridian_profile_dir")
     if saved_value:
-        return _expand_project_path(Path(saved_value))
+        saved_profile_dir = Path(saved_value)
+        if data_dir_was_overridden and _is_saved_default_profile_dir(
+            saved_profile_dir,
+            saved_values,
+        ):
+            return data_dir / "browser-profiles" / "meridian"
+        return _expand_project_path(saved_profile_dir)
 
     return data_dir / "browser-profiles" / "meridian"
+
+
+def _is_saved_default_profile_dir(
+    saved_profile_dir: Path,
+    saved_values: dict[str, str],
+) -> bool:
+    saved_data_dir = Path(saved_values.get("data_dir", "./data"))
+    return saved_profile_dir == saved_data_dir / "browser-profiles" / "meridian"
 
 
 def _expand_config_paths(config: AppConfig) -> AppConfig:
@@ -365,6 +391,16 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         data_dir / "reports",
     }
     allowed_profile_root = data_dir / "browser-profiles"
+
+    try:
+        data_dir.relative_to(profile_dir)
+    except ValueError:
+        pass
+    else:
+        raise ConfigError(
+            "The Meridian browser profile directory cannot contain the data directory. "
+            "Choose a separate generated-data folder."
+        )
 
     for reserved_path in reserved_paths:
         if profile_dir == reserved_path:
@@ -511,6 +547,10 @@ def _append_local_git_exclude(git_root: Path, pattern: str) -> None:
     exclude_path = _local_git_exclude_path(git_root)
     if exclude_path is None:
         return
+    if exclude_path.is_symlink():
+        raise ConfigError(
+            f"The local Git exclude file at {exclude_path} cannot be a symlink."
+        )
 
     escaped_pattern = _escape_git_exclude_pattern(pattern)
     try:

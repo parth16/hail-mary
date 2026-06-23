@@ -90,6 +90,7 @@ class IngestionSummary(BaseModel):
     scanned_at: datetime
     deals: list[IngestedDeal] = Field(default_factory=list)
     skipped_files: list[str] = Field(default_factory=list)
+    unreadable_paths: list[str] = Field(default_factory=list)
     summary_path: Path
 
     @property

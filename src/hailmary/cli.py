@@ -112,3 +112,9 @@ def ingest_folder(
             f"Skipped {len(summary.skipped_files)} unsupported or ignored files. "
             "These were not treated as diligence documents."
         )
+    if summary.unreadable_paths:
+        path_word = "path" if len(summary.unreadable_paths) == 1 else "paths"
+        console.print(
+            f"Could not read {len(summary.unreadable_paths)} {path_word}. "
+            "Hail Mary did not scan those locations, so diligence documents may be missing."
+        )

@@ -63,7 +63,8 @@ def _quality_from_pages(pages: list[ExtractedPage]) -> ExtractionQuality:
 
     word_count = sum(page.word_count for page in pages)
     words_per_page = word_count / len(pages)
-    if words_per_page >= 50:
+    ocr_needed_pages = sum(1 for page in pages if page.needs_ocr)
+    if words_per_page >= 50 and ocr_needed_pages * 2 < len(pages):
         return ExtractionQuality.HIGH
     if word_count > 0:
         return ExtractionQuality.MEDIUM

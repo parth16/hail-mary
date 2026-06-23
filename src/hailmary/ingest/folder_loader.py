@@ -40,10 +40,11 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
     run_started_at = datetime.now(UTC)
     deals_by_id: dict[str, IngestedDeal] = {}
     skipped_files: list[str] = []
+    unreadable_paths: list[str] = []
     candidate_files: list[tuple[Path, str]] = []
 
     scan_paths, unreadable_dirs = _scan_input_paths(root_path)
-    skipped_files.extend(_relative_display_path(path, root_path) for path in unreadable_dirs)
+    unreadable_paths.extend(_relative_display_path(path, root_path) for path in unreadable_dirs)
 
     for path in scan_paths:
         relative_path = path.relative_to(root_path)
@@ -103,6 +104,7 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
         scanned_at=run_started_at,
         deals=list(deals_by_id.values()),
         skipped_files=skipped_files,
+        unreadable_paths=unreadable_paths,
         summary_path=config.data_dir / "processed" / "ingestion_summary.json",
     )
     _write_summary(summary)

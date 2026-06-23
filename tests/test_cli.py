@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from pytest import MonkeyPatch
@@ -40,6 +42,41 @@ def test_ingest_folder_command_writes_summary(tmp_path: Path, monkeypatch: Monke
     summary_path = data_dir / "processed" / "ingestion_summary.json"
     saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert saved_summary["deals"][0]["company_name"] == "Acme"
+
+
+def test_ingest_folder_unreadable_path_has_plain_english_warning(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "pitch-decks"
+    company = root / "HiddenCo"
+    secret_dir = company / "Secret"
+    company.mkdir(parents=True)
+    secret_dir.mkdir()
+    (company / "memo.txt").write_text("Memo about HiddenCo.", encoding="utf-8")
+
+    def fake_walk(
+        top: Path,
+        topdown: bool,
+        onerror: Callable[[OSError], None] | None,
+        followlinks: bool,
+    ) -> Iterator[tuple[Path, list[str], list[str]]]:
+        assert top == root.resolve()
+        assert topdown is True
+        assert followlinks is False
+        yield root.resolve(), ["HiddenCo"], []
+        if callable(onerror):
+            onerror(PermissionError(13, "Permission denied", str(secret_dir)))
+        yield company.resolve(), ["Secret"], ["memo.txt"]
+
+    monkeypatch.setattr(os, "walk", fake_walk)
+
+    result = runner.invoke(app, ["ingest-folder", str(root), "--data-dir", str(tmp_path / "data")])
+
+    assert result.exit_code == 0, result.output
+    assert "Could not read 1 path" in result.output
+    assert "documents may be missing" in result.output
+    assert "unsupported or ignored" not in result.output
 
 
 def test_ingest_folder_missing_folder_has_plain_english_error(
