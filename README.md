@@ -40,8 +40,15 @@ After the first push:
 
 - create branches named `codex/<short-description>`
 - open draft PRs by default
-- include validation commands and privacy notes in PR bodies
+- self-review changes before pushing
+- include validation commands, test results, privacy notes, and known limitations in PR bodies
 - never stage raw investment docs or generated confidential output
+
+## Product Standards
+
+All operator-facing output should use plain English. Avoid unnecessary jargon; if a finance, legal, or technical term is needed, explain it the first time it appears.
+
+Testing is a first-class part of the project. New code should include tests for logical and functional correctness, including success paths, important edge cases, and failure modes. User-facing commands should be robust, handle invalid input deliberately, and explain failures clearly.
 
 ## MVP Direction
 
