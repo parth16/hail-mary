@@ -94,15 +94,24 @@ def _is_platform_deal_page(path: Path, text_sample: str, file_type: FileType) ->
     if any(marker in filename for marker in platform_filename_markers):
         return True
 
-    has_platform_text = any(
-        marker in text
-        for marker in ["angellist", "angel list", "portal.angellist.com", "meridian"]
+    has_angellist_text = any(
+        marker in text for marker in ["angellist", "angel list", "portal.angellist.com"]
     )
     has_platform_page_text = any(
         marker in text
         for marker in ["invest", "investment opportunity", "deal page", "company profile"]
     )
-    return has_platform_text and has_platform_page_text
+    has_meridian_page_text = any(
+        marker in text
+        for marker in [
+            "meridian deal",
+            "meridian deal page",
+            "meridian investment page",
+            "meridian profile",
+            "meridian portal",
+        ]
+    )
+    return (has_angellist_text and has_platform_page_text) or has_meridian_page_text
 
 
 def is_ignored_path(path: Path) -> bool:

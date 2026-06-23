@@ -30,6 +30,17 @@ def test_does_not_classify_company_named_meridian_as_platform_page() -> None:
     assert classify_document(path) == DocumentType.PITCH_DECK
 
 
+def test_meridian_company_text_does_not_trigger_platform_page() -> None:
+    path = Path("Meridian Robotics/Meridian Robotics Pitch Deck.pdf")
+
+    document_type = classify_document(
+        path,
+        text_sample="Meridian Robotics investment opportunity for seed investors.",
+    )
+
+    assert document_type == DocumentType.PITCH_DECK
+
+
 def test_classifies_legal_docx_from_content() -> None:
     path = Path("Example/closing.docx")
 
