@@ -140,6 +140,52 @@ def test_init_uses_git_exclude_path_in_worktrees(
     assert "local-data/" in exclude_text
 
 
+def test_load_config_uses_repo_root_from_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    src_dir = repo_root / "src"
+    src_dir.mkdir(parents=True)
+    (repo_root / ".git" / "info").mkdir(parents=True)
+    config_dir = repo_root / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "data_dir: local-data",
+                "local_only: true",
+                "meridian_profile_dir: local-data/browser-profiles/meridian",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(src_dir)
+
+    config = load_config()
+
+    assert config.data_dir == repo_root / "local-data"
+    assert config.meridian_profile_dir == repo_root / "local-data/browser-profiles/meridian"
+
+
+def test_init_ignores_data_dir_in_target_git_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current_repo = tmp_path / "current"
+    target_repo = tmp_path / "target"
+    current_repo.mkdir()
+    target_repo.mkdir()
+    (current_repo / ".git" / "info").mkdir(parents=True)
+    target_git_info = target_repo / ".git" / "info"
+    target_git_info.mkdir(parents=True)
+    target_exclude = target_git_info / "exclude"
+    target_exclude.write_text("# target local excludes\n", encoding="utf-8")
+    monkeypatch.chdir(current_repo)
+
+    create_local_state(AppConfig(data_dir=target_repo / "local-data"), force=True)
+
+    assert "local-data/" in target_exclude.read_text(encoding="utf-8")
+
+
 def test_load_config_reads_saved_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     config_dir = tmp_path / ".hailmary"
@@ -348,6 +394,54 @@ def test_numeric_env_value_overrides_invalid_saved_config(
     config = load_config()
 
     assert config.max_check == 7500
+
+
+def test_local_only_disables_web_research_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "true")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+
+    config = load_config()
+
+    assert config.local_only is True
+    assert config.enable_web_research is False
+
+
+def test_local_only_disables_web_research_saved_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "local_only: true\nenable_web_research: true\n",
+        encoding="utf-8",
+    )
+
+    config = load_config()
+
+    assert config.local_only is True
+    assert config.enable_web_research is False
+
+
+def test_init_persists_web_research_off_in_local_only_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    create_local_state(
+        AppConfig(
+            data_dir=Path("local-data"),
+            local_only=True,
+            enable_web_research=True,
+        ),
+        force=True,
+    )
+
+    config_text = (tmp_path / ".hailmary" / "config.yaml").read_text(encoding="utf-8")
+    assert "enable_web_research: false" in config_text
 
 
 def test_local_state_rejects_file_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

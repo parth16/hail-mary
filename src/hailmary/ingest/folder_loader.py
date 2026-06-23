@@ -42,7 +42,10 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
     skipped_files: list[str] = []
     candidate_files: list[tuple[Path, str]] = []
 
-    for path in sorted(root_path.rglob("*")):
+    scan_paths, unreadable_dirs = _scan_input_paths(root_path)
+    skipped_files.extend(_relative_display_path(path, root_path) for path in unreadable_dirs)
+
+    for path in scan_paths:
         relative_path = path.relative_to(root_path)
         if path.is_symlink():
             skipped_files.append(str(relative_path))
@@ -104,6 +107,45 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
     )
     _write_summary(summary)
     return summary
+
+
+def _scan_input_paths(root_path: Path) -> tuple[list[Path], list[Path]]:
+    paths: list[Path] = []
+    unreadable_dirs: list[Path] = []
+
+    def record_unreadable(error: OSError) -> None:
+        if error.filename:
+            unreadable_dirs.append(Path(error.filename))
+
+    for current_dir, dir_names, file_names in os.walk(
+        root_path,
+        topdown=True,
+        onerror=record_unreadable,
+        followlinks=False,
+    ):
+        current_path = Path(current_dir)
+        dir_names.sort()
+        file_names.sort()
+
+        traversable_dir_names: list[str] = []
+        for dir_name in dir_names:
+            dir_path = current_path / dir_name
+            if dir_path.is_symlink():
+                paths.append(dir_path)
+                continue
+            traversable_dir_names.append(dir_name)
+        dir_names[:] = traversable_dir_names
+
+        paths.extend(current_path / file_name for file_name in file_names)
+
+    return paths, unreadable_dirs
+
+
+def _relative_display_path(path: Path, root_path: Path) -> str:
+    try:
+        return str(path.relative_to(root_path))
+    except ValueError:
+        return str(path)
 
 
 def _deal_name_for_path(relative_path: Path) -> str:

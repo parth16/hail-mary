@@ -31,7 +31,8 @@ class AppConfig(BaseModel):
 
     @property
     def config_dir(self) -> Path:
-        return Path(".hailmary")
+        project_config_dir = _project_root() / ".hailmary"
+        return _display_path_from_cwd(project_config_dir)
 
     @property
     def config_path(self) -> Path:
@@ -110,15 +111,27 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
     """Load config from environment variables and command options."""
 
     saved_values = {} if ignore_saved else _read_local_config(AppConfig().config_path)
-    resolved_data_dir = _expand_path(
-        data_dir
-        or Path(os.getenv("HAILMARY_DATA_DIR") or saved_values.get("data_dir", "./data"))
+    data_dir_is_explicit = data_dir is not None or "HAILMARY_DATA_DIR" in os.environ
+    raw_data_dir = data_dir or Path(
+        os.getenv("HAILMARY_DATA_DIR") or saved_values.get("data_dir", "./data")
+    )
+    resolved_data_dir = (
+        _expand_path(raw_data_dir)
+        if data_dir_is_explicit
+        else _expand_project_path(raw_data_dir)
     )
     local_only = (
         _env_bool("HAILMARY_LOCAL_ONLY", True)
         if "HAILMARY_LOCAL_ONLY" in os.environ
         else _config_bool(saved_values, "local_only", True)
     )
+    enable_web_research = (
+        _env_bool("HAILMARY_ENABLE_WEB_RESEARCH", False)
+        if "HAILMARY_ENABLE_WEB_RESEARCH" in os.environ
+        else _config_bool(saved_values, "enable_web_research", False)
+    )
+    if local_only:
+        enable_web_research = False
 
     config = AppConfig(
         data_dir=resolved_data_dir,
@@ -143,11 +156,7 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             default=10_000,
         ),
         meridian_profile_dir=_meridian_profile_dir(resolved_data_dir, saved_values),
-        enable_web_research=(
-            _env_bool("HAILMARY_ENABLE_WEB_RESEARCH", False)
-            if "HAILMARY_ENABLE_WEB_RESEARCH" in os.environ
-            else _config_bool(saved_values, "enable_web_research", False)
-        ),
+        enable_web_research=enable_web_research,
     )
     _ensure_investment_limits(config)
     return config
@@ -217,7 +226,7 @@ def _meridian_profile_dir(data_dir: Path, saved_values: dict[str, str]) -> Path:
 
     saved_value = saved_values.get("meridian_profile_dir")
     if saved_value:
-        return _expand_path(Path(saved_value))
+        return _expand_project_path(Path(saved_value))
 
     return data_dir / "browser-profiles" / "meridian"
 
@@ -235,12 +244,39 @@ def _expand_config_paths(config: AppConfig) -> AppConfig:
         update={
             "data_dir": _expand_path(config.data_dir),
             "meridian_profile_dir": _expand_path(meridian_profile_dir),
+            "enable_web_research": (
+                False if config.local_only else config.enable_web_research
+            ),
         }
     )
 
 
 def _expand_path(path: Path) -> Path:
     return path.expanduser()
+
+
+def _expand_project_path(path: Path) -> Path:
+    expanded_path = path.expanduser()
+    if expanded_path.is_absolute():
+        return expanded_path
+
+    project_root = _project_root()
+    current_dir = Path.cwd().resolve(strict=False)
+    if project_root == current_dir:
+        return expanded_path
+    return project_root / expanded_path
+
+
+def _project_root() -> Path:
+    return _find_git_root(Path.cwd()) or Path.cwd().resolve(strict=False)
+
+
+def _display_path_from_cwd(path: Path) -> Path:
+    current_dir = Path.cwd().resolve(strict=False)
+    try:
+        return Path(os.path.relpath(path, current_dir))
+    except ValueError:
+        return path
 
 
 def _ensure_investment_limits(config: AppConfig) -> None:
@@ -404,12 +440,11 @@ def _write_meridian_profile_marker(profile_dir: Path) -> None:
 
 
 def _ensure_repo_local_path_ignored(path: Path, *, purpose: str) -> None:
-    git_root = _find_git_root(Path.cwd())
+    resolved_path = _absolute_resolved_path(path)
+    git_root = _find_git_root(resolved_path) or _find_git_root(Path.cwd())
     if git_root is None:
         return
 
-    resolved_path = path if path.is_absolute() else Path.cwd() / path
-    resolved_path = resolved_path.resolve(strict=False)
     try:
         relative_path = resolved_path.relative_to(git_root)
     except ValueError:
