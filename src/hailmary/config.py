@@ -111,15 +111,14 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
     """Load config from environment variables and command options."""
 
     saved_values = {} if ignore_saved else _read_local_config(AppConfig().config_path)
-    data_dir_is_explicit = data_dir is not None or "HAILMARY_DATA_DIR" in os.environ
-    raw_data_dir = data_dir or Path(
-        os.getenv("HAILMARY_DATA_DIR") or saved_values.get("data_dir", "./data")
-    )
-    resolved_data_dir = (
-        _expand_path(raw_data_dir)
-        if data_dir_is_explicit
-        else _expand_project_path(raw_data_dir)
-    )
+    env_data_dir = os.getenv("HAILMARY_DATA_DIR")
+    if data_dir is not None:
+        raw_data_dir = data_dir
+    elif env_data_dir is not None and env_data_dir.strip() != "":
+        raw_data_dir = Path(env_data_dir)
+    else:
+        raw_data_dir = Path(saved_values.get("data_dir", "./data"))
+    resolved_data_dir = _expand_project_path(raw_data_dir)
     local_only = (
         _env_bool("HAILMARY_LOCAL_ONLY", True)
         if "HAILMARY_LOCAL_ONLY" in os.environ
@@ -222,7 +221,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
 def _meridian_profile_dir(data_dir: Path, saved_values: dict[str, str]) -> Path:
     env_value = os.getenv("HAILMARY_MERIDIAN_PROFILE_DIR")
     if env_value is not None and env_value.strip():
-        return _expand_path(Path(env_value))
+        return _expand_project_path(Path(env_value))
 
     saved_value = saved_values.get("meridian_profile_dir")
     if saved_value:
@@ -242,17 +241,13 @@ def _expand_config_paths(config: AppConfig) -> AppConfig:
 
     return config.model_copy(
         update={
-            "data_dir": _expand_path(config.data_dir),
-            "meridian_profile_dir": _expand_path(meridian_profile_dir),
+            "data_dir": _expand_project_path(config.data_dir),
+            "meridian_profile_dir": _expand_project_path(meridian_profile_dir),
             "enable_web_research": (
                 False if config.local_only else config.enable_web_research
             ),
         }
     )
-
-
-def _expand_path(path: Path) -> Path:
-    return path.expanduser()
 
 
 def _expand_project_path(path: Path) -> Path:
@@ -485,8 +480,16 @@ def _path_has_tracked_files(git_root: Path, relative_text: str) -> bool:
             capture_output=True,
             text=True,
         )
-    except OSError:
-        return False
+    except OSError as exc:
+        raise ConfigError(
+            f"Could not check whether {relative_text} overlaps tracked project files: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        suffix = f" Git said: {detail}" if detail else ""
+        raise ConfigError(
+            f"Could not check whether {relative_text} overlaps tracked project files.{suffix}"
+        )
     return bool(result.stdout.strip())
 
 
@@ -528,12 +531,10 @@ def _ensure_folder_path(path: Path) -> None:
             raise ConfigError(
                 f"Hail Mary cannot create {path} because {parent} is a symlinked parent folder."
             )
-        if parent.exists():
-            if not parent.is_dir():
-                raise ConfigError(
-                    f"Hail Mary cannot create {path} because {parent} is a file."
-                )
-            return
+        if parent.exists() and not parent.is_dir():
+            raise ConfigError(
+                f"Hail Mary cannot create {path} because {parent} is a file."
+            )
 
 
 def _ensure_config_file_path(path: Path) -> None:

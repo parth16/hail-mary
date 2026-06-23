@@ -16,13 +16,16 @@ from hailmary.config import (
 )
 
 
+def _init_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, text=True)
+
+
 def test_init_adds_repo_local_custom_data_dir_to_local_git_exclude(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    git_info = tmp_path / ".git" / "info"
-    git_info.mkdir(parents=True)
-    exclude_path = git_info / "exclude"
+    _init_git_repo(tmp_path)
+    exclude_path = tmp_path / ".git" / "info" / "exclude"
     exclude_path.write_text("# local excludes\n", encoding="utf-8")
 
     create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
@@ -82,9 +85,8 @@ def test_git_exclude_patterns_are_escaped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    git_info = tmp_path / ".git" / "info"
-    git_info.mkdir(parents=True)
-    exclude_path = git_info / "exclude"
+    _init_git_repo(tmp_path)
+    exclude_path = tmp_path / ".git" / "info" / "exclude"
     exclude_path.write_text("# local excludes\n", encoding="utf-8")
 
     create_local_state(AppConfig(data_dir=Path("#data")), force=True)
@@ -99,10 +101,42 @@ def test_git_exclude_read_error_has_clear_config_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    _init_git_repo(tmp_path)
     exclude_path = tmp_path / ".git" / "info" / "exclude"
+    exclude_path.unlink()
     exclude_path.mkdir(parents=True)
 
     with pytest.raises(ConfigError, match="Could not read local Git exclude file"):
+        create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
+
+
+def test_tracked_file_check_error_has_clear_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+
+    def fake_run(
+        args: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert check is False
+        assert capture_output is True
+        assert text is True
+        if args[3] == "ls-files":
+            return subprocess.CompletedProcess(
+                args,
+                128,
+                stdout="",
+                stderr="Git could not inspect tracked files.",
+            )
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="unexpected command")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ConfigError, match="Could not check whether local-data overlaps"):
         create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
 
 
@@ -167,6 +201,52 @@ def test_load_config_uses_repo_root_from_subdirectory(
     assert config.meridian_profile_dir == repo_root / "local-data/browser-profiles/meridian"
 
 
+def test_blank_data_dir_env_uses_saved_project_path_from_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    src_dir = repo_root / "src"
+    src_dir.mkdir(parents=True)
+    (repo_root / ".git" / "info").mkdir(parents=True)
+    config_dir = repo_root / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "data_dir: local-data",
+                "local_only: true",
+                "meridian_profile_dir: local-data/browser-profiles/meridian",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(src_dir)
+    monkeypatch.setenv("HAILMARY_DATA_DIR", "")
+
+    config = load_config()
+
+    assert config.data_dir == repo_root / "local-data"
+    assert config.meridian_profile_dir == repo_root / "local-data/browser-profiles/meridian"
+
+
+def test_init_from_subdirectory_anchors_explicit_relative_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    src_dir = repo_root / "src"
+    src_dir.mkdir(parents=True)
+    _init_git_repo(repo_root)
+    monkeypatch.chdir(src_dir)
+
+    config = load_config(data_dir=Path("local-data"), ignore_saved=True)
+    create_local_state(config, force=True)
+
+    assert (repo_root / "local-data" / "processed").is_dir()
+    assert not (src_dir / "local-data").exists()
+    config_text = (repo_root / ".hailmary" / "config.yaml").read_text(encoding="utf-8")
+    assert f"data_dir: {(repo_root / 'local-data').as_posix()}" in config_text
+
+
 def test_init_ignores_data_dir_in_target_git_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -174,10 +254,9 @@ def test_init_ignores_data_dir_in_target_git_repo(
     target_repo = tmp_path / "target"
     current_repo.mkdir()
     target_repo.mkdir()
-    (current_repo / ".git" / "info").mkdir(parents=True)
-    target_git_info = target_repo / ".git" / "info"
-    target_git_info.mkdir(parents=True)
-    target_exclude = target_git_info / "exclude"
+    _init_git_repo(current_repo)
+    _init_git_repo(target_repo)
+    target_exclude = target_repo / ".git" / "info" / "exclude"
     target_exclude.write_text("# target local excludes\n", encoding="utf-8")
     monkeypatch.chdir(current_repo)
 
@@ -463,6 +542,19 @@ def test_local_state_rejects_symlinked_parent_paths(
 
     with pytest.raises(ConfigError, match="symlinked parent folder"):
         create_local_state(AppConfig(data_dir=Path("link/local-data")), force=True)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_local_state_rejects_nested_symlinked_parent_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    outside_parent = tmp_path / "outside-parent"
+    (outside_parent / "existing").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(outside_parent, target_is_directory=True)
+
+    with pytest.raises(ConfigError, match="symlinked parent folder"):
+        create_local_state(AppConfig(data_dir=Path("link/existing/local-data")), force=True)
 
 
 def test_local_state_rejects_config_path_directory(
