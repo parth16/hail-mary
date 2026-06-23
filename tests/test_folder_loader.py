@@ -8,6 +8,7 @@ import pytest
 from docx import Document
 
 from hailmary.config import AppConfig
+from hailmary.ingest import folder_loader
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.schemas.documents import DocumentType, ExtractionQuality, FileType
 
@@ -136,6 +137,44 @@ def test_confidentiality_detection_uses_raw_text_before_cleanup(tmp_path: Path) 
 
     source = summary.deals[0].documents[0].source
     assert source.confidentiality_detected is True
+
+
+def test_docx_header_confidentiality_is_detected(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "HeaderCo"
+    company.mkdir(parents=True)
+    document = Document()
+    document.sections[0].header.paragraphs[0].text = "Confidential"
+    document.add_paragraph("Business details.")
+    document.save(str(company / "memo.docx"))
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    source = summary.deals[0].documents[0].source
+    assert source.confidentiality_detected is True
+
+
+def test_hash_failure_is_recorded_without_aborting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "HashFailCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Memo about HashFailCo.", encoding="utf-8")
+
+    def fail_sha256(path: Path) -> str:
+        raise PermissionError("permission changed")
+
+    monkeypatch.setattr(folder_loader, "_sha256", fail_sha256)
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    source = summary.deals[0].documents[0].source
+    assert summary.document_count == 1
+    assert source.sha256 is None
+    assert source.notes is not None
+    assert "Could not calculate the file fingerprint" in source.notes
+    assert summary.deals[0].documents[0].output_path.exists()
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from bs4 import BeautifulSoup
 from docx import Document
@@ -122,17 +124,7 @@ def _extract_docx(path: Path) -> ExtractionResult:
             notes=f"Could not read the DOCX file: {exc}",
         )
 
-    paragraphs = [
-        paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()
-    ]
-    table_text: list[str] = []
-    for table in document.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if cells:
-                table_text.append(" | ".join(cells))
-
-    raw_text = "\n".join([*paragraphs, *table_text])
+    raw_text = "\n".join(_docx_text_parts(document))
     clean_text = clean_extracted_text(raw_text)
     page = ExtractedPage(
         page_number=None,
@@ -148,6 +140,45 @@ def _extract_docx(path: Path) -> ExtractionResult:
         page_count=None,
         extraction_quality=_quality_from_pages([page] if clean_text else []),
     )
+
+
+def _docx_text_parts(document: Any) -> list[str]:
+    text_parts: list[str] = []
+    text_parts.extend(_paragraph_text(document.paragraphs))
+    text_parts.extend(_table_text(document.tables))
+
+    for section in document.sections:
+        containers = [
+            section.header,
+            section.first_page_header,
+            section.even_page_header,
+            section.footer,
+            section.first_page_footer,
+            section.even_page_footer,
+        ]
+        for container in containers:
+            text_parts.extend(_paragraph_text(container.paragraphs))
+            text_parts.extend(_table_text(container.tables))
+
+    return text_parts
+
+
+def _paragraph_text(paragraphs: Iterable[Any]) -> list[str]:
+    return [
+        paragraph.text.strip()
+        for paragraph in paragraphs
+        if getattr(paragraph, "text", "").strip()
+    ]
+
+
+def _table_text(tables: Iterable[Any]) -> list[str]:
+    table_text: list[str] = []
+    for table in tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if cells:
+                table_text.append(" | ".join(cells))
+    return table_text
 
 
 def _extract_text_file(path: Path) -> ExtractionResult:

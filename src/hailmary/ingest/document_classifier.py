@@ -33,7 +33,7 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     haystack = f"{path.as_posix()} {text_sample}".lower()
     normalized_haystack = haystack.replace("_", " ").replace("-", " ")
 
-    if file_type == FileType.PDF and (
+    if file_type in {FileType.PDF, FileType.HTML} and (
         "angellist" in normalized_haystack or "meridian" in normalized_haystack
     ):
         return DocumentType.PLATFORM_DEAL_PAGE

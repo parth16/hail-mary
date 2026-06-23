@@ -95,6 +95,19 @@ def test_init_unsafe_data_dir_has_plain_english_error(
     assert "Traceback" not in result.output
 
 
+def test_init_file_data_dir_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "local-data").write_text("not a folder", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--data-dir", "local-data"])
+
+    assert result.exit_code != 0
+    assert "needs local-data to be a folder" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_ingest_folder_unsafe_data_dir_has_plain_english_error(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

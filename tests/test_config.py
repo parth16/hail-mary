@@ -23,6 +23,23 @@ def test_init_adds_repo_local_custom_data_dir_to_local_git_exclude(
     assert "local-data/" in exclude_text
 
 
+def test_git_exclude_patterns_are_escaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    git_info = tmp_path / ".git" / "info"
+    git_info.mkdir(parents=True)
+    exclude_path = git_info / "exclude"
+    exclude_path.write_text("# local excludes\n", encoding="utf-8")
+
+    create_local_state(AppConfig(data_dir=Path("#data")), force=True)
+    create_local_state(AppConfig(data_dir=Path("!data")), force=True)
+
+    exclude_text = exclude_path.read_text(encoding="utf-8")
+    assert "\\#data/" in exclude_text
+    assert "\\!data/" in exclude_text
+
+
 def test_init_uses_git_exclude_path_in_worktrees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -83,6 +100,16 @@ def test_load_config_reads_saved_data_dir(tmp_path: Path, monkeypatch: pytest.Mo
     assert config.meridian_profile_dir == Path("local-data/browser-profiles/meridian")
 
 
+def test_custom_data_dir_derives_default_meridian_profile_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config(data_dir=Path("local-data"))
+
+    assert config.meridian_profile_dir == Path("local-data/browser-profiles/meridian")
+
+
 def test_invalid_boolean_env_value_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -115,3 +142,22 @@ def test_numeric_env_value_overrides_invalid_saved_config(
     config = load_config()
 
     assert config.max_check == 7500
+
+
+def test_local_state_rejects_file_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "local-data").write_text("not a folder", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="needs local-data to be a folder"):
+        create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
+
+
+def test_local_state_rejects_config_path_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".hailmary" / "config.yaml"
+    config_path.mkdir(parents=True)
+
+    with pytest.raises(ConfigError, match="needs .hailmary/config.yaml to be a file"):
+        create_local_state(AppConfig(data_dir=Path("data")), force=True)

@@ -17,6 +17,13 @@ def test_classifies_platform_deal_page_from_angellist_pdf_name() -> None:
     assert classify_document(path) == DocumentType.PLATFORM_DEAL_PAGE
 
 
+def test_classifies_saved_platform_html_as_platform_deal_page() -> None:
+    path = Path("H3X/H3X _ AngelList.html")
+
+    assert classify_file_type(path) == FileType.HTML
+    assert classify_document(path) == DocumentType.PLATFORM_DEAL_PAGE
+
+
 def test_classifies_legal_docx_from_content() -> None:
     path = Path("Example/closing.docx")
 

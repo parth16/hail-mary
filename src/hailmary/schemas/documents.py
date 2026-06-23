@@ -58,7 +58,7 @@ class SourceDocument(BaseModel):
     ingested_at: datetime
     retrieved_at: datetime | None = None
     page_count: int | None = None
-    sha256: str
+    sha256: str | None
     confidentiality_detected: bool = False
     extraction_quality: ExtractionQuality
     notes: str | None = None

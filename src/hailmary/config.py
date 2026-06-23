@@ -135,12 +135,7 @@ def load_config(data_dir: Path | None = None) -> AppConfig:
             config_name="max_check",
             default=10_000,
         ),
-        meridian_profile_dir=Path(
-            os.getenv(
-                "HAILMARY_MERIDIAN_PROFILE_DIR",
-                saved_values.get("meridian_profile_dir", "./data/browser-profiles/meridian"),
-            )
-        ),
+        meridian_profile_dir=_meridian_profile_dir(resolved_data_dir, saved_values),
         enable_web_research=(
             _env_bool("HAILMARY_ENABLE_WEB_RESEARCH", False)
             if "HAILMARY_ENABLE_WEB_RESEARCH" in os.environ
@@ -167,17 +162,39 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config.config_dir,
     ]
     for folder in folders:
-        folder.mkdir(parents=True, exist_ok=True)
+        _ensure_folder_path(folder)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ConfigError(f"Could not create folder at {folder}: {exc}") from exc
 
     config_created = force or not config.config_path.exists()
     if config_created:
-        config.config_path.write_text(_default_config_text(config), encoding="utf-8")
+        _ensure_config_file_path(config.config_path)
+        try:
+            config.config_path.write_text(_default_config_text(config), encoding="utf-8")
+        except OSError as exc:
+            raise ConfigError(
+                f"Could not write local config at {config.config_path}: {exc}"
+            ) from exc
 
     return InitResult(
         data_dir=config.data_dir,
         config_path=config.config_path,
         config_created=config_created,
     )
+
+
+def _meridian_profile_dir(data_dir: Path, saved_values: dict[str, str]) -> Path:
+    env_value = os.getenv("HAILMARY_MERIDIAN_PROFILE_DIR")
+    if env_value is not None and env_value.strip():
+        return Path(env_value)
+
+    saved_value = saved_values.get("meridian_profile_dir")
+    if saved_value:
+        return Path(saved_value)
+
+    return data_dir / "browser-profiles" / "meridian"
 
 
 def _read_local_config(path: Path) -> dict[str, str]:
@@ -247,14 +264,42 @@ def _append_local_git_exclude(git_root: Path, pattern: str) -> None:
     if exclude_path is None:
         return
 
+    escaped_pattern = _escape_git_exclude_pattern(pattern)
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
     existing_patterns = {line.strip() for line in existing.splitlines()}
-    if pattern in existing_patterns:
+    if escaped_pattern in existing_patterns:
         return
 
     newline = "" if existing.endswith("\n") or not existing else "\n"
-    exclude_path.write_text(f"{existing}{newline}{pattern}\n", encoding="utf-8")
+    exclude_path.write_text(f"{existing}{newline}{escaped_pattern}\n", encoding="utf-8")
+
+
+def _ensure_folder_path(path: Path) -> None:
+    if path.exists() and not path.is_dir():
+        raise ConfigError(f"Hail Mary needs {path} to be a folder, but it is a file.")
+
+    for parent in path.parents:
+        if parent.exists():
+            if not parent.is_dir():
+                raise ConfigError(
+                    f"Hail Mary cannot create {path} because {parent} is a file."
+                )
+            return
+
+
+def _ensure_config_file_path(path: Path) -> None:
+    if path.exists() and not path.is_file():
+        raise ConfigError(f"Hail Mary needs {path} to be a file, but it is a folder.")
+
+
+def _escape_git_exclude_pattern(pattern: str) -> str:
+    escaped = pattern.replace("\\", "\\\\")
+    for character in ["*", "?", "[", "]"]:
+        escaped = escaped.replace(character, f"\\{character}")
+    if escaped.startswith(("#", "!")):
+        escaped = f"\\{escaped}"
+    return escaped
 
 
 def _local_git_exclude_path(git_root: Path) -> Path | None:

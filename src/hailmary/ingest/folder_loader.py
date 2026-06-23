@@ -119,15 +119,18 @@ def _build_document(
     extraction: ExtractionResult,
     ingested_at: datetime,
 ) -> SourceDocument:
-    sha256 = _sha256(path)
     text_sample = extraction.combined_text[:4_000]
     raw_text_sample = extraction.combined_raw_text[:20_000]
     relative_path = path.relative_to(root_path)
     title = path.stem.strip()
     path_digest = hashlib.sha256(relative_path.as_posix().encode("utf-8")).hexdigest()[:8]
+    sha256, hash_note = _sha256_or_note(path)
+    document_id = (
+        f"doc_{sha256[:12]}_{path_digest}" if sha256 else f"doc_unreadable_{path_digest}"
+    )
 
     return SourceDocument(
-        id=f"doc_{sha256[:12]}_{path_digest}",
+        id=document_id,
         deal_id=deal_id,
         path=relative_path,
         source_url=None,
@@ -143,7 +146,7 @@ def _build_document(
         sha256=sha256,
         confidentiality_detected=_has_confidentiality_marker(raw_text_sample),
         extraction_quality=extraction.extraction_quality,
-        notes=extraction.notes,
+        notes=_join_notes(extraction.notes, hash_note),
     )
 
 
@@ -177,6 +180,20 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sha256_or_note(path: Path) -> tuple[str | None, str | None]:
+    try:
+        return _sha256(path), None
+    except OSError as exc:
+        return None, f"Could not calculate the file fingerprint: {exc}"
+
+
+def _join_notes(*notes: str | None) -> str | None:
+    present_notes = [note for note in notes if note]
+    if not present_notes:
+        return None
+    return " ".join(present_notes)
 
 
 def _has_confidentiality_marker(text: str) -> bool:
