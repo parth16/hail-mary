@@ -19,7 +19,7 @@ FILE_TYPE_BY_SUFFIX: dict[str, FileType] = {
 }
 
 
-SUPPORTED_SUFFIXES = set(FILE_TYPE_BY_SUFFIX)
+SUPPORTED_SUFFIXES = {".pdf", ".docx", ".html", ".htm", ".txt", ".md"}
 
 
 def classify_file_type(path: Path) -> FileType:

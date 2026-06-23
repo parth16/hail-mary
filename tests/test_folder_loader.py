@@ -127,6 +127,19 @@ def test_configured_output_folder_inside_scan_root_is_skipped(tmp_path: Path) ->
     assert "generated-data/old-output.txt" in summary.skipped_files
 
 
+def test_spreadsheets_are_skipped_until_extraction_exists(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "SpreadsheetCo"
+    company.mkdir(parents=True)
+    (company / "model.xlsx").write_text("not extracted yet", encoding="utf-8")
+    (company / "revenue.csv").write_text("year,revenue\n2026,100\n", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert summary.document_count == 0
+    assert summary.skipped_files == ["SpreadsheetCo/model.xlsx", "SpreadsheetCo/revenue.csv"]
+
+
 def test_generated_outputs_are_owner_only(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "PrivateCo"

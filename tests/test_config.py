@@ -46,6 +46,15 @@ def test_local_state_rejects_data_dir_inside_git(
         create_local_state(AppConfig(data_dir=Path(".git/hailmary")), force=True)
 
 
+def test_local_state_rejects_current_folder_outside_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="cannot be the current folder"):
+        create_local_state(AppConfig(data_dir=Path(".")), force=True)
+
+
 def test_git_exclude_patterns_are_escaped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

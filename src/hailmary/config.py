@@ -147,6 +147,10 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
 def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     """Create local folders used for generated output."""
 
+    _ensure_generated_path_not_current_or_root(config.data_dir, purpose="data directory")
+    _ensure_generated_path_not_current_or_root(
+        config.meridian_profile_dir, purpose="Meridian browser profile directory"
+    )
     _ensure_repo_local_path_ignored(config.data_dir, purpose="data directory")
     _ensure_repo_local_path_ignored(config.config_dir, purpose="local config directory")
     _ensure_repo_local_path_ignored(
@@ -218,6 +222,21 @@ def _read_local_config(path: Path) -> dict[str, str]:
         key, value = stripped.split(":", 1)
         values[key.strip()] = value.strip()
     return values
+
+
+def _ensure_generated_path_not_current_or_root(path: Path, *, purpose: str) -> None:
+    resolved_path = path if path.is_absolute() else Path.cwd() / path
+    resolved_path = resolved_path.resolve(strict=False)
+    current_dir = Path.cwd().resolve(strict=False)
+
+    if resolved_path == current_dir:
+        raise ConfigError(
+            f"The {purpose} cannot be the current folder. Choose a generated-data folder."
+        )
+    if resolved_path.parent == resolved_path:
+        raise ConfigError(
+            f"The {purpose} cannot be the filesystem root. Choose a generated-data folder."
+        )
 
 
 def _ensure_repo_local_path_ignored(path: Path, *, purpose: str) -> None:

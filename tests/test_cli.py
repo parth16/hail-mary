@@ -91,7 +91,7 @@ def test_init_unsafe_data_dir_has_plain_english_error(
     result = runner.invoke(app, ["init", "--data-dir", "."])
 
     assert result.exit_code != 0
-    assert "cannot be the repository root" in result.output
+    assert "cannot be the current folder" in result.output
     assert "Traceback" not in result.output
 
 
@@ -151,7 +151,7 @@ def test_ingest_folder_unsafe_data_dir_has_plain_english_error(
     result = runner.invoke(app, ["ingest-folder", str(source.parent), "--data-dir", "."])
 
     assert result.exit_code != 0
-    assert "cannot be the repository root" in result.output
+    assert "cannot be the current folder" in result.output
     assert "Traceback" not in result.output
 
 
