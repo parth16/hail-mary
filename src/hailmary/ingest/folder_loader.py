@@ -22,6 +22,10 @@ from hailmary.schemas.documents import (
 from hailmary.utils.slug import slugify
 
 
+class IngestionError(RuntimeError):
+    """The scan could not safely write generated ingestion output."""
+
+
 def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
     """Scan a local folder and store extracted document metadata."""
 
@@ -157,7 +161,10 @@ def _write_document(
     extraction: ExtractionResult,
 ) -> Path:
     output_dir = config.data_dir / "processed" / "deals" / deal_id / "documents"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise IngestionError(f"Could not create output folder at {output_dir}: {exc}") from exc
     output_path = output_dir / f"{document.id}.json"
 
     payload = IngestedDocument(
@@ -165,13 +172,21 @@ def _write_document(
         pages=extraction.pages,
         output_path=output_path,
     )
-    output_path.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
+    try:
+        output_path.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise IngestionError(f"Could not write document output at {output_path}: {exc}") from exc
     return output_path
 
 
 def _write_summary(summary: IngestionSummary) -> None:
-    summary.summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary.summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    try:
+        summary.summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary.summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise IngestionError(
+            f"Could not write the scan summary at {summary.summary_path}: {exc}"
+        ) from exc
 
 
 def _sha256(path: Path) -> str:

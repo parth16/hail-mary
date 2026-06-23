@@ -161,3 +161,14 @@ def test_local_state_rejects_config_path_directory(
 
     with pytest.raises(ConfigError, match="needs .hailmary/config.yaml to be a file"):
         create_local_state(AppConfig(data_dir=Path("data")), force=True)
+
+
+def test_load_config_rejects_config_path_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".hailmary" / "config.yaml"
+    config_path.mkdir(parents=True)
+
+    with pytest.raises(ConfigError, match="needs .hailmary/config.yaml to be a file"):
+        load_config()

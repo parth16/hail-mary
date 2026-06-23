@@ -24,6 +24,12 @@ def test_classifies_saved_platform_html_as_platform_deal_page() -> None:
     assert classify_document(path) == DocumentType.PLATFORM_DEAL_PAGE
 
 
+def test_does_not_classify_company_named_meridian_as_platform_page() -> None:
+    path = Path("Meridian Robotics/Meridian Robotics Pitch Deck.pdf")
+
+    assert classify_document(path) == DocumentType.PITCH_DECK
+
+
 def test_classifies_legal_docx_from_content() -> None:
     path = Path("Example/closing.docx")
 
@@ -44,6 +50,12 @@ def test_classifies_pitch_deck_from_investor_overview_name() -> None:
     path = Path("Wild West/Wild_West_Systems_Investor_Overview_June26.pdf")
 
     assert classify_document(path) == DocumentType.PITCH_DECK
+
+
+def test_series_financing_pdf_is_not_automatically_a_pitch_deck() -> None:
+    path = Path("Acme/Series Seed Preferred Stock Purchase Agreement.pdf")
+
+    assert classify_document(path) == DocumentType.UNKNOWN
 
 
 def test_ignores_local_noise_paths() -> None:

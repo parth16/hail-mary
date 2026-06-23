@@ -200,9 +200,16 @@ def _meridian_profile_dir(data_dir: Path, saved_values: dict[str, str]) -> Path:
 def _read_local_config(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
+    if not path.is_file():
+        raise ConfigError(f"Hail Mary needs {path} to be a file, but it is a folder.")
 
     values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        config_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"Could not read local config at {path}: {exc}") from exc
+
+    for line in config_text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or ":" not in stripped:
             continue

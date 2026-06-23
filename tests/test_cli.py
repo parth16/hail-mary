@@ -108,6 +108,20 @@ def test_init_file_data_dir_has_plain_english_error(
     assert "Traceback" not in result.output
 
 
+def test_init_bad_config_path_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".hailmary" / "config.yaml"
+    config_path.mkdir(parents=True)
+
+    result = runner.invoke(app, ["init", "--force"])
+
+    assert result.exit_code != 0
+    assert "needs .hailmary/config.yaml to be a file" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_ingest_folder_unsafe_data_dir_has_plain_english_error(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -121,4 +135,21 @@ def test_ingest_folder_unsafe_data_dir_has_plain_english_error(
 
     assert result.exit_code != 0
     assert "cannot be the repository root" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_ingest_folder_summary_write_error_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "pitch-decks" / "Acme"
+    source.mkdir(parents=True)
+    (source / "memo.txt").write_text("Memo about Acme.", encoding="utf-8")
+    summary_path = tmp_path / "data" / "processed" / "ingestion_summary.json"
+    summary_path.mkdir(parents=True)
+
+    result = runner.invoke(app, ["ingest-folder", str(source.parent)])
+
+    assert result.exit_code != 0
+    assert "Could not write the scan summary" in result.output
     assert "Traceback" not in result.output

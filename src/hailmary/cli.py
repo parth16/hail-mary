@@ -6,8 +6,18 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
-from hailmary.config import AppConfig, ConfigError, create_local_state, load_config
-from hailmary.ingest.folder_loader import ingest_folder as ingest_folder_path
+from hailmary.config import (
+    AppConfig,
+    ConfigError,
+    create_local_state,
+    load_config,
+)
+from hailmary.ingest.folder_loader import (
+    IngestionError,
+)
+from hailmary.ingest.folder_loader import (
+    ingest_folder as ingest_folder_path,
+)
 
 app = typer.Typer(
     help="Evaluate private startup deals from local diligence documents.",
@@ -85,6 +95,9 @@ def ingest_folder(
         summary = ingest_folder_path(folder, config=config)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise typer.BadParameter(str(exc), param_hint="folder") from None
+    except IngestionError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
 
     deal_word = "deal" if len(summary.deals) == 1 else "deals"
     doc_word = "document" if summary.document_count == 1 else "documents"

@@ -33,9 +33,7 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
     haystack = f"{path.as_posix()} {text_sample}".lower()
     normalized_haystack = haystack.replace("_", " ").replace("-", " ")
 
-    if file_type in {FileType.PDF, FileType.HTML} and (
-        "angellist" in normalized_haystack or "meridian" in normalized_haystack
-    ):
+    if _is_platform_deal_page(path, text_sample, file_type):
         return DocumentType.PLATFORM_DEAL_PAGE
 
     legal_markers = [
@@ -57,7 +55,8 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         return DocumentType.FINANCIAL_MODEL
 
     if file_type == FileType.PDF and any(
-        marker in normalized_haystack for marker in ["pitch", "deck", "investor overview", "series"]
+        marker in normalized_haystack
+        for marker in ["pitch", "deck", "investor overview", "series deck"]
     ):
         return DocumentType.PITCH_DECK
 
@@ -70,6 +69,40 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
         return DocumentType.MEMO
 
     return DocumentType.UNKNOWN
+
+
+def _is_platform_deal_page(path: Path, text_sample: str, file_type: FileType) -> bool:
+    if file_type not in {FileType.PDF, FileType.HTML}:
+        return False
+
+    filename = path.name.lower().replace("_", " ").replace("-", " ")
+    filename_stem = path.stem.lower().replace("_", " ").replace("-", " ")
+    text = text_sample.lower().replace("_", " ").replace("-", " ")
+    platform_filename_markers = [
+        " angellist",
+        "angel list",
+        "angellist deal",
+        "angellist investment",
+        "angellist profile",
+        "meridian deal",
+        "meridian investment",
+        "meridian profile",
+    ]
+
+    if filename_stem in {"angellist", "angel list", "meridian"}:
+        return True
+    if any(marker in filename for marker in platform_filename_markers):
+        return True
+
+    has_platform_text = any(
+        marker in text
+        for marker in ["angellist", "angel list", "portal.angellist.com", "meridian"]
+    )
+    has_platform_page_text = any(
+        marker in text
+        for marker in ["invest", "investment opportunity", "deal page", "company profile"]
+    )
+    return has_platform_text and has_platform_page_text
 
 
 def is_ignored_path(path: Path) -> bool:
