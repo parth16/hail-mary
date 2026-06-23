@@ -14,6 +14,7 @@ class ConfigError(ValueError):
 CHECK_SIZE_TIERS = (0, 1_000, 2_500, 5_000, 7_500, 10_000)
 MAX_CHECK_SIZE = max(CHECK_SIZE_TIERS)
 CHECK_SIZE_TIER_TEXT = "$0, $1K, $2.5K, $5K, $7.5K, or $10K"
+MERIDIAN_PROFILE_MARKER = ".hailmary-profile"
 
 
 class AppConfig(BaseModel):
@@ -162,6 +163,10 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     _ensure_generated_path_not_current_or_root(
         config.meridian_profile_dir, purpose="Meridian browser profile directory"
     )
+    _ensure_dedicated_meridian_profile_dir(config.meridian_profile_dir)
+    _ensure_folder_path(config.data_dir)
+    _ensure_folder_path(config.meridian_profile_dir)
+    _ensure_folder_path(config.config_dir)
     _ensure_repo_local_path_ignored(config.data_dir, purpose="data directory")
     _ensure_repo_local_path_ignored(config.config_dir, purpose="local config directory")
     _ensure_repo_local_path_ignored(
@@ -185,6 +190,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         except OSError as exc:
             raise ConfigError(f"Could not create folder at {folder}: {exc}") from exc
 
+    _write_meridian_profile_marker(config.meridian_profile_dir)
     _ensure_config_file_path(config.config_path)
     config_created = force or not config.config_path.exists()
     if config_created:
@@ -303,6 +309,62 @@ def _ensure_dedicated_data_dir(path: Path) -> None:
         )
 
 
+def _ensure_dedicated_meridian_profile_dir(path: Path) -> None:
+    if path.is_symlink():
+        raise ConfigError(
+            "The Meridian browser profile directory cannot be a symlink. Choose a real folder."
+        )
+    if not path.exists():
+        return
+    if not path.is_dir():
+        raise ConfigError(
+            f"Hail Mary needs {path} to be a folder, but it is a file."
+        )
+
+    marker_path = path / MERIDIAN_PROFILE_MARKER
+    try:
+        existing_entries = {child.name for child in path.iterdir()}
+    except OSError as exc:
+        raise ConfigError(
+            f"Could not inspect Meridian browser profile directory at {path}: {exc}"
+        ) from exc
+
+    if existing_entries and MERIDIAN_PROFILE_MARKER not in existing_entries:
+        raise ConfigError(
+            f"The Meridian browser profile directory at {path} already contains other files. "
+            "Choose a new generated-data folder or an existing Hail Mary profile folder."
+        )
+    if marker_path.exists() and not marker_path.is_file():
+        raise ConfigError(
+            f"Hail Mary needs {marker_path} to be a real file, not a folder."
+        )
+    if marker_path.is_symlink():
+        raise ConfigError(
+            f"Hail Mary needs {marker_path} to be a real file, not a symlink."
+        )
+
+
+def _write_meridian_profile_marker(profile_dir: Path) -> None:
+    marker_path = profile_dir / MERIDIAN_PROFILE_MARKER
+    if marker_path.is_symlink():
+        raise ConfigError(
+            f"Hail Mary needs {marker_path} to be a real file, not a symlink."
+        )
+
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        file_descriptor = os.open(marker_path, flags, 0o600)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            handle.write("Hail Mary Meridian browser profile directory.\n")
+        marker_path.chmod(0o600)
+    except OSError as exc:
+        raise ConfigError(
+            f"Could not write Meridian browser profile marker at {marker_path}: {exc}"
+        ) from exc
+
+
 def _ensure_repo_local_path_ignored(path: Path, *, purpose: str) -> None:
     git_root = _find_git_root(Path.cwd())
     if git_root is None:
@@ -389,6 +451,10 @@ def _ensure_folder_path(path: Path) -> None:
         raise ConfigError(f"Hail Mary needs {path} to be a folder, but it is a file.")
 
     for parent in path.parents:
+        if parent.is_symlink():
+            raise ConfigError(
+                f"Hail Mary cannot create {path} because {parent} is a symlinked parent folder."
+            )
         if parent.exists():
             if not parent.is_dir():
                 raise ConfigError(

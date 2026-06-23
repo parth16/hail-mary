@@ -62,6 +62,7 @@ def test_ingest_folder_groups_documents_and_writes_outputs(tmp_path: Path) -> No
 
     saved_summary = json.loads(summary.summary_path.read_text(encoding="utf-8"))
     assert saved_summary["deals"][0]["id"] == _deal_id("ExampleCo")
+    assert saved_summary["deals"][0]["documents"][0]["source"]["company_name"] == "ExampleCo"
 
 
 def test_invalid_pdf_is_recorded_without_crashing(tmp_path: Path) -> None:
@@ -319,6 +320,18 @@ def test_confidentiality_detection_scans_all_raw_text(tmp_path: Path) -> None:
         f"{'A' * 21_000}\nNot for distribution.",
         encoding="utf-8",
     )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    source = summary.deals[0].documents[0].source
+    assert source.confidentiality_detected is True
+
+
+def test_confidentiality_detection_uses_filename_when_text_is_empty(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "LockedCo"
+    company.mkdir(parents=True)
+    (company / "Confidential Investor Deck.pdf").write_text("not a real pdf", encoding="utf-8")
 
     summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
 

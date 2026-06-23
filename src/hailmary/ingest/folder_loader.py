@@ -67,7 +67,14 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
     for path, deal_name in candidate_files:
         deal_id = deal_ids_by_name[deal_name]
         extraction = extract_document(path)
-        document = _build_document(path, root_path, deal_id, extraction, run_started_at)
+        document = _build_document(
+            path,
+            root_path,
+            deal_id,
+            deal_name,
+            extraction,
+            run_started_at,
+        )
 
         processed_document = IngestedDocument(
             source=document,
@@ -110,6 +117,7 @@ def _build_document(
     path: Path,
     root_path: Path,
     deal_id: str,
+    deal_name: str,
     extraction: ExtractionResult,
     ingested_at: datetime,
 ) -> SourceDocument:
@@ -121,6 +129,7 @@ def _build_document(
     document_id = (
         f"doc_{sha256[:12]}_{path_digest}" if sha256 else f"doc_unreadable_{path_digest}"
     )
+    confidentiality_text = f"{relative_path.as_posix()} {extraction.combined_raw_text}"
 
     return SourceDocument(
         id=document_id,
@@ -131,13 +140,13 @@ def _build_document(
         document_type=classify_document(relative_path, text_sample=text_sample),
         file_type=classify_file_type(path),
         title=title,
-        company_name=None,
+        company_name=deal_name,
         created_at=None,
         ingested_at=ingested_at,
         retrieved_at=None,
         page_count=extraction.page_count,
         sha256=sha256,
-        confidentiality_detected=_has_confidentiality_marker(extraction.combined_raw_text),
+        confidentiality_detected=_has_confidentiality_marker(confidentiality_text),
         extraction_quality=extraction.extraction_quality,
         notes=_join_notes(extraction.notes, hash_note),
     )

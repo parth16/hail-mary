@@ -52,6 +52,26 @@ def test_pdf_page_access_failure_is_recorded(
     assert "Could not read pages" in result.notes
 
 
+def test_docx_text_traversal_failure_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docx_path = tmp_path / "broken.docx"
+    docx_path.write_bytes(b"placeholder")
+
+    def fail_text_parts(document: object) -> list[str]:
+        raise RuntimeError("document part is malformed")
+
+    monkeypatch.setattr(extractors, "Document", lambda _: object())
+    monkeypatch.setattr(extractors, "_docx_text_parts", fail_text_parts)
+
+    result = extract_document(docx_path)
+
+    assert result.pages == []
+    assert result.extraction_quality == ExtractionQuality.LOW
+    assert result.notes is not None
+    assert "Could not extract text from the DOCX file" in result.notes
+
+
 def test_missing_text_file_is_recorded_without_crashing(tmp_path: Path) -> None:
     result = extract_document(tmp_path / "missing.txt")
 

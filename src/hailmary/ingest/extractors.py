@@ -132,7 +132,16 @@ def _extract_docx(path: Path) -> ExtractionResult:
             notes=f"Could not read the DOCX file: {exc}",
         )
 
-    raw_text = "\n".join(_docx_text_parts(document))
+    try:
+        raw_text = "\n".join(_docx_text_parts(document))
+    except Exception as exc:
+        return ExtractionResult(
+            pages=[],
+            page_count=None,
+            extraction_quality=ExtractionQuality.LOW,
+            notes=f"Could not extract text from the DOCX file: {exc}",
+        )
+
     clean_text = clean_extracted_text(raw_text)
     page = ExtractedPage(
         page_number=None,

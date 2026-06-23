@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from hailmary.config import AppConfig, ConfigError, create_local_state, load_config
+from hailmary.config import (
+    MERIDIAN_PROFILE_MARKER,
+    AppConfig,
+    ConfigError,
+    create_local_state,
+    load_config,
+)
 
 
 def test_init_adds_repo_local_custom_data_dir_to_local_git_exclude(
@@ -34,6 +40,9 @@ def test_local_state_uses_owner_only_permissions(
 
     assert stat.S_IMODE((tmp_path / "local-data").stat().st_mode) == 0o700
     assert (tmp_path / "local-data" / "browser-profiles" / "meridian").is_dir()
+    assert (
+        tmp_path / "local-data" / "browser-profiles" / "meridian" / MERIDIAN_PROFILE_MARKER
+    ).is_file()
     assert stat.S_IMODE((tmp_path / ".hailmary").stat().st_mode) == 0o700
     assert stat.S_IMODE((tmp_path / ".hailmary" / "config.yaml").stat().st_mode) == 0o600
 
@@ -213,7 +222,47 @@ def test_init_creates_custom_meridian_profile_dir(
     )
 
     assert (tmp_path / "local-profile").is_dir()
+    assert (tmp_path / "local-profile" / MERIDIAN_PROFILE_MARKER).is_file()
     assert stat.S_IMODE((tmp_path / "local-profile").stat().st_mode) == 0o700
+
+
+def test_init_rejects_existing_shared_meridian_profile_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    shared_dir = tmp_path / "shared-profile"
+    shared_dir.mkdir()
+    shared_dir.chmod(0o755)
+    (shared_dir / "other-file.txt").write_text("not Hail Mary state", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="already contains other files"):
+        create_local_state(
+            AppConfig(
+                data_dir=Path("local-data"),
+                meridian_profile_dir=shared_dir,
+            ),
+            force=True,
+        )
+
+    assert stat.S_IMODE(shared_dir.stat().st_mode) == 0o755
+
+
+def test_init_allows_existing_marked_meridian_profile_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    profile_dir = tmp_path / "existing-profile"
+    profile_dir.mkdir()
+    (profile_dir / MERIDIAN_PROFILE_MARKER).write_text("marker", encoding="utf-8")
+    (profile_dir / "browser-cookie-store").write_text("local browser state", encoding="utf-8")
+
+    create_local_state(
+        AppConfig(data_dir=Path("local-data"), meridian_profile_dir=profile_dir),
+        force=True,
+    )
+
+    assert (profile_dir / "browser-cookie-store").exists()
+    assert stat.S_IMODE(profile_dir.stat().st_mode) == 0o700
 
 
 def test_max_check_above_allowed_tier_is_rejected(
@@ -294,6 +343,19 @@ def test_local_state_rejects_file_paths(tmp_path: Path, monkeypatch: pytest.Monk
 
     with pytest.raises(ConfigError, match="needs local-data to be a folder"):
         create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_local_state_rejects_symlinked_parent_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    outside_parent = tmp_path / "outside-parent"
+    outside_parent.mkdir()
+    (tmp_path / "link").symlink_to(outside_parent, target_is_directory=True)
+
+    with pytest.raises(ConfigError, match="symlinked parent folder"):
+        create_local_state(AppConfig(data_dir=Path("link/local-data")), force=True)
 
 
 def test_local_state_rejects_config_path_directory(
