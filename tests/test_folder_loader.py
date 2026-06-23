@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,53 @@ def test_top_level_deal_named_data_is_ingested(tmp_path: Path) -> None:
     assert summary.document_count == 1
     assert len(summary.deals) == 1
     assert summary.deals[0].company_name == "Data"
+
+
+def test_real_nested_data_and_reports_folders_are_ingested(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    data_folder = root / "Acme" / "Data"
+    reports_folder = root / "Acme" / "Reports"
+    data_folder.mkdir(parents=True)
+    reports_folder.mkdir(parents=True)
+    (data_folder / "deck.pdf").write_text("not a real pdf", encoding="utf-8")
+    (reports_folder / "memo.txt").write_text("Memo about Acme.", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "generated-data"))
+
+    assert summary.document_count == 2
+
+
+def test_configured_output_folder_inside_scan_root_is_skipped(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme"
+    output_folder = root / "generated-data"
+    company.mkdir(parents=True)
+    output_folder.mkdir(parents=True)
+    (company / "memo.txt").write_text("Memo about Acme.", encoding="utf-8")
+    (output_folder / "old-output.txt").write_text("This is generated output.", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=output_folder))
+
+    assert summary.document_count == 1
+    assert "generated-data/old-output.txt" in summary.skipped_files
+
+
+def test_generated_outputs_are_owner_only(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "PrivateCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Memo about PrivateCo.", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    document_path = summary.deals[0].documents[0].output_path
+    assert stat.S_IMODE(document_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(summary.summary_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "data" / "processed").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "data" / "processed" / "deals").stat().st_mode) == 0o700
+    assert stat.S_IMODE(document_path.parent.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(document_path.parent.stat().st_mode) == 0o700
 
 
 def test_colliding_deal_folder_slugs_stay_separate(tmp_path: Path) -> None:

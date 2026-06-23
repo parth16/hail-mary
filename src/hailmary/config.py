@@ -100,10 +100,10 @@ def _parse_int(value: str, *, source: str) -> int:
         ) from exc
 
 
-def load_config(data_dir: Path | None = None) -> AppConfig:
+def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> AppConfig:
     """Load config from environment variables and command options."""
 
-    saved_values = _read_local_config(AppConfig().config_path)
+    saved_values = {} if ignore_saved else _read_local_config(AppConfig().config_path)
     resolved_data_dir = data_dir or Path(
         os.getenv("HAILMARY_DATA_DIR") or saved_values.get("data_dir", "./data")
     )
@@ -165,6 +165,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         _ensure_folder_path(folder)
         try:
             folder.mkdir(parents=True, exist_ok=True)
+            folder.chmod(0o700)
         except OSError as exc:
             raise ConfigError(f"Could not create folder at {folder}: {exc}") from exc
 
@@ -173,6 +174,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         _ensure_config_file_path(config.config_path)
         try:
             config.config_path.write_text(_default_config_text(config), encoding="utf-8")
+            config.config_path.chmod(0o600)
         except OSError as exc:
             raise ConfigError(
                 f"Could not write local config at {config.config_path}: {exc}"
@@ -233,6 +235,10 @@ def _ensure_repo_local_path_ignored(path: Path, *, purpose: str) -> None:
     if relative_path == Path("."):
         raise ConfigError(
             f"The {purpose} cannot be the repository root. Choose a generated-data folder."
+        )
+    if ".git" in {part.lower() for part in relative_path.parts}:
+        raise ConfigError(
+            f"The {purpose} cannot be inside .git. Choose a generated-data folder."
         )
 
     relative_text = relative_path.as_posix().rstrip("/")

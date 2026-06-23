@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 import subprocess
 from pathlib import Path
 
@@ -21,6 +22,28 @@ def test_init_adds_repo_local_custom_data_dir_to_local_git_exclude(
 
     exclude_text = exclude_path.read_text(encoding="utf-8")
     assert "local-data/" in exclude_text
+
+
+def test_local_state_uses_owner_only_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
+
+    assert stat.S_IMODE((tmp_path / "local-data").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / ".hailmary").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / ".hailmary" / "config.yaml").stat().st_mode) == 0o600
+
+
+def test_local_state_rejects_data_dir_inside_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+
+    with pytest.raises(ConfigError, match="cannot be inside .git"):
+        create_local_state(AppConfig(data_dir=Path(".git/hailmary")), force=True)
 
 
 def test_git_exclude_patterns_are_escaped(

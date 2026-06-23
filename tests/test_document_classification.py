@@ -61,9 +61,14 @@ def test_series_financing_pdf_is_not_automatically_a_pitch_deck() -> None:
 def test_ignores_local_noise_paths() -> None:
     assert is_ignored_path(Path(".DS_Store"))
     assert is_ignored_path(Path("Company/.DS_Store"))
-    assert is_ignored_path(Path("Company/data/raw/file.pdf"))
+    assert is_ignored_path(Path("Company/.git/file.pdf"))
 
 
 def test_does_not_ignore_top_level_deal_named_data_or_reports() -> None:
     assert not is_ignored_path(Path("Data/deck.pdf"))
     assert not is_ignored_path(Path("Reports/memo.txt"))
+
+
+def test_does_not_ignore_real_nested_data_or_reports_folders() -> None:
+    assert not is_ignored_path(Path("Acme/Data/deck.pdf"))
+    assert not is_ignored_path(Path("Acme/Reports/customer.pdf"))

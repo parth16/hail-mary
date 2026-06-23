@@ -31,9 +31,9 @@ def _exit_with_config_error(exc: ConfigError) -> NoReturn:
     raise typer.Exit(1) from None
 
 
-def _config_from_options(data_dir: Path | None) -> AppConfig:
+def _config_from_options(data_dir: Path | None, *, ignore_saved: bool = False) -> AppConfig:
     try:
-        return load_config(data_dir=data_dir)
+        return load_config(data_dir=data_dir, ignore_saved=ignore_saved)
     except ConfigError as exc:
         _exit_with_config_error(exc)
 
@@ -57,7 +57,7 @@ def init(
 ) -> None:
     """Create local folders for generated Hail Mary files."""
 
-    config = _config_from_options(data_dir)
+    config = _config_from_options(data_dir, ignore_saved=force)
     try:
         result = create_local_state(config, force=force)
     except ConfigError as exc:

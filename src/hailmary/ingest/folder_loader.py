@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -47,7 +48,11 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
             continue
         if not path.is_file():
             continue
-        if is_ignored_path(relative_path) or path.suffix.lower() not in SUPPORTED_SUFFIXES:
+        if (
+            is_ignored_path(relative_path)
+            or _is_generated_output_path(path, config)
+            or path.suffix.lower() not in SUPPORTED_SUFFIXES
+        ):
             skipped_files.append(str(relative_path))
             continue
 
@@ -161,10 +166,7 @@ def _write_document(
     extraction: ExtractionResult,
 ) -> Path:
     output_dir = config.data_dir / "processed" / "deals" / deal_id / "documents"
-    try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise IngestionError(f"Could not create output folder at {output_dir}: {exc}") from exc
+    _ensure_private_directory(output_dir, private_root=config.data_dir)
     output_path = output_dir / f"{document.id}.json"
 
     payload = IngestedDocument(
@@ -172,21 +174,89 @@ def _write_document(
         pages=extraction.pages,
         output_path=output_path,
     )
-    try:
-        output_path.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
-    except OSError as exc:
-        raise IngestionError(f"Could not write document output at {output_path}: {exc}") from exc
+    _write_private_text(
+        output_path,
+        payload.model_dump_json(indent=2),
+        description="document output",
+    )
     return output_path
 
 
 def _write_summary(summary: IngestionSummary) -> None:
+    _ensure_private_directory(
+        summary.summary_path.parent,
+        private_root=summary.summary_path.parents[1],
+    )
+    _write_private_text(
+        summary.summary_path,
+        summary.model_dump_json(indent=2),
+        description="scan summary",
+    )
+
+
+def _is_generated_output_path(path: Path, config: AppConfig) -> bool:
+    resolved_path = path.resolve(strict=False)
+    generated_roots = [
+        config.data_dir,
+        config.meridian_profile_dir,
+    ]
+    for generated_root in generated_roots:
+        resolved_root = (
+            generated_root if generated_root.is_absolute() else Path.cwd() / generated_root
+        ).resolve(strict=False)
+        try:
+            resolved_path.relative_to(resolved_root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
     try:
-        summary.summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary.summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+        path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise IngestionError(
-            f"Could not write the scan summary at {summary.summary_path}: {exc}"
-        ) from exc
+        raise IngestionError(f"Could not create private output folder at {path}: {exc}") from exc
+
+    resolved_path = path.resolve(strict=False)
+    resolved_root = (
+        private_root if private_root.is_absolute() else Path.cwd() / private_root
+    ).resolve(strict=False)
+    try:
+        relative_parts = resolved_path.relative_to(resolved_root).parts
+    except ValueError:
+        relative_parts = ()
+
+    directories = [resolved_root]
+    current = resolved_root
+    for part in relative_parts:
+        current = current / part
+        directories.append(current)
+
+    for directory in directories:
+        try:
+            directory.chmod(0o700)
+        except OSError as exc:
+            raise IngestionError(
+                f"Could not make private output folder at {directory}: {exc}"
+            ) from exc
+
+
+def _write_private_text(path: Path, text: str, *, description: str) -> None:
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        file_descriptor = os.open(
+            path,
+            flags,
+            0o600,
+        )
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        path.chmod(0o600)
+    except OSError as exc:
+        raise IngestionError(f"Could not write {description} at {path}: {exc}") from exc
 
 
 def _sha256(path: Path) -> str:

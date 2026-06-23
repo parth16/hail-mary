@@ -122,6 +122,23 @@ def test_init_bad_config_path_has_plain_english_error(
     assert "Traceback" not in result.output
 
 
+def test_init_force_recovers_invalid_saved_config(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("local_only: treu\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--force", "--data-dir", "local-data"])
+
+    assert result.exit_code == 0, result.output
+    assert "Created local config" in result.output
+    config_text = (config_dir / "config.yaml").read_text(encoding="utf-8")
+    assert "data_dir: local-data" in config_text
+    assert "local_only: true" in config_text
+
+
 def test_ingest_folder_unsafe_data_dir_has_plain_english_error(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -151,5 +168,5 @@ def test_ingest_folder_summary_write_error_has_plain_english_error(
     result = runner.invoke(app, ["ingest-folder", str(source.parent)])
 
     assert result.exit_code != 0
-    assert "Could not write the scan summary" in result.output
+    assert "Could not write scan summary" in result.output
     assert "Traceback" not in result.output

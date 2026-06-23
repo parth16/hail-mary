@@ -112,14 +112,6 @@ def is_ignored_path(path: Path) -> bool:
         ".git",
         ".hailmary",
     }
-    generated_dirs = {
-        "data",
-        "reports",
-        "browser-profiles",
-    }
 
     parts = [part.lower() for part in path.parts]
-    if any(part in ignored_anywhere for part in parts):
-        return True
-
-    return any(part in generated_dirs for part in parts[1:])
+    return any(part in ignored_anywhere for part in parts)
