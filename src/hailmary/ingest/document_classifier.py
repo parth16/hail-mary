@@ -73,14 +73,20 @@ def classify_document(path: Path, text_sample: str = "") -> DocumentType:
 
 
 def is_ignored_path(path: Path) -> bool:
-    ignored_names = {
+    ignored_anywhere = {
         ".ds_store",
         "__pycache__",
         ".git",
         ".hailmary",
+    }
+    generated_dirs = {
         "data",
         "reports",
         "browser-profiles",
     }
 
-    return any(part.lower() in ignored_names for part in path.parts)
+    parts = [part.lower() for part in path.parts]
+    if any(part in ignored_anywhere for part in parts):
+        return True
+
+    return any(part in generated_dirs for part in parts[1:])

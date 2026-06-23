@@ -83,6 +83,38 @@ def test_duplicate_files_get_distinct_output_paths(tmp_path: Path) -> None:
     assert all(path.exists() for path in output_paths)
 
 
+def test_top_level_deal_named_data_is_ingested(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Data"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Memo about the Data company.", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "generated-data"))
+
+    assert summary.document_count == 1
+    assert len(summary.deals) == 1
+    assert summary.deals[0].company_name == "Data"
+
+
+def test_colliding_deal_folder_slugs_stay_separate(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    first = root / "Acme.AI"
+    second = root / "Acme AI"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "memo.txt").write_text("Memo about Acme.AI.", encoding="utf-8")
+    (second / "memo.txt").write_text("Memo about Acme AI.", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal_ids = {deal.id for deal in summary.deals}
+    company_names = {deal.company_name for deal in summary.deals}
+    assert summary.document_count == 2
+    assert len(summary.deals) == 2
+    assert len(deal_ids) == 2
+    assert company_names == {"Acme.AI", "Acme AI"}
+
+
 def test_confidentiality_detection_uses_raw_text_before_cleanup(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "ConfidentialCo"

@@ -67,3 +67,45 @@ def test_invalid_boolean_env_has_plain_english_error(
     assert "must be true or false" in result.output
     assert "privacy settings should fail closed" in result.output
     assert "Traceback" not in result.output
+
+
+def test_invalid_numeric_env_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_MAX_CHECK", "ten")
+
+    result = runner.invoke(app, ["init", "--data-dir", str(tmp_path / "data")])
+
+    assert result.exit_code != 0
+    assert "must be a whole number" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_init_unsafe_data_dir_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+
+    result = runner.invoke(app, ["init", "--data-dir", "."])
+
+    assert result.exit_code != 0
+    assert "cannot be the repository root" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_ingest_folder_unsafe_data_dir_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    source = tmp_path / "pitch-decks" / "Acme"
+    source.mkdir(parents=True)
+    (source / "memo.txt").write_text("Memo about Acme.", encoding="utf-8")
+
+    result = runner.invoke(app, ["ingest-folder", str(source.parent), "--data-dir", "."])
+
+    assert result.exit_code != 0
+    assert "cannot be the repository root" in result.output
+    assert "Traceback" not in result.output

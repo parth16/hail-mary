@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
@@ -16,12 +16,16 @@ app = typer.Typer(
 console = Console()
 
 
+def _exit_with_config_error(exc: ConfigError) -> NoReturn:
+    console.print(f"Error: {exc}")
+    raise typer.Exit(1) from None
+
+
 def _config_from_options(data_dir: Path | None) -> AppConfig:
     try:
         return load_config(data_dir=data_dir)
     except ConfigError as exc:
-        console.print(f"Error: {exc}")
-        raise typer.Exit(1) from None
+        _exit_with_config_error(exc)
 
 
 @app.command("init")
@@ -44,7 +48,10 @@ def init(
     """Create local folders for generated Hail Mary files."""
 
     config = _config_from_options(data_dir)
-    result = create_local_state(config, force=force)
+    try:
+        result = create_local_state(config, force=force)
+    except ConfigError as exc:
+        _exit_with_config_error(exc)
 
     console.print(f"Created Hail Mary local folders in {result.data_dir}.")
     if result.config_created:
@@ -70,7 +77,10 @@ def ingest_folder(
     """Scan a local folder and save source-linked document metadata."""
 
     config = _config_from_options(data_dir)
-    create_local_state(config, force=False)
+    try:
+        create_local_state(config, force=False)
+    except ConfigError as exc:
+        _exit_with_config_error(exc)
     try:
         summary = ingest_folder_path(folder, config=config)
     except (FileNotFoundError, NotADirectoryError) as exc:

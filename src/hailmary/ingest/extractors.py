@@ -157,6 +157,13 @@ def _extract_text_file(path: Path) -> ExtractionResult:
     except UnicodeDecodeError:
         raw_text = path.read_text(encoding="utf-8", errors="replace")
         notes = "Some characters could not be read and were replaced."
+    except OSError as exc:
+        return ExtractionResult(
+            pages=[],
+            page_count=None,
+            extraction_quality=ExtractionQuality.LOW,
+            notes=f"Could not read the text file: {exc}",
+        )
 
     clean_text = clean_extracted_text(raw_text)
     page = ExtractedPage(
@@ -183,6 +190,13 @@ def _extract_html(path: Path) -> ExtractionResult:
     except UnicodeDecodeError:
         html = path.read_text(encoding="utf-8", errors="replace")
         notes = "Some characters could not be read and were replaced."
+    except OSError as exc:
+        return ExtractionResult(
+            pages=[],
+            page_count=None,
+            extraction_quality=ExtractionQuality.LOW,
+            notes=f"Could not read the HTML file: {exc}",
+        )
 
     soup = BeautifulSoup(html, "html.parser")
     for element in soup(["script", "style", "noscript"]):

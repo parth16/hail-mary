@@ -42,4 +42,9 @@ def test_classifies_pitch_deck_from_investor_overview_name() -> None:
 def test_ignores_local_noise_paths() -> None:
     assert is_ignored_path(Path(".DS_Store"))
     assert is_ignored_path(Path("Company/.DS_Store"))
-    assert is_ignored_path(Path("data/raw/file.pdf"))
+    assert is_ignored_path(Path("Company/data/raw/file.pdf"))
+
+
+def test_does_not_ignore_top_level_deal_named_data_or_reports() -> None:
+    assert not is_ignored_path(Path("Data/deck.pdf"))
+    assert not is_ignored_path(Path("Reports/memo.txt"))

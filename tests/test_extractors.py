@@ -48,3 +48,12 @@ def test_pdf_page_access_failure_is_recorded(
     assert result.extraction_quality == ExtractionQuality.LOW
     assert result.notes is not None
     assert "Could not read pages" in result.notes
+
+
+def test_missing_text_file_is_recorded_without_crashing(tmp_path: Path) -> None:
+    result = extract_document(tmp_path / "missing.txt")
+
+    assert result.pages == []
+    assert result.extraction_quality == ExtractionQuality.LOW
+    assert result.notes is not None
+    assert "Could not read the text file" in result.notes

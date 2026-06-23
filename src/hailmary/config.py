@@ -68,7 +68,36 @@ def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None or value.strip() == "":
         return default
-    return int(value)
+    return _parse_int(value, source=name)
+
+
+def _config_int(values: dict[str, str], name: str, default: int) -> int:
+    value = values.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return _parse_int(value, source=f".hailmary/config.yaml field {name}")
+
+
+def _setting_int(
+    *,
+    env_name: str,
+    config_values: dict[str, str],
+    config_name: str,
+    default: int,
+) -> int:
+    if env_name in os.environ:
+        return _env_int(env_name, default)
+    return _config_int(config_values, config_name, default)
+
+
+def _parse_int(value: str, *, source: str) -> int:
+    try:
+        return int(value.strip())
+    except ValueError as exc:
+        raise ConfigError(
+            f"{source} must be a whole number. Got {value!r}. "
+            "Hail Mary did not guess because investment limits should be explicit."
+        ) from exc
 
 
 def load_config(data_dir: Path | None = None) -> AppConfig:
@@ -88,11 +117,24 @@ def load_config(data_dir: Path | None = None) -> AppConfig:
         data_dir=resolved_data_dir,
         local_only=local_only,
         log_level=os.getenv("HAILMARY_LOG_LEVEL", saved_values.get("log_level", "INFO")),
-        capital_budget=_env_int(
-            "HAILMARY_CAPITAL_BUDGET", int(saved_values.get("capital_budget", "100000"))
+        capital_budget=_setting_int(
+            env_name="HAILMARY_CAPITAL_BUDGET",
+            config_values=saved_values,
+            config_name="capital_budget",
+            default=100_000,
         ),
-        min_check=_env_int("HAILMARY_MIN_CHECK", int(saved_values.get("min_check", "1000"))),
-        max_check=_env_int("HAILMARY_MAX_CHECK", int(saved_values.get("max_check", "10000"))),
+        min_check=_setting_int(
+            env_name="HAILMARY_MIN_CHECK",
+            config_values=saved_values,
+            config_name="min_check",
+            default=1_000,
+        ),
+        max_check=_setting_int(
+            env_name="HAILMARY_MAX_CHECK",
+            config_values=saved_values,
+            config_name="max_check",
+            default=10_000,
+        ),
         meridian_profile_dir=Path(
             os.getenv(
                 "HAILMARY_MERIDIAN_PROFILE_DIR",
@@ -201,10 +243,11 @@ def _path_has_tracked_files(git_root: Path, relative_text: str) -> bool:
 
 
 def _append_local_git_exclude(git_root: Path, pattern: str) -> None:
-    exclude_path = git_root / ".git" / "info" / "exclude"
-    if not exclude_path.parent.exists():
+    exclude_path = _local_git_exclude_path(git_root)
+    if exclude_path is None:
         return
 
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
     existing_patterns = {line.strip() for line in existing.splitlines()}
     if pattern in existing_patterns:
@@ -212,6 +255,27 @@ def _append_local_git_exclude(git_root: Path, pattern: str) -> None:
 
     newline = "" if existing.endswith("\n") or not existing else "\n"
     exclude_path.write_text(f"{existing}{newline}{pattern}\n", encoding="utf-8")
+
+
+def _local_git_exclude_path(git_root: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(git_root), "rev-parse", "--git-path", "info/exclude"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        result = None
+
+    if result is not None and result.returncode == 0 and result.stdout.strip():
+        path = Path(result.stdout.strip())
+        return path if path.is_absolute() else git_root / path
+
+    dot_git = git_root / ".git"
+    if dot_git.is_dir():
+        return dot_git / "info" / "exclude"
+    return None
 
 
 def _default_config_text(config: AppConfig) -> str:
