@@ -774,6 +774,7 @@ After the first push:
 - open PRs as ready for review, not drafts
 - include summary, validation commands, privacy notes, and known limitations in every PR body
 - self-review every change before pushing; fix obvious correctness, safety, clarity, and test gaps before opening a PR
+- after publishing a PR, poll every minute for Codex review activity; address actionable comments, push fixes, and continue the review loop until Codex gives a thumbs-up reaction or the operator explicitly stops it
 - wait for GitHub/Codex review before merging unless explicitly instructed otherwise
 - never stage raw investment docs or unrelated local files
 

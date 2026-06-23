@@ -56,6 +56,8 @@ After the first push:
 - include validation commands, test results, privacy notes, and known limitations in PR bodies
 - never stage raw investment docs or generated confidential output
 
+After publishing a PR, monitor Codex review activity every minute. An eyes reaction means Codex has started reviewing. If Codex leaves actionable comments, address them, run the relevant tests, push the fixes, and keep monitoring. Stop the loop only when Codex gives a thumbs-up reaction or the operator explicitly stops the process.
+
 ## Product Standards
 
 All operator-facing output should use plain English. Avoid unnecessary jargon; if a finance, legal, or technical term is needed, explain it the first time it appears.
