@@ -41,6 +41,7 @@ from hailmary.scoring import render_markdown_memo, score_evidence_store, score_l
 from hailmary.scoring.memo import ScoringError, _write_private_text
 
 runner = CliRunner()
+_TEST_EVIDENCE_TEXT_BY_ID: dict[str, str] = {}
 
 
 def _evidence(
@@ -50,6 +51,7 @@ def _evidence(
     deal_id: str = "deal_test",
     document_id: str = "doc_test",
 ) -> EvidenceRecord:
+    _TEST_EVIDENCE_TEXT_BY_ID[record_id] = text
     return EvidenceRecord(
         id=record_id,
         deal_id=deal_id,
@@ -71,8 +73,20 @@ def _claim(
     *,
     deal_id: str = "deal_test",
 ) -> ClaimRecord:
+    evidence_text = _TEST_EVIDENCE_TEXT_BY_ID.get(evidence_id, "")
+    source_span_start = evidence_text.find(value)
+    if source_span_start == -1:
+        source_span_start = 0
+    source_span_end = source_span_start + len(value)
+    normalized_id_value = (
+        value.lower()
+        .replace("$", "usd")
+        .replace("%", "pct")
+        .replace(".", "")
+        .replace(" ", "_")
+    )
     return ClaimRecord(
-        id=f"claim_{label.replace(' ', '_')}",
+        id=f"claim_{label.replace(' ', '_')}_{normalized_id_value}",
         deal_id=deal_id,
         claim_type=ClaimType.DEAL_TERM,
         label=label,
@@ -84,8 +98,8 @@ def _claim(
             EvidenceCitation(
                 evidence_id=evidence_id,
                 quote=value,
-                source_span_start=0,
-                source_span_end=len(value),
+                source_span_start=source_span_start,
+                source_span_end=source_span_end,
                 verification_status=VerificationStatus.VERIFIED,
             )
         ],
@@ -204,6 +218,46 @@ def test_score_evidence_store_passes_when_terms_conflict() -> None:
         gate.name == "Conflicting material deal terms"
         for gate in scored.triggered_kill_gates
     )
+
+
+def test_score_evidence_store_reuses_valid_claim_from_stale_conflict() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    valid_claim = _claim("valuation cap", "$8M", "ev_terms").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    stale_claim = _claim("valuation cap", "$10M", "ev_terms").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    claims = [
+        valid_claim,
+        stale_claim,
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+    conflict = ClaimConflict(
+        id="conflict_valuation",
+        deal_id="deal_test",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["$10M", "$8M"],
+        claim_ids=[valid_claim.id, stale_claim.id],
+        notes="One side of this stored conflict is stale.",
+    )
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims, conflicts=[conflict]),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert not any(
+        gate.name == "Conflicting material deal terms"
+        for gate in scored.triggered_kill_gates
+    )
+    assert "valuation cap" in _score_factor(scored, "Deal-term clarity").explanation
 
 
 def test_score_evidence_store_passes_when_platform_minimum_exceeds_max_check() -> None:
@@ -394,6 +448,101 @@ def test_score_evidence_store_cites_early_pmf_evidence() -> None:
     ]
 
 
+def test_score_evidence_store_ignores_negated_early_pmf_language() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "There are no pilots, no usage, and no retention yet.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+def test_score_evidence_store_ignores_coordinated_negated_pmf_language() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "The company has no usage or retention yet.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+def test_score_evidence_store_ignores_comma_separated_negated_pmf_language() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "The company has no usage, retention, or growth yet.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+def test_score_evidence_store_excludes_negated_early_pmf_from_citations() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "There are no pilots, no usage, and no retention yet.",
+        ),
+        _evidence("ev_positive_pmf", "Beta with a design partner."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.EARLY
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_positive_pmf"
+    ]
+
+
 def test_score_evidence_store_does_not_mark_single_source_high_confidence() -> None:
     scored = score_evidence_store(
         _strong_store(deal_id="deal_single", company_name="Single Source"),
@@ -403,17 +552,49 @@ def test_score_evidence_store_does_not_mark_single_source_high_confidence() -> N
     assert scored.confidence == ConfidenceLevel.MEDIUM
 
 
-def test_score_evidence_store_can_mark_multiple_sources_high_confidence() -> None:
-    store = _strong_store(deal_id="deal_multi", company_name="Multi Source")
-    store = store.model_copy(
-        update={
-            "evidence": [
-                evidence.model_copy(update={"document_id": f"doc_{index}"})
-                for index, evidence in enumerate(store.evidence)
-            ]
-        }
+def test_score_evidence_store_ignores_unrelated_sources_for_high_confidence() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_unrelated",
+            "ARR revenue growth with paid customers and retention.",
+            document_id="doc_unrelated",
+        ),
+        _evidence(
+            "ev_funding",
+            "Lead investor committed and seed round is active.",
+            document_id="doc_unrelated_two",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
     )
 
+    assert scored.confidence == ConfidenceLevel.MEDIUM
+
+
+def test_score_evidence_store_can_mark_multiple_claim_sources_high_confidence() -> None:
+    evidence = [
+        _evidence("ev_valuation", "Valuation cap $8M.", document_id="doc_valuation"),
+        _evidence("ev_discount", "Discount 20%.", document_id="doc_discount"),
+        _evidence("ev_round", "Round size $1M.", document_id="doc_round"),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_valuation"),
+        _claim("discount", "20%", "ev_discount"),
+        _claim("round size", "$1M", "ev_round"),
+    ]
+
+    store = _store(evidence=evidence, claims=claims)
     scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
 
     assert scored.confidence == ConfidenceLevel.HIGH
@@ -458,6 +639,58 @@ def test_score_evidence_store_revalidates_claim_citations() -> None:
     )
 
 
+def test_score_evidence_store_requires_citation_span_to_match_quote() -> None:
+    evidence = [_evidence("ev_terms", "Valuation cap $8M. Revenue is also $8M.")]
+    claim = _claim("valuation cap", "$8M", "ev_terms")
+    stale_claim = claim.model_copy(
+        update={
+            "citations": [
+                claim.citations[0].model_copy(
+                    update={
+                        "source_span_start": 0,
+                        "source_span_end": len("$8M"),
+                    }
+                )
+            ]
+        }
+    )
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=[stale_claim]),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert any(
+        gate.name == "No verified deal terms"
+        for gate in scored.triggered_kill_gates
+    )
+
+
+def test_score_evidence_store_ignores_conflicts_with_invalid_citations() -> None:
+    evidence = [_evidence("ev_terms", "Valuation cap $8M.")]
+    valid_claim = _claim("valuation cap", "$8M", "ev_terms")
+    invalid_claim = _claim("valuation cap", "$10M", "ev_terms")
+    conflict = ClaimConflict(
+        id="conflict_valuation",
+        deal_id="deal_test",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["$10M", "$8M"],
+        claim_ids=[valid_claim.id, invalid_claim.id],
+        notes="One stale citation no longer maps to evidence.",
+    )
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=[valid_claim, invalid_claim], conflicts=[conflict]),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert not any(
+        gate.name == "Conflicting material deal terms"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
     evidence = [_evidence("ev_terms", "Valuation cap $8M.")]
     claim = _claim("valuation cap", "$8M", "ev_terms")
@@ -487,6 +720,82 @@ def test_render_markdown_memo_includes_cited_evidence_beyond_first_25() -> None:
     markdown = render_markdown_memo(scored, store)
 
     assert "- ev_29:" in markdown
+
+
+def test_render_markdown_memo_includes_conflict_evidence_beyond_first_25() -> None:
+    evidence = [
+        _evidence(f"ev_{index}", f"Background evidence {index}.")
+        for index in range(29)
+    ]
+    evidence.extend(
+        [
+            _evidence("ev_29", "Valuation cap $8M."),
+            _evidence("ev_30", "Valuation cap $10M."),
+        ]
+    )
+    claims = [
+        _claim("valuation cap", "$8M", "ev_29"),
+        _claim("valuation cap", "$10M", "ev_30"),
+    ]
+    conflicted_claims = [
+        claim.model_copy(update={"verification_status": VerificationStatus.CONFLICTED})
+        for claim in claims
+    ]
+    conflict = ClaimConflict(
+        id="conflict_valuation",
+        deal_id="deal_test",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["valuation cap:$10M", "valuation cap:$8M"],
+        claim_ids=[claim.id for claim in conflicted_claims],
+        notes="Conflicting valuation caps.",
+    )
+    store = _store(evidence=evidence, claims=conflicted_claims, conflicts=[conflict])
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert "- ev_29:" in markdown
+    assert "- ev_30:" in markdown
+
+
+def test_render_markdown_memo_excludes_stale_conflict_evidence_beyond_first_25() -> None:
+    evidence = [
+        _evidence(f"ev_{index}", f"Background evidence {index}.")
+        for index in range(25)
+    ]
+    evidence.extend(
+        [
+            _evidence("ev_valid", "Valuation cap $8M."),
+            _evidence("ev_stale", "Stale background with no matching valuation."),
+        ]
+    )
+    valid_claim = _claim("valuation cap", "$8M", "ev_valid").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    stale_claim = _claim("valuation cap", "$10M", "ev_stale").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    conflict = ClaimConflict(
+        id="conflict_valuation",
+        deal_id="deal_test",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["valuation cap:$10M", "valuation cap:$8M"],
+        claim_ids=[valid_claim.id, stale_claim.id],
+        notes="One conflict side is stale.",
+    )
+    store = _store(
+        evidence=evidence,
+        claims=[valid_claim, stale_claim],
+        conflicts=[conflict],
+    )
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert "- ev_valid:" in markdown
+    assert "- ev_stale:" not in markdown
 
 
 def test_score_latest_ingestion_tracks_remaining_capital(tmp_path: Path) -> None:

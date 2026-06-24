@@ -9,7 +9,11 @@ from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.documents import IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import MemoRunSummary, Recommendation, ScoredDeal
-from hailmary.scoring.scorer import score_evidence_store, validated_verified_claims
+from hailmary.scoring.scorer import (
+    score_evidence_store,
+    validated_conflicts,
+    validated_verified_claims,
+)
 from hailmary.utils.slug import slugify
 
 
@@ -250,7 +254,7 @@ def _memo_evidence_records(
     scored_deal: ScoredDeal,
     verified_claims: list[ClaimRecord],
 ) -> list[EvidenceRecord]:
-    cited_ids = _cited_evidence_ids(scored_deal, verified_claims)
+    cited_ids = _cited_evidence_ids(scored_deal, verified_claims, store)
     included_ids: set[str] = set()
     selected: list[EvidenceRecord] = []
 
@@ -267,6 +271,7 @@ def _memo_evidence_records(
 def _cited_evidence_ids(
     scored_deal: ScoredDeal,
     verified_claims: list[ClaimRecord],
+    store: EvidenceStore,
 ) -> set[str]:
     cited_ids = {
         evidence_id
@@ -276,6 +281,15 @@ def _cited_evidence_ids(
     cited_ids.update(
         citation.evidence_id
         for claim in verified_claims
+        for citation in claim.citations
+    )
+    conflict_claim_ids = {
+        claim_id for conflict in validated_conflicts(store) for claim_id in conflict.claim_ids
+    }
+    cited_ids.update(
+        citation.evidence_id
+        for claim in store.claims
+        if claim.id in conflict_claim_ids
         for citation in claim.citations
     )
     cited_ids.update(

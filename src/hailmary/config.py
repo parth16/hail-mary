@@ -31,6 +31,7 @@ class AppConfig(BaseModel):
     max_check: int = 10_000
     meridian_profile_dir: Path = Field(default=Path("./data/browser-profiles/meridian"))
     enable_web_research: bool = False
+    mock_llm: bool = True
 
     @property
     def config_dir(self) -> Path:
@@ -138,6 +139,11 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
     )
     if local_only:
         enable_web_research = False
+    mock_llm = (
+        _env_bool("HAILMARY_MOCK_LLM", True)
+        if "HAILMARY_MOCK_LLM" in os.environ
+        else _config_bool(saved_values, "mock_llm", True)
+    )
 
     config = AppConfig(
         data_dir=resolved_data_dir,
@@ -167,6 +173,7 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             data_dir_was_overridden=data_dir_was_overridden,
         ),
         enable_web_research=enable_web_research,
+        mock_llm=mock_llm,
     )
     _ensure_investment_limits(config)
     return config
@@ -208,6 +215,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config.data_dir / "raw",
         config.data_dir / "processed",
         config.data_dir / "reports",
+        config.data_dir / "agent-packets",
         config.data_dir / "browser-profiles",
         config.meridian_profile_dir,
         config.config_dir,
@@ -419,7 +427,7 @@ def _ensure_dedicated_data_dir(path: Path) -> None:
     if not path.exists() or not path.is_dir():
         return
 
-    allowed_entries = {"raw", "processed", "reports", "browser-profiles"}
+    allowed_entries = {"raw", "processed", "reports", "agent-packets", "browser-profiles"}
     try:
         unknown_entries = {child.name for child in path.iterdir()} - allowed_entries
     except OSError as exc:
@@ -439,6 +447,7 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         data_dir / "raw",
         data_dir / "processed",
         data_dir / "reports",
+        data_dir / "agent-packets",
     }
     allowed_profile_root = data_dir / "browser-profiles"
 
@@ -456,7 +465,8 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         if profile_dir == reserved_path:
             raise ConfigError(
                 "The Meridian browser profile directory cannot be the data, raw, "
-                "processed, or reports folder. Choose a separate generated-data folder."
+                "processed, reports, or agent-packets folder. Choose a separate "
+                "generated-data folder."
             )
         try:
             profile_dir.relative_to(reserved_path)
@@ -714,6 +724,7 @@ def _local_git_exclude_path(git_root: Path) -> Path | None:
 def _default_config_text(config: AppConfig) -> str:
     local_only = "true" if config.local_only else "false"
     web_research = "true" if config.enable_web_research else "false"
+    mock_llm = "true" if config.mock_llm else "false"
 
     return f"""# Local Hail Mary settings. Do not commit this file.
 data_dir: {_yaml_string(config.data_dir.as_posix())}
@@ -724,6 +735,7 @@ min_check: {config.min_check}
 max_check: {config.max_check}
 meridian_profile_dir: {_yaml_string(config.meridian_profile_dir.as_posix())}
 enable_web_research: {web_research}
+mock_llm: {mock_llm}
 """
 
 

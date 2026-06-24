@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 
 from hailmary.config import CHECK_SIZE_TIERS, AppConfig
 from hailmary.schemas.evidence import (
+    ClaimConflict,
     ClaimRecord,
     EvidenceCitation,
     EvidenceRecord,
@@ -39,12 +40,39 @@ INVEST_MINIMUM_SCORE = 75
 HARD_MAX_CHECK = max(CHECK_SIZE_TIERS)
 NEGATED_TRACTION_PATTERNS = (
     re.compile(r"\bpre[-\s]?revenue\b", re.IGNORECASE),
-    re.compile(r"\bno\s+(?:paid\s+)?customers?\s+or\s+revenue\b", re.IGNORECASE),
-    re.compile(r"\bno\s+revenue\s+or\s+(?:paid\s+)?customers?\b", re.IGNORECASE),
+    re.compile(
+        r"\bno\s+(?:paid\s+)?customers?\s+or\s+"
+        r"(?:revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno\s+(?:revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)"
+        r"\s+or\s+(?:paid\s+)?customers?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno\s+(?:usage|retention|growth|pilots?|beta|lois?|waitlist)"
+        r"(?:(?:(?:\s*,\s*(?:(?:or|and)\s+)?)|\s+(?:or|and)\s+)"
+        r"(?:usage|retention|growth|pilots?|beta|lois?|waitlist))*\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bno\s+(?:paid\s+)?customers?\b", re.IGNORECASE),
     re.compile(r"\bno\s+revenue\b", re.IGNORECASE),
-    re.compile(r"\bwithout\s+(?:customers?|revenue|usage|retention)\b", re.IGNORECASE),
+    re.compile(
+        r"\bno\s+(?:usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bwithout\s+"
+        r"(?:customers?|revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bnot\s+(?:yet\s+)?(?:generating\s+)?revenue\b", re.IGNORECASE),
+    re.compile(
+        r"\bnot\s+(?:yet\s+)?(?:showing\s+)?"
+        r"(?:usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
+        re.IGNORECASE,
+    ),
 )
 NEGATED_FUNDING_PATTERNS = (
     re.compile(r"\bno\s+lead\s+investor\b", re.IGNORECASE),
@@ -69,20 +97,28 @@ def score_evidence_store(
 ) -> ScoredDeal:
     """Score one deal using only validated evidence-store records."""
 
+    valid_conflicts = validated_conflicts(store)
     verified_claims = validated_verified_claims(store)
     available_capital = config.capital_budget if capital_remaining is None else capital_remaining
     platform_minimum_check = _platform_minimum_check(verified_claims)
     pmf_level = _pmf_level(store.evidence)
     fundability_risk = _fundability_risk(store, verified_claims)
-    confidence = _confidence_level(store, verified_claims)
+    confidence = _confidence_level(store, verified_claims, valid_conflicts)
     kill_gates = _kill_gates(
         store,
         verified_claims,
+        valid_conflicts,
         config=config,
         platform_minimum_check=platform_minimum_check,
         capital_remaining=available_capital,
     )
-    score_factors = _score_factors(store, verified_claims, pmf_level, fundability_risk)
+    score_factors = _score_factors(
+        store,
+        verified_claims,
+        valid_conflicts,
+        pmf_level,
+        fundability_risk,
+    )
     total_score = sum(factor.score for factor in score_factors)
     has_kill_gate = any(gate.triggered for gate in kill_gates)
     recommendation = (
@@ -133,6 +169,7 @@ def score_evidence_store(
             verified_claims,
             pmf_level=pmf_level,
             fundability_risk=fundability_risk,
+            valid_conflicts=valid_conflicts,
         ),
         capital_remaining_before=available_capital,
         capital_remaining_after=max(0, available_capital - check_size),
@@ -141,12 +178,49 @@ def score_evidence_store(
 
 def validated_verified_claims(store: EvidenceStore) -> list[ClaimRecord]:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    valid_conflict_claim_ids = {
+        claim_id for conflict in validated_conflicts(store) for claim_id in conflict.claim_ids
+    }
     return [
         claim
         for claim in store.claims
-        if claim.verification_status == VerificationStatus.VERIFIED
+        if claim.id not in valid_conflict_claim_ids
+        and claim.verification_status
+        in {VerificationStatus.VERIFIED, VerificationStatus.CONFLICTED}
         and _claim_citations_are_valid(claim, evidence_by_id)
     ]
+
+
+def validated_conflicts(store: EvidenceStore) -> list[ClaimConflict]:
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    claim_by_id = {claim.id: claim for claim in store.claims}
+    valid_claim_ids = {
+        claim.id
+        for claim in store.claims
+        if claim.verification_status
+        in {VerificationStatus.VERIFIED, VerificationStatus.CONFLICTED}
+        and _claim_citations_are_valid(claim, evidence_by_id)
+    }
+    valid_conflicts: list[ClaimConflict] = []
+    for conflict in store.conflicts:
+        valid_ids = [
+            claim_id
+            for claim_id in conflict.claim_ids
+            if claim_id in valid_claim_ids and claim_id in claim_by_id
+        ]
+        valid_values = sorted(
+            {claim_by_id[claim_id].normalized_value for claim_id in valid_ids}
+        )
+        if len(valid_ids) >= 2 and len(valid_values) >= 2:
+            valid_conflicts.append(
+                conflict.model_copy(
+                    update={
+                        "claim_ids": valid_ids,
+                        "normalized_values": valid_values,
+                    }
+                )
+            )
+    return valid_conflicts
 
 
 def _claim_citations_are_valid(
@@ -170,17 +244,16 @@ def _citation_is_valid(
 
     start = citation.source_span_start
     end = citation.source_span_end
-    if (
+    return (
         0 <= start < end <= len(evidence.text)
         and evidence.text[start:end] == citation.quote
-    ):
-        return True
-    return citation.quote in evidence.text
+    )
 
 
 def _kill_gates(
     store: EvidenceStore,
     verified_claims: list[ClaimRecord],
+    valid_conflicts: list[ClaimConflict],
     *,
     config: AppConfig,
     platform_minimum_check: int | None,
@@ -213,10 +286,10 @@ def _kill_gates(
         ),
         KillGate(
             name="Conflicting material deal terms",
-            triggered=bool(store.conflicts),
+            triggered=bool(valid_conflicts),
             reason=(
-                "One or more extracted deal terms conflict."
-                if store.conflicts
+                "One or more extracted deal terms conflict and still have valid citations."
+                if valid_conflicts
                 else "No conflicting deal-term claims were detected."
             ),
         ),
@@ -262,15 +335,16 @@ def _kill_gates(
 def _score_factors(
     store: EvidenceStore,
     verified_claims: list[ClaimRecord],
+    valid_conflicts: list[ClaimConflict],
     pmf_level: PMFLevel,
     fundability_risk: FundabilityRisk,
 ) -> list[ScoreFactor]:
     return [
         _evidence_coverage_factor(store),
-        _deal_terms_factor(verified_claims, store),
+        _deal_terms_factor(verified_claims, valid_conflicts),
         _pmf_factor(store, pmf_level),
         _fundability_factor(store, fundability_risk),
-        _evidence_quality_factor(store),
+        _evidence_quality_factor(store, valid_conflicts),
     ]
 
 
@@ -292,11 +366,11 @@ def _evidence_coverage_factor(store: EvidenceStore) -> ScoreFactor:
 
 def _deal_terms_factor(
     verified_claims: list[ClaimRecord],
-    store: EvidenceStore,
+    valid_conflicts: list[ClaimConflict],
 ) -> ScoreFactor:
     unique_labels = sorted({claim.label for claim in verified_claims})
     score = min(25, len(unique_labels) * 7)
-    if store.conflicts:
+    if valid_conflicts:
         score = min(score, 8)
     return ScoreFactor(
         name="Deal-term clarity",
@@ -320,7 +394,7 @@ def _pmf_factor(store: EvidenceStore, pmf_level: PMFLevel) -> ScoreFactor:
     if pmf_level == PMFLevel.DEVELOPING:
         matched_evidence = _positive_traction_evidence(store.evidence)
     elif pmf_level == PMFLevel.EARLY:
-        matched_evidence = _evidence_matching_keywords(store.evidence, EARLY_PMF_KEYWORDS)
+        matched_evidence = _positive_early_pmf_evidence(store.evidence)
     else:
         matched_evidence = []
     return ScoreFactor(
@@ -352,7 +426,10 @@ def _fundability_factor(
     )
 
 
-def _evidence_quality_factor(store: EvidenceStore) -> ScoreFactor:
+def _evidence_quality_factor(
+    store: EvidenceStore,
+    valid_conflicts: list[ClaimConflict],
+) -> ScoreFactor:
     if not store.evidence:
         score = 0
         explanation = "No evidence quality could be assessed."
@@ -368,7 +445,7 @@ def _evidence_quality_factor(store: EvidenceStore) -> ScoreFactor:
         score = 15
         score -= min(8, stale_count * 3)
         score -= min(4, unknown_count)
-        if store.conflicts:
+        if valid_conflicts:
             score = min(score, 6)
         score = max(score, 0)
         explanation = (
@@ -384,10 +461,9 @@ def _evidence_quality_factor(store: EvidenceStore) -> ScoreFactor:
 
 
 def _pmf_level(evidence: list[EvidenceRecord]) -> PMFLevel:
-    text_index = _text_index(evidence)
     if _positive_traction_evidence(evidence):
         return PMFLevel.DEVELOPING
-    if _text_contains_any_keyword(text_index, EARLY_PMF_KEYWORDS):
+    if _positive_early_pmf_evidence(evidence):
         return PMFLevel.EARLY
     return PMFLevel.UNKNOWN
 
@@ -414,9 +490,10 @@ def _diligence_questions(
     *,
     pmf_level: PMFLevel,
     fundability_risk: FundabilityRisk,
+    valid_conflicts: list[ClaimConflict],
 ) -> list[DiligenceQuestion]:
     questions: list[DiligenceQuestion] = []
-    if store.conflicts:
+    if valid_conflicts:
         questions.append(
             DiligenceQuestion(
                 priority=1,
@@ -574,11 +651,19 @@ def _money_text_to_dollars(raw_value: str) -> int | None:
 def _confidence_level(
     store: EvidenceStore,
     verified_claims: list[ClaimRecord],
+    valid_conflicts: list[ClaimConflict],
 ) -> ConfidenceLevel:
-    if store.conflicts or not store.evidence or not verified_claims:
+    if valid_conflicts or not store.evidence or not verified_claims:
         return ConfidenceLevel.LOW
-    source_document_ids = {evidence.document_id for evidence in store.evidence}
-    source_kinds = {evidence.source_kind for evidence in store.evidence}
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    cited_evidence = [
+        evidence_by_id[citation.evidence_id]
+        for claim in verified_claims
+        for citation in claim.citations
+        if citation.evidence_id in evidence_by_id
+    ]
+    source_document_ids = {evidence.document_id for evidence in cited_evidence}
+    source_kinds = {evidence.source_kind for evidence in cited_evidence}
     has_independent_sources = len(source_document_ids) >= 2 or len(source_kinds) >= 2
     if len(store.evidence) >= 3 and len(verified_claims) >= 3 and has_independent_sources:
         return ConfidenceLevel.HIGH
@@ -603,10 +688,6 @@ def _one_line_reason(
     )
 
 
-def _text_contains_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
-    return any(_contains_keyword(text, keyword) for keyword in keywords)
-
-
 def _positive_traction_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
     return [
         record
@@ -627,6 +708,18 @@ def _positive_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceR
             record.text,
             FUNDABILITY_KEYWORDS,
             negated_patterns=NEGATED_FUNDING_PATTERNS,
+        )
+    ]
+
+
+def _positive_early_pmf_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
+    return [
+        record
+        for record in evidence
+        if _text_contains_positive_keyword(
+            record.text,
+            EARLY_PMF_KEYWORDS,
+            negated_patterns=NEGATED_TRACTION_PATTERNS,
         )
     ]
 
@@ -691,10 +784,6 @@ def _keyword_pattern(keyword: str) -> str:
     return rf"(?<![A-Za-z0-9]){escaped_phrase}(?![A-Za-z0-9])"
 
 
-def _text_index(evidence: list[EvidenceRecord]) -> str:
-    return "\n".join(record.text.lower() for record in evidence)
-
-
 def _claim_evidence_ids(claims: list[ClaimRecord]) -> list[str]:
     evidence_ids: list[str] = []
     for claim in claims:
@@ -702,14 +791,3 @@ def _claim_evidence_ids(claims: list[ClaimRecord]) -> list[str]:
             if citation.evidence_id not in evidence_ids:
                 evidence_ids.append(citation.evidence_id)
     return evidence_ids[:5]
-
-
-def _evidence_matching_keywords(
-    evidence: list[EvidenceRecord],
-    keywords: tuple[str, ...],
-) -> list[EvidenceRecord]:
-    return [
-        record
-        for record in evidence
-        if _text_contains_any_keyword(record.text, keywords)
-    ]

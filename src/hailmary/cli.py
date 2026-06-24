@@ -6,6 +6,13 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
+from hailmary.agents.packets import (
+    AgentPacketError,
+    load_agent_input_packet,
+    load_agent_review_output,
+    prepare_agent_packets,
+)
+from hailmary.agents.validation import validate_agent_output
 from hailmary.config import (
     AppConfig,
     ConfigError,
@@ -190,6 +197,69 @@ def score_deals(
             f"check size {_format_check_size(scored_deal.check_size)}, "
             f"score {scored_deal.total_score}/{scored_deal.max_score}."
         )
+
+
+@app.command("prepare-agent-packets")
+def prepare_agent_packets_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read generated evidence and write agent packets.",
+        ),
+    ] = None,
+) -> None:
+    """Prepare local JSON packets for structured model review."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = prepare_agent_packets(config=config)
+    except AgentPacketError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    packet_word = "packet" if result.packet_count == 1 else "packets"
+    console.print(f"Prepared {result.packet_count} local agent input {packet_word}.")
+    console.print(f"Saved JSON {packet_word} to {result.output_dir}.")
+    console.print(
+        "These files contain generated diligence material and should stay private."
+    )
+
+
+@app.command("validate-agent-output")
+def validate_agent_output_command(
+    output_path: Annotated[
+        Path,
+        typer.Argument(help="JSON output returned by the review model."),
+    ],
+    packet_path: Annotated[
+        Path,
+        typer.Argument(help="Agent packet that was given to the review model."),
+    ],
+) -> None:
+    """Validate structured model output against one agent packet."""
+
+    try:
+        packet = load_agent_input_packet(packet_path)
+        output = load_agent_review_output(output_path)
+    except AgentPacketError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    result = validate_agent_output(output, packet)
+    if not result.valid:
+        issue_word = "problem" if len(result.issues) == 1 else "problems"
+        console.print(
+            f"Agent output did not pass validation. Found {len(result.issues)} "
+            f"{issue_word}."
+        )
+        for issue in result.issues:
+            console.print(f"- {issue.location}: {issue.message}")
+        raise typer.Exit(1) from None
+
+    console.print(
+        "Agent output passed validation. Every cited evidence ID is in the packet."
+    )
 
 
 def _format_check_size(check_size: int) -> str:
