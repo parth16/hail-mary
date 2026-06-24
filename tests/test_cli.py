@@ -83,6 +83,31 @@ def test_ingest_folder_warns_when_documents_need_image_text_reading(
     assert "before Hail Mary can use all of their content" in normalized_output
 
 
+def test_ingest_folder_warns_when_no_usable_evidence_is_built(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "pitch-decks" / "EmptyCo"
+    source.mkdir(parents=True)
+    (source / "empty.pdf").write_bytes(b"%PDF-1.4")
+
+    def fake_extract_document(path: Path) -> ExtractionResult:
+        assert path.name == "empty.pdf"
+        return ExtractionResult(
+            pages=[],
+            page_count=1,
+            extraction_quality=ExtractionQuality.LOW,
+        )
+
+    monkeypatch.setattr(folder_loader, "extract_document", fake_extract_document)
+
+    result = runner.invoke(app, ["ingest-folder", str(source.parent)])
+
+    assert result.exit_code == 0, result.output
+    assert "No usable evidence text was built" in result.output
+    assert "cannot use their text yet" in result.output
+
+
 def test_ingest_folder_unreadable_path_has_plain_english_warning(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

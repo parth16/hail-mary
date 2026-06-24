@@ -23,10 +23,11 @@ from hailmary.utils.slug import slugify
 
 STALE_SOURCE_DAYS = 365
 MONEY_PATTERN = (
-    r"\$\s?\d+(?:,\d{3})*(?:\.\d+)?\s?"
-    r"(?:k|m|b|thousand|million|billion)?"
+    r"\$\s?\d+(?:,\d{3})*(?:\.\d+)?"
+    r"(?:\s?(?:thousand|million|billion|k|m|b))?"
 )
 PERCENT_PATTERN = r"\d+(?:\.\d+)?\s?%"
+TERM_SEPARATOR = r"\s*(?:(?:is|of|at|:|\|)\s*)?"
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ DEAL_TERM_PATTERNS = (
         label="valuation cap",
         unit="usd",
         regex=re.compile(
-            rf"\bvaluation cap\b(?:\s*(?:is|of|at|:))?\s*(?P<value>{MONEY_PATTERN})",
+            rf"\bvaluation cap\b{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -49,7 +50,7 @@ DEAL_TERM_PATTERNS = (
         label="post-money valuation",
         unit="usd",
         regex=re.compile(
-            rf"\bpost[-\s]?money valuation\b(?:\s*(?:is|of|at|:))?\s*(?P<value>{MONEY_PATTERN})",
+            rf"\bpost[-\s]?money valuation\b{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -57,7 +58,7 @@ DEAL_TERM_PATTERNS = (
         label="pre-money valuation",
         unit="usd",
         regex=re.compile(
-            rf"\bpre[-\s]?money valuation\b(?:\s*(?:is|of|at|:))?\s*(?P<value>{MONEY_PATTERN})",
+            rf"\bpre[-\s]?money valuation\b{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -65,8 +66,8 @@ DEAL_TERM_PATTERNS = (
         label="round size",
         unit="usd",
         regex=re.compile(
-            rf"\b(?:round size|target raise|raising|raise)\b(?:\s*(?:is|of|at|:))?\s*"
-            rf"(?P<value>{MONEY_PATTERN})",
+            rf"\b(?:round size|target raise|raising|raise)\b"
+            rf"{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -75,7 +76,7 @@ DEAL_TERM_PATTERNS = (
         unit="usd",
         regex=re.compile(
             rf"\b(?:minimum investment|minimum check|min check)\b"
-            rf"(?:\s*(?:is|of|at|:))?\s*(?P<value>{MONEY_PATTERN})",
+            rf"{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
             re.IGNORECASE,
         ),
     ),
@@ -83,7 +84,7 @@ DEAL_TERM_PATTERNS = (
         label="discount",
         unit="percent",
         regex=re.compile(
-            rf"\bdiscount\b(?:\s*(?:is|of|at|:))?\s*(?P<value>{PERCENT_PATTERN})|"
+            rf"\bdiscount\b{TERM_SEPARATOR}(?P<value>{PERCENT_PATTERN})|"
             rf"(?P<value_before>{PERCENT_PATTERN})\s*\bdiscount\b",
             re.IGNORECASE,
         ),
@@ -209,7 +210,7 @@ def _document_evidence_records(
 
 
 def _source_freshness(source: SourceDocument, *, now: datetime) -> SourceFreshness:
-    source_date = source.retrieved_at or source.created_at
+    source_date = source.created_at or source.retrieved_at
     if source_date is None:
         return SourceFreshness.UNKNOWN
     if source_date.tzinfo is None:
@@ -238,7 +239,10 @@ def _extract_deal_term_claims(
                 if not raw_value:
                     continue
                 normalized_value = _normalize_value(raw_value, unit=pattern.unit)
-                quote = match.group(0).strip()
+                citation = _citation_from_match(evidence, match)
+                if citation is None:
+                    continue
+                quote = citation.quote
                 if not quote:
                     continue
                 claim_key = (pattern.label, normalized_value, evidence.id, quote)
@@ -246,12 +250,6 @@ def _extract_deal_term_claims(
                     continue
                 seen_claims.add(claim_key)
 
-                citation = EvidenceCitation(
-                    evidence_id=evidence.id,
-                    quote=quote,
-                    source_span_start=match.start(),
-                    source_span_end=match.end(),
-                )
                 citation_status = verify_citation(citation, evidence_by_id)
                 citation = citation.model_copy(
                     update={"verification_status": citation_status}
@@ -262,7 +260,7 @@ def _extract_deal_term_claims(
                     label=pattern.label,
                     normalized_value=normalized_value,
                     evidence_id=evidence.id,
-                    source_span_start=match.start(),
+                    source_span_start=citation.source_span_start,
                 )
                 quality = EvidenceQuality(
                     claim_type=ClaimType.DEAL_TERM,
@@ -290,6 +288,26 @@ def _extract_deal_term_claims(
                 )
 
     return claims
+
+
+def _citation_from_match(
+    evidence: EvidenceRecord,
+    match: re.Match[str],
+) -> EvidenceCitation | None:
+    start = match.start()
+    end = match.end()
+    while start < end and evidence.text[start].isspace():
+        start += 1
+    while end > start and evidence.text[end - 1].isspace():
+        end -= 1
+    if start >= end:
+        return None
+    return EvidenceCitation(
+        evidence_id=evidence.id,
+        quote=evidence.text[start:end],
+        source_span_start=start,
+        source_span_end=end,
+    )
 
 
 def verify_citation(

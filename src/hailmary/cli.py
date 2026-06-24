@@ -117,6 +117,11 @@ def ingest_folder(
             f"Built {evidence_count} source-linked evidence {evidence_word} "
             f"and {claim_count} deal-term {claim_word}."
         )
+    elif summary.document_count:
+        console.print(
+            "No usable evidence text was built from these documents. "
+            "Hail Mary stored the files it could read, but cannot use their text yet."
+        )
     if conflict_count:
         conflict_word = "conflict" if conflict_count == 1 else "conflicts"
         console.print(

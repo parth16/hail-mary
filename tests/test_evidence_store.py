@@ -57,6 +57,32 @@ def test_ingest_folder_writes_evidence_store_with_verified_deal_terms(
         assert citation["quote"] in evidence["text"]
 
 
+def test_deal_terms_parse_table_separators_and_full_money_suffixes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "TableTermCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Valuation cap | $8 million\nDiscount | 20% \n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    claims_by_label = {claim["label"]: claim for claim in saved_store["claims"]}
+
+    assert claims_by_label["valuation cap"]["value"] == "$8 million"
+    assert claims_by_label["valuation cap"]["normalized_value"] == "usd_cents:800000000"
+    assert claims_by_label["valuation cap"]["raw_text"] == "Valuation cap | $8 million"
+    assert claims_by_label["valuation cap"]["verification_status"] == VerificationStatus.VERIFIED
+    assert claims_by_label["discount"]["raw_text"] == "Discount | 20%"
+    assert claims_by_label["discount"]["verification_status"] == VerificationStatus.VERIFIED
+
+
 def test_evidence_store_flags_conflicting_deal_terms(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "ConflictCo"
@@ -155,6 +181,7 @@ def test_evidence_store_marks_old_sources_stale(tmp_path: Path) -> None:
     deal = summary.deals[0]
     document = deal.documents[0]
     document.source.created_at = stale_created_at
+    document.source.retrieved_at = datetime(2025, 12, 31, tzinfo=UTC)
 
     store = build_evidence_store(deal, created_at=datetime(2026, 1, 2, tzinfo=UTC))
 
