@@ -217,6 +217,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config.data_dir / "reports",
         config.data_dir / "agent-packets",
         config.data_dir / "research-plans",
+        config.data_dir / "research-results",
         config.data_dir / "browser-profiles",
         config.meridian_profile_dir,
         config.config_dir,
@@ -434,6 +435,7 @@ def _ensure_dedicated_data_dir(path: Path) -> None:
         "reports",
         "agent-packets",
         "research-plans",
+        "research-results",
         "research-results-templates",
         "browser-profiles",
     }
@@ -458,6 +460,7 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         data_dir / "reports",
         data_dir / "agent-packets",
         data_dir / "research-plans",
+        data_dir / "research-results",
         data_dir / "research-results-templates",
     }
     allowed_profile_root = data_dir / "browser-profiles"
@@ -476,8 +479,8 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         if profile_dir == reserved_path:
             raise ConfigError(
                 "The Meridian browser profile directory cannot be the data, raw, "
-                "processed, reports, agent-packets, research-plans, or "
-                "research-results-templates folder. Choose a separate generated-data folder."
+                "processed, reports, agent-packets, research-plans, research-results, "
+                "or research-results-templates folder. Choose a separate generated-data folder."
             )
         try:
             profile_dir.relative_to(reserved_path)
@@ -492,7 +495,8 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         raise ConfigError(
             "The Meridian browser profile directory cannot be inside a reserved Hail Mary "
             "data folder such as raw, processed, reports, agent-packets, research-plans, "
-            "or research-results-templates. Choose a separate generated-data folder."
+            "research-results, or research-results-templates. Choose a separate "
+            "generated-data folder."
         )
 
 

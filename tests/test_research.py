@@ -20,6 +20,7 @@ from hailmary.research import (
     ResearchTemplateError,
     builtin_research_providers,
     import_research_results,
+    prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
 )
@@ -498,6 +499,268 @@ def test_prepare_research_results_template_command_has_plain_english_error(
 
     assert result.exit_code != 0
     assert "No research plans were found" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_writes_private_importable_file(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D for a $1,000,000 offering.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            },
+            {
+                "company_name": "Acme AI Holdings",
+                "title": "Acme AI Holdings Form D",
+                "text": "Acme AI Holdings filed a Form D for a $2,000,000 offering.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme-holdings/form-d",
+            },
+            {
+                "company_name": "Unrelated Robotics",
+                "title": "Unrelated Robotics Form D",
+                "text": "Unrelated Robotics filed a Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/unrelated/form-d",
+            },
+        ],
+    )
+
+    result = prepare_public_research_results(
+        config=config,
+        company_names=["Acme AI", " acme ai "],
+        sec_form_d_results_path=sec_results_path,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    assert result.output_path.parent == tmp_path / "data" / "research-results"
+    assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
+    assert stat.S_IMODE(result.output_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
+    assert result.deal_count == 1
+    assert result.result_count == 1
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert {item["title"] for item in saved["results"]} == {"Acme AI Form D"}
+    assert saved["results"][0]["provider_id"] == "sec_form_d"
+    assert saved["results"][0]["provider_name"] == "SEC EDGAR Form D search"
+    assert saved["results"][0]["retrieved_at"] == "2025-12-31T12:00:00Z"
+    assert saved["results"][0]["confidence"].startswith("high:")
+    assert "licensing_notes" in saved["results"][0]
+
+    dry_run = import_research_results(
+        config=config,
+        results_path=result.output_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+    assert dry_run.imported_count == 1
+    assert dry_run.updated_store_paths == []
+
+
+def test_prepare_public_research_results_returns_no_file_when_no_results(
+    tmp_path: Path,
+) -> None:
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+
+    result = prepare_public_research_results(
+        config=AppConfig(data_dir=tmp_path / "data"),
+        company_names=["MissingCo"],
+        sec_form_d_results_path=sec_results_path,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is None
+    assert result.result_count == 0
+    assert result.deals[0].company_name == "MissingCo"
+    assert not (tmp_path / "data" / "research-results").exists()
+
+
+def test_prepare_public_research_results_command_writes_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--company",
+            "MissingCo",
+            "--sec-form-d-results",
+            str(sec_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Prepared 1 public research result for 2 companies" in result.output
+    assert "No public research results were prepared for: MissingCo" in result.output
+    assert "No websites or software data feeds were contacted" in result.output
+    assert "import-research-results" in result.output
+    results = list((tmp_path / "data" / "research-results").glob("*.json"))
+    assert len(results) == 1
+    assert results[0].name in result.output.replace("\n", "")
+
+
+def test_prepare_public_research_results_command_requires_local_source_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Add at least one local public-source file" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_command_reports_bad_source_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sec_results_path = tmp_path / "bad-sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://example.com/form-d",
+            }
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--sec-form-d-results",
+            str(sec_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "source_url must use an SEC website host" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_command_requires_results_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sec_results_path = tmp_path / "missing-results-list.json"
+    sec_results_path.write_text("{}", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--sec-form-d-results",
+            str(sec_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "results" in result.output
+    assert "Field required" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_command_requires_retrieved_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sec_results_path = tmp_path / "missing-retrieved-at.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--sec-form-d-results",
+            str(sec_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "retrieved_at" in result.output
+    assert "Field" in result.output
+    assert "required" in result.output
     assert "Traceback" not in result.output
 
 
@@ -1229,4 +1492,8 @@ def _research_result(**overrides: object) -> dict[str, object]:
 
 
 def _write_results(path: Path, results: list[dict[str, object]]) -> None:
+    path.write_text(json.dumps({"results": results}), encoding="utf-8")
+
+
+def _write_sec_form_d_results(path: Path, results: list[dict[str, object]]) -> None:
     path.write_text(json.dumps({"results": results}), encoding="utf-8")
