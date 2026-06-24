@@ -161,12 +161,14 @@ def _document_evidence_records(
     ]
 
     for page in document.pages:
-        text = page.clean_text.strip()
+        text = _page_text_without_table_evidence(page.clean_text.strip(), table_texts)
         if not text:
             continue
-        if _is_table_backed_page_text(text, table_texts):
-            continue
-        span_start, span_end = _safe_clean_page_span(page_raw_text=page.raw_text, text=text)
+        span_start, span_end = _safe_clean_page_span(
+            page_raw_text=page.raw_text,
+            text=text,
+            source_span_start=page.source_span_start,
+        )
         records.append(
             EvidenceRecord(
                 id=_evidence_id(
@@ -221,23 +223,25 @@ def _document_evidence_records(
     return records
 
 
-def _is_table_backed_page_text(page_text: str, table_texts: list[str]) -> bool:
-    if not table_texts:
-        return False
+def _page_text_without_table_evidence(page_text: str, table_texts: list[str]) -> str:
     remaining_text = page_text
     for table_text in table_texts:
         remaining_text = remaining_text.replace(table_text, "", 1)
-    return not remaining_text.strip()
+    return remaining_text.strip()
 
 
 def _safe_clean_page_span(
     *,
     page_raw_text: str,
     text: str,
+    source_span_start: int | None,
 ) -> tuple[int | None, int | None]:
     if text != page_raw_text.strip():
         return None, None
-    start = len(page_raw_text) - len(page_raw_text.lstrip())
+    if source_span_start is None:
+        return None, None
+    local_start = len(page_raw_text) - len(page_raw_text.lstrip())
+    start = source_span_start + local_start
     return start, start + len(text)
 
 

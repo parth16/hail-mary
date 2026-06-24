@@ -10,6 +10,7 @@ from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.schemas.documents import (
     DocumentType,
     ExtractedPage,
+    ExtractedTable,
     ExtractionQuality,
     FileType,
     IngestedDeal,
@@ -176,6 +177,8 @@ def test_page_evidence_keeps_safe_clean_text_source_span() -> None:
                 raw_text="  Valuation cap $8M.  ",
                 clean_text="Valuation cap $8M.",
                 word_count=3,
+                source_span_start=40,
+                source_span_end=62,
             )
         ],
         tables=[],
@@ -185,8 +188,8 @@ def test_page_evidence_keeps_safe_clean_text_source_span() -> None:
 
     store = build_evidence_store(deal, created_at=created_at)
 
-    assert store.evidence[0].source_span_start == 2
-    assert store.evidence[0].source_span_end == 20
+    assert store.evidence[0].source_span_start == 42
+    assert store.evidence[0].source_span_end == 60
 
 
 def test_page_evidence_drops_span_when_clean_text_changes_raw_text() -> None:
@@ -222,6 +225,53 @@ def test_page_evidence_drops_span_when_clean_text_changes_raw_text() -> None:
 
     assert store.evidence[0].source_span_start is None
     assert store.evidence[0].source_span_end is None
+
+
+def test_mixed_page_and_table_text_does_not_duplicate_table_claims() -> None:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    source = SourceDocument(
+        id="doc_test",
+        deal_id="deal_test",
+        path=Path("memo.docx"),
+        source_kind=SourceKind.LOCAL_FILE,
+        document_type=DocumentType.MEMO,
+        file_type=FileType.DOCX,
+        title="memo",
+        ingested_at=created_at,
+        sha256="abc",
+        extraction_quality=ExtractionQuality.HIGH,
+    )
+    document = IngestedDocument(
+        source=source,
+        pages=[
+            ExtractedPage(
+                page_number=None,
+                raw_text="Company memo\nValuation cap | $8M",
+                clean_text="Company memo\nValuation cap | $8M",
+                word_count=5,
+            )
+        ],
+        tables=[
+            ExtractedTable(
+                table_index=1,
+                rows=[["Valuation cap", "$8M"]],
+                clean_text="Valuation cap | $8M",
+                row_count=1,
+                column_count=2,
+            )
+        ],
+        output_path=Path("out.json"),
+    )
+    deal = IngestedDeal(id="deal_test", company_name="MixedCo", documents=[document])
+
+    store = build_evidence_store(deal, created_at=created_at)
+
+    assert [evidence.evidence_kind for evidence in store.evidence] == [
+        EvidenceKind.PAGE_TEXT,
+        EvidenceKind.TABLE_TEXT,
+    ]
+    assert store.evidence[0].text == "Company memo"
+    assert [claim.label for claim in store.claims] == ["valuation cap"]
 
 
 def test_verify_citation_checks_evidence_id_span_and_quote() -> None:
