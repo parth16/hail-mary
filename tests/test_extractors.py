@@ -188,6 +188,35 @@ def test_pdf_short_text_page_does_not_recommend_ocr(
     assert not result.pages[0].needs_ocr
 
 
+def test_pdf_repeated_short_text_pages_recommend_ocr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class TextPage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        pages = [
+            TextPage("Customer logo slide"),
+            TextPage("Product demo slide"),
+            TextPage("Market map slide"),
+        ]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert result.ocr_recommended
+    assert result.vision_recommended
+    assert [page.needs_ocr for page in result.pages] == [True, True, True]
+
+
 def test_pdf_low_text_page_recommends_ocr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -420,6 +449,33 @@ def test_html_nested_tables_are_captured_separately(tmp_path: Path) -> None:
     assert result.table_count == 2
     assert result.tables[0].rows == [["Metric", "Detail"], ["ARR"]]
     assert result.tables[1].rows == [["Nested", "Value"], ["Expansion", "Strong"]]
+
+
+def test_html_table_extraction_expands_row_and_column_spans(tmp_path: Path) -> None:
+    html_path = tmp_path / "deal.html"
+    html_path.write_text(
+        """
+        <html><body>
+          <table>
+            <tr><th rowspan="2">Metric</th><th colspan="2">Revenue</th></tr>
+            <tr><th>2025</th><th>2026</th></tr>
+            <tr><td>ARR</td><td>$1M</td><td>$2M</td></tr>
+          </table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    result = extract_document(html_path)
+
+    assert result.table_count == 1
+    assert result.tables[0].rows == [
+        ["Metric", "Revenue", ""],
+        ["Metric", "2025", "2026"],
+        ["ARR", "$1M", "$2M"],
+    ]
+    assert result.tables[0].column_count == 3
+    assert "Metric | 2025 | 2026" in result.tables[0].clean_text
 
 
 def test_csv_extraction_records_table_text(tmp_path: Path) -> None:

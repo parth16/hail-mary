@@ -27,6 +27,9 @@ MAX_XLSX_COLUMN_INDEX = 16_383
 MAX_XLSX_COLUMN_LETTERS = 3
 MAX_XLSX_BLANK_GAP = 100
 INVALID_XLSX_CELL_INDEX = -1
+PDF_REPEATED_SHORT_TEXT_MIN_PAGES = 2
+PDF_REPEATED_SHORT_TEXT_WORD_THRESHOLD = 5
+MAX_HTML_TABLE_SPAN = 100
 
 
 class ExtractionResult(BaseModel):
@@ -129,6 +132,24 @@ def _clean_text_needs_ocr(clean_text: str, *, word_count: int) -> bool:
     return word_count <= 2
 
 
+def _mark_repeated_short_pdf_pages_for_ocr(pages: list[ExtractedPage]) -> None:
+    short_text_pages = [
+        page
+        for page in pages
+        if page.raw_text.strip()
+        and not page.notes
+        and 2 < page.word_count <= PDF_REPEATED_SHORT_TEXT_WORD_THRESHOLD
+    ]
+    if len(short_text_pages) < PDF_REPEATED_SHORT_TEXT_MIN_PAGES:
+        return
+    if len(short_text_pages) * 2 <= len(pages):
+        return
+
+    for page in short_text_pages:
+        page.needs_ocr = True
+        page.vision_recommended = True
+
+
 def _result_from_pages(
     pages: list[ExtractedPage],
     *,
@@ -210,6 +231,7 @@ def _extract_pdf(path: Path) -> ExtractionResult:
         if raw_text:
             source_offset += len(raw_text) + 2
 
+    _mark_repeated_short_pdf_pages_for_ocr(pages)
     return _result_from_pages(
         pages,
         page_count=page_count,
@@ -335,8 +357,12 @@ def _make_table(
     page_number: int | None = None,
     source_span_start: int | None = None,
     notes: str | None = None,
+    preserve_trailing_blanks: bool = False,
 ) -> ExtractedTable:
-    normalized_rows = _table_rows_with_content(rows)
+    normalized_rows = _table_rows_with_content(
+        rows,
+        preserve_trailing_blanks=preserve_trailing_blanks,
+    )
     text = "\n".join(_table_rows_as_text(normalized_rows))
     source_span_end = source_span_start + len(text) if source_span_start is not None else None
     return ExtractedTable(
@@ -356,10 +382,16 @@ def _table_rows_as_text(rows: list[list[str]]) -> list[str]:
     return [" | ".join(row) for row in _table_rows_with_content(rows)]
 
 
-def _table_rows_with_content(rows: list[list[str]]) -> list[list[str]]:
+def _table_rows_with_content(
+    rows: list[list[str]],
+    *,
+    preserve_trailing_blanks: bool = False,
+) -> list[list[str]]:
     normalized_rows: list[list[str]] = []
     for row in rows:
-        cells = _trim_trailing_blank_cells([cell.strip() for cell in row])
+        cells = [cell.strip() for cell in row]
+        if not preserve_trailing_blanks:
+            cells = _trim_trailing_blank_cells(cells)
         if any(cells):
             normalized_rows.append(cells)
     return normalized_rows
@@ -444,16 +476,76 @@ def _extract_html(path: Path) -> ExtractionResult:
 def _html_tables(soup: BeautifulSoup) -> list[ExtractedTable]:
     tables: list[ExtractedTable] = []
     for table_index, table in enumerate(soup.find_all("table"), start=1):
-        rows: list[list[str]] = []
-        for row in _html_direct_table_rows(table):
-            cells = [_html_cell_text(cell) for cell in row.find_all(["th", "td"], recursive=False)]
-            while cells and not cells[-1]:
-                cells.pop()
-            if any(cells):
-                rows.append(cells)
+        rows = _html_table_rows(table)
         if rows:
-            tables.append(_make_table(rows, table_index=table_index))
+            tables.append(
+                _make_table(
+                    rows,
+                    table_index=table_index,
+                    preserve_trailing_blanks=True,
+                )
+            )
     return tables
+
+
+def _html_table_rows(table: Any) -> list[list[str]]:
+    rows: list[list[str]] = []
+    active_rowspans: dict[int, tuple[int, str]] = {}
+    for row in _html_direct_table_rows(table):
+        cells: list[str] = []
+        column_index = 0
+        row_has_span = bool(active_rowspans)
+        for cell in row.find_all(["th", "td"], recursive=False):
+            column_index = _append_html_rowspans(
+                cells, active_rowspans, column_index
+            )
+            cell_text = _html_cell_text(cell)
+            rowspan = _html_span_value(cell, "rowspan")
+            colspan = _html_span_value(cell, "colspan")
+            row_has_span = row_has_span or rowspan > 1 or colspan > 1
+            cells.append(cell_text)
+            cells.extend([""] * (colspan - 1))
+            if rowspan > 1:
+                for span_offset in range(colspan):
+                    active_rowspans[column_index + span_offset] = (
+                        rowspan - 1,
+                        cell_text if span_offset == 0 else "",
+                    )
+            column_index += colspan
+
+        _append_html_rowspans(cells, active_rowspans, column_index)
+        while not row_has_span and cells and not cells[-1]:
+            cells.pop()
+        if any(cells):
+            rows.append(cells)
+    return rows
+
+
+def _append_html_rowspans(
+    cells: list[str],
+    active_rowspans: dict[int, tuple[int, str]],
+    column_index: int,
+) -> int:
+    while column_index in active_rowspans:
+        remaining_rows, cell_text = active_rowspans[column_index]
+        cells.append(cell_text)
+        if remaining_rows <= 1:
+            del active_rowspans[column_index]
+        else:
+            active_rowspans[column_index] = (remaining_rows - 1, cell_text)
+        column_index += 1
+    return column_index
+
+
+def _html_span_value(cell: Any, attribute: str) -> int:
+    raw_value = cell.get(attribute)
+    if raw_value is None:
+        return 1
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 1
+    return min(max(value, 1), MAX_HTML_TABLE_SPAN)
 
 
 def _html_direct_table_rows(table: Any) -> list[Any]:
