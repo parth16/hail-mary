@@ -115,15 +115,19 @@ def test_duplicate_files_get_distinct_output_paths(tmp_path: Path) -> None:
 
 def test_direct_company_folder_scan_uses_root_folder_name(tmp_path: Path) -> None:
     root = tmp_path / "Acme"
+    nested = root / "Closing Documents"
     root.mkdir()
+    nested.mkdir()
     (root / "deck.pdf").write_text("not a real pdf", encoding="utf-8")
     (root / "memo.txt").write_text("Memo about Acme.", encoding="utf-8")
+    (nested / "safe.txt").write_text("Simple Agreement for Future Equity.", encoding="utf-8")
 
     summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
 
-    assert summary.document_count == 2
+    assert summary.document_count == 3
     assert len(summary.deals) == 1
     assert summary.deals[0].company_name == "Acme"
+    assert {document.source.company_name for document in summary.deals[0].documents} == {"Acme"}
 
 
 def test_top_level_deal_named_data_is_ingested(tmp_path: Path) -> None:
@@ -440,6 +444,21 @@ def test_symlinked_files_are_skipped(tmp_path: Path) -> None:
 
     assert summary.document_count == 0
     assert summary.skipped_files == ["SymlinkCo/deck.txt"]
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_symlinked_scan_root_is_rejected_before_resolving(tmp_path: Path) -> None:
+    real_root = tmp_path / "outside-decks"
+    company = real_root / "SecretCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("This should not be scanned.", encoding="utf-8")
+    symlinked_root = tmp_path / "pitch-decks"
+    symlinked_root.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(IngestionError, match="scan folder cannot be a symlink"):
+        ingest_folder(symlinked_root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert not (tmp_path / "data" / "processed" / "ingestion_summary.json").exists()
 
 
 def test_unreadable_scan_folders_are_reported(

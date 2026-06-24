@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
+import yaml
 from pydantic import BaseModel, Field
 
 
@@ -341,13 +343,40 @@ def _read_local_config(path: Path) -> dict[str, str]:
     except OSError as exc:
         raise ConfigError(f"Could not read local config at {path}: {exc}") from exc
 
-    for line in config_text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or ":" not in stripped:
+    try:
+        raw_values = yaml.safe_load(config_text)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Could not parse local config at {path}: {exc}") from exc
+
+    if raw_values is None:
+        return {}
+    if not isinstance(raw_values, dict):
+        raise ConfigError(
+            f"Hail Mary needs {path} to contain simple key-value settings."
+        )
+
+    for key, value in raw_values.items():
+        if not isinstance(key, str):
+            raise ConfigError(f"Hail Mary needs {path} setting names to be plain text.")
+        normalized_value = _config_scalar_to_string(value, path=path, key=key)
+        if normalized_value is None:
             continue
-        key, value = stripped.split(":", 1)
-        values[key.strip()] = value.strip()
+        values[key.strip()] = normalized_value
     return values
+
+
+def _config_scalar_to_string(value: Any, *, path: Path, key: str) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip()
+    raise ConfigError(
+        f"Hail Mary needs {path} field {key} to be a simple text, number, or true/false value."
+    )
 
 
 def _ensure_generated_path_not_current_or_root(path: Path, *, purpose: str) -> None:

@@ -30,13 +30,12 @@ class IngestionError(RuntimeError):
 def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
     """Scan a local folder and store extracted document metadata."""
 
-    root_path = root_path.expanduser().resolve()
-    if not root_path.exists():
-        raise FileNotFoundError(f"The folder does not exist: {root_path}")
-    if not root_path.is_dir():
-        raise NotADirectoryError(f"This is not a folder: {root_path}")
-
+    root_path = _resolve_scan_root(root_path)
     allow_private_raw_root = _is_private_raw_root(root_path, config)
+    use_collection_subfolders = _uses_collection_subfolders(
+        root_path,
+        allow_private_raw_root=allow_private_raw_root,
+    )
     run_started_at = datetime.now(UTC)
     deals_by_id: dict[str, IngestedDeal] = {}
     skipped_files: list[str] = []
@@ -65,7 +64,11 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
             skipped_files.append(str(relative_path))
             continue
 
-        deal_name = _deal_name_for_path(relative_path, root_path=root_path)
+        deal_name = _deal_name_for_path(
+            relative_path,
+            root_path=root_path,
+            use_collection_subfolders=use_collection_subfolders,
+        )
         candidate_files.append((path, deal_name))
 
     deal_ids_by_name = {
@@ -150,8 +153,60 @@ def _relative_display_path(path: Path, root_path: Path) -> str:
         return str(path)
 
 
-def _deal_name_for_path(relative_path: Path, *, root_path: Path) -> str:
-    if len(relative_path.parts) > 1:
+def _resolve_scan_root(root_path: Path) -> Path:
+    expanded_path = root_path.expanduser()
+    absolute_path = expanded_path if expanded_path.is_absolute() else Path.cwd() / expanded_path
+
+    if absolute_path.is_symlink():
+        raise IngestionError("The scan folder cannot be a symlink. Choose a real folder.")
+    for parent in absolute_path.parents:
+        if parent.is_symlink():
+            raise IngestionError(
+                f"Hail Mary cannot scan {expanded_path} because {parent} is a symlinked "
+                "parent folder."
+            )
+
+    resolved_path = absolute_path.resolve(strict=False)
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"The folder does not exist: {expanded_path}")
+    if not resolved_path.is_dir():
+        raise NotADirectoryError(f"This is not a folder: {expanded_path}")
+    return resolved_path
+
+
+def _uses_collection_subfolders(
+    root_path: Path,
+    *,
+    allow_private_raw_root: bool,
+) -> bool:
+    collection_folder_names = {
+        "companies",
+        "deal-documents",
+        "deal-docs",
+        "deals",
+        "decks",
+        "diligence",
+        "diligence-documents",
+        "diligence-docs",
+        "documents",
+        "investment-documents",
+        "investment-docs",
+        "pitch-decks",
+        "startup-documents",
+        "startup-docs",
+        "startups",
+    }
+    normalized_root_name = slugify(root_path.name)
+    return allow_private_raw_root or normalized_root_name in collection_folder_names
+
+
+def _deal_name_for_path(
+    relative_path: Path,
+    *,
+    root_path: Path,
+    use_collection_subfolders: bool,
+) -> str:
+    if use_collection_subfolders and len(relative_path.parts) > 1:
         return relative_path.parts[0]
     return root_path.name
 

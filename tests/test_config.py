@@ -433,6 +433,56 @@ def test_load_config_reads_saved_data_dir(tmp_path: Path, monkeypatch: pytest.Mo
     assert config.meridian_profile_dir == Path("local-data/browser-profiles/meridian")
 
 
+def test_load_config_accepts_yaml_comments_and_quotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "# Local settings may include normal YAML comments.",
+                'data_dir: "local-data" # generated output folder',
+                "local_only: false",
+                'log_level: "DEBUG"',
+                "capital_budget: 25000",
+                "min_check: '1000'",
+                "max_check: 5000 # highest check for this run",
+                "meridian_profile_dir: 'local-data/browser-profiles/meridian'",
+                "enable_web_research: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+
+    assert config.data_dir == Path("local-data")
+    assert config.local_only is False
+    assert config.log_level == "DEBUG"
+    assert config.capital_budget == 25_000
+    assert config.min_check == 1_000
+    assert config.max_check == 5_000
+    assert config.meridian_profile_dir == Path("local-data/browser-profiles/meridian")
+    assert config.enable_web_research is True
+
+
+def test_load_config_rejects_nested_yaml_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "data_dir:\n  path: local-data\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="simple text, number, or true/false value"):
+        load_config()
+
+
 def test_custom_data_dir_derives_default_meridian_profile_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
