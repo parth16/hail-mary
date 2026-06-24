@@ -388,7 +388,7 @@ def _pmf_factor(store: EvidenceStore, pmf_level: PMFLevel) -> ScoreFactor:
     if pmf_level == PMFLevel.DEVELOPING:
         matched_evidence = _positive_traction_evidence(store.evidence)
     elif pmf_level == PMFLevel.EARLY:
-        matched_evidence = _evidence_matching_keywords(store.evidence, EARLY_PMF_KEYWORDS)
+        matched_evidence = _positive_early_pmf_evidence(store.evidence)
     else:
         matched_evidence = []
     return ScoreFactor(
@@ -682,10 +682,6 @@ def _one_line_reason(
     )
 
 
-def _text_contains_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
-    return any(_contains_keyword(text, keyword) for keyword in keywords)
-
-
 def _positive_traction_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
     return [
         record
@@ -789,14 +785,3 @@ def _claim_evidence_ids(claims: list[ClaimRecord]) -> list[str]:
             if citation.evidence_id not in evidence_ids:
                 evidence_ids.append(citation.evidence_id)
     return evidence_ids[:5]
-
-
-def _evidence_matching_keywords(
-    evidence: list[EvidenceRecord],
-    keywords: tuple[str, ...],
-) -> list[EvidenceRecord]:
-    return [
-        record
-        for record in evidence
-        if _text_contains_any_keyword(record.text, keywords)
-    ]

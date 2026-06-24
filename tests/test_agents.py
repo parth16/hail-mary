@@ -34,6 +34,7 @@ from hailmary.schemas.documents import (
     SourceKind,
 )
 from hailmary.schemas.evidence import (
+    ClaimConflict,
     ClaimRecord,
     ClaimType,
     EvidenceCitation,
@@ -127,6 +128,57 @@ def test_build_agent_input_packet_caps_cited_evidence_records() -> None:
 
     assert len(packet.evidence) == 50
     assert packet.allowed_evidence_ids == [f"ev_{index}" for index in range(50)]
+
+
+def test_build_agent_input_packet_does_not_prioritize_invalid_conflict_evidence() -> None:
+    evidence = [
+        _evidence("ev_stale_one", "Stale conflict evidence one."),
+        _evidence("ev_stale_two", "Stale conflict evidence two."),
+        _evidence("ev_important", "Important ranked evidence."),
+    ]
+    stale_claim_one = _claim("valuation cap", "$99M", "ev_stale_one").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    stale_claim_two = _claim("valuation cap", "$100M", "ev_stale_two").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    conflict = ClaimConflict(
+        id="conflict_stale",
+        deal_id="deal_test",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["$100M", "$99M"],
+        claim_ids=[stale_claim_one.id, stale_claim_two.id],
+        notes="Both sides are stale.",
+    )
+    store = _store(
+        evidence=evidence,
+        claims=[stale_claim_one, stale_claim_two],
+        conflicts=[conflict],
+    )
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored_deal = scored_deal.model_copy(
+        update={
+            "score_factors": [
+                ScoreFactor(
+                    name="Important support",
+                    score=1,
+                    max_score=1,
+                    explanation="Synthetic important support.",
+                    evidence_ids=["ev_important"],
+                )
+            ]
+        }
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.GROUNDING_AUDITOR,
+        max_evidence_records=1,
+    )
+
+    assert packet.allowed_evidence_ids == ["ev_important"]
 
 
 def test_validate_agent_output_accepts_known_evidence_ids_and_quotes() -> None:
@@ -296,6 +348,48 @@ def test_validate_agent_output_requires_final_decision_recommendation() -> None:
     assert not result.valid
     assert result.issues[0].location == "recommendation"
     assert "needs an INVEST or PASS recommendation" in result.issues[0].message
+
+
+def test_validate_agent_output_counts_recommendation_as_substantive_output() -> None:
+    packet = _agent_packet()
+    output = AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary="The recommendation is the whole output.",
+        recommendation=AgentRecommendationRationale(
+            recommendation=Recommendation.PASS,
+            check_size=0,
+            reason="The score is below the investment bar.",
+            evidence=[AgentEvidenceReference(evidence_id="ev_terms")],
+        ),
+    )
+
+    result = validate_agent_output(output, packet)
+
+    assert result.valid
+
+
+def test_validate_agent_output_requires_evidence_for_invest_recommendation() -> None:
+    packet = _agent_packet()
+    output = AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary="The recommendation omits cited evidence.",
+        recommendation=AgentRecommendationRationale(
+            recommendation=Recommendation.INVEST,
+            check_size=1_000,
+            reason="The model recommends investing without evidence.",
+            evidence=[],
+        ),
+    )
+
+    result = validate_agent_output(output, packet)
+
+    assert not result.valid
+    assert result.issues[0].location == "recommendation.evidence"
+    assert "needs at least one cited evidence ID" in result.issues[0].message
 
 
 def test_agent_review_output_rejects_extra_fields() -> None:
@@ -545,6 +639,7 @@ def _store(
     *,
     evidence: list[EvidenceRecord],
     claims: list[ClaimRecord],
+    conflicts: list[ClaimConflict] | None = None,
     deal_id: str = "deal_test",
     company_name: str = "AgentCo",
 ) -> EvidenceStore:
@@ -554,6 +649,7 @@ def _store(
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
         evidence=evidence,
         claims=claims,
+        conflicts=conflicts or [],
     )
 
 

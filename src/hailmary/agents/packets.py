@@ -21,7 +21,11 @@ from hailmary.schemas.agents import (
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import Recommendation, ScoredDeal
-from hailmary.scoring.scorer import score_evidence_store, validated_verified_claims
+from hailmary.scoring.scorer import (
+    score_evidence_store,
+    validated_conflicts,
+    validated_verified_claims,
+)
 from hailmary.utils.slug import slugify
 
 DEFAULT_AGENT_ROLES: tuple[AgentRole, ...] = (
@@ -360,7 +364,7 @@ def _cited_evidence_ids(
         for citation in claim.citations
     )
     conflict_claim_ids = {
-        claim_id for conflict in store.conflicts for claim_id in conflict.claim_ids
+        claim_id for conflict in validated_conflicts(store) for claim_id in conflict.claim_ids
     }
     cited_ids.update(
         citation.evidence_id

@@ -41,7 +41,12 @@ def validate_agent_output(
                 message="The output agent role does not match the agent packet.",
             )
         )
-    if not output.findings and not output.diligence_questions and not output.limitations:
+    if (
+        not output.findings
+        and not output.diligence_questions
+        and not output.limitations
+        and output.recommendation is None
+    ):
         issues.append(
             AgentValidationIssue(
                 location="findings",
@@ -115,6 +120,16 @@ def validate_agent_output(
                 AgentValidationIssue(
                     location="recommendation.check_size",
                     message="An INVEST recommendation cannot use a $0 check size.",
+                )
+            )
+        if (
+            output.recommendation.recommendation == Recommendation.INVEST
+            and not output.recommendation.evidence
+        ):
+            issues.append(
+                AgentValidationIssue(
+                    location="recommendation.evidence",
+                    message="An INVEST recommendation needs at least one cited evidence ID.",
                 )
             )
         for reference_index, reference in enumerate(output.recommendation.evidence):

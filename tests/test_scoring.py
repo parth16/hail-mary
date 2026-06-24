@@ -471,6 +471,32 @@ def test_score_evidence_store_ignores_negated_early_pmf_language() -> None:
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
 
 
+def test_score_evidence_store_excludes_negated_early_pmf_from_citations() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "There are no pilots, no usage, and no retention yet.",
+        ),
+        _evidence("ev_positive_pmf", "Beta with a design partner."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.EARLY
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_positive_pmf"
+    ]
+
+
 def test_score_evidence_store_does_not_mark_single_source_high_confidence() -> None:
     scored = score_evidence_store(
         _strong_store(deal_id="deal_single", company_name="Single Source"),
