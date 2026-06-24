@@ -237,6 +237,7 @@ class ResearchImportDealSummary(BaseModel):
 class ResearchImportRunSummary(BaseModel):
     input_path: Path
     imported_at: datetime
+    dry_run: bool = False
     deals: list[ResearchImportDealSummary] = Field(default_factory=list)
 
     @property
@@ -253,6 +254,8 @@ class ResearchImportRunSummary(BaseModel):
 
     @property
     def updated_store_paths(self) -> list[Path]:
+        if self.dry_run:
+            return []
         return [
             deal.evidence_store_path
             for deal in self.deals
