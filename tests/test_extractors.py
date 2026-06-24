@@ -188,6 +188,28 @@ def test_pdf_short_text_page_does_not_recommend_ocr(
     assert not result.pages[0].needs_ocr
 
 
+def test_pdf_low_text_page_recommends_ocr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class PageNumberOnly:
+        def extract_text(self) -> str:
+            return "1"
+
+    class Reader:
+        pages = [PageNumberOnly()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert result.ocr_recommended
+    assert result.vision_recommended
+    assert result.pages[0].needs_ocr
+
+
 def test_pdf_text_page_records_source_span(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -330,6 +352,17 @@ def test_csv_extraction_records_table_text(tmp_path: Path) -> None:
     assert result.tables[0].rows == [["year", "revenue"], ["2026", "100"]]
 
 
+def test_csv_extraction_preserves_interior_blank_cells(tmp_path: Path) -> None:
+    csv_path = tmp_path / "model.csv"
+    csv_path.write_text("metric,,value,\nARR,,100,\n", encoding="utf-8")
+
+    result = extract_document(csv_path)
+
+    assert "metric |  | value" in result.tables[0].clean_text
+    assert "ARR |  | 100" in result.tables[0].clean_text
+    assert result.tables[0].column_count == 4
+
+
 def test_csv_parser_error_is_recorded_without_crashing(tmp_path: Path) -> None:
     csv_path = tmp_path / "model.csv"
     csv_path.write_text(f"notes\n{'A' * 32}\n", encoding="utf-8")
@@ -403,6 +436,39 @@ def test_xlsx_extraction_preserves_sparse_blank_cells(tmp_path: Path) -> None:
 
     assert result.tables[0].rows == [["Metric", "", "Value"]]
     assert result.tables[0].column_count == 3
+
+
+def test_xlsx_impossible_cell_reference_is_skipped(tmp_path: Path) -> None:
+    xlsx_path = tmp_path / "model.xlsx"
+    with zipfile.ZipFile(xlsx_path, "w") as workbook:
+        workbook.writestr(
+            "xl/sharedStrings.xml",
+            """
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <si><t>Revenue</t></si>
+              <si><t>Impossible</t></si>
+            </sst>
+            """,
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row r="1">
+                  <c r="A1" t="s"><v>0</v></c>
+                  <c r="ZZZZZZ1" t="s"><v>1</v></c>
+                </row>
+              </sheetData>
+            </worksheet>
+            """,
+        )
+
+    result = extract_document(xlsx_path)
+
+    assert result.tables[0].rows == [["Revenue"]]
+    assert result.tables[0].column_count == 1
+    assert "Impossible" not in result.combined_text
 
 
 def test_xlsx_negative_shared_string_index_is_left_raw(tmp_path: Path) -> None:

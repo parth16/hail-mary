@@ -23,6 +23,9 @@ from hailmary.schemas.documents import (
 )
 from hailmary.utils.text_cleaning import clean_extracted_text_with_metadata
 
+MAX_XLSX_COLUMN_INDEX = 16_383
+INVALID_XLSX_CELL_INDEX = -1
+
 
 class ExtractionResult(BaseModel):
     pages: list[ExtractedPage]
@@ -95,7 +98,11 @@ def _make_page(
 ) -> ExtractedPage:
     cleaning = clean_extracted_text_with_metadata(raw_text)
     word_count = len(cleaning.clean_text.split())
-    page_needs_ocr = not cleaning.clean_text.strip() if needs_ocr is None else needs_ocr
+    page_needs_ocr = (
+        _clean_text_needs_ocr(cleaning.clean_text, word_count=word_count)
+        if needs_ocr is None
+        else needs_ocr
+    )
     page_needs_vision = page_needs_ocr if vision_recommended is None else vision_recommended
     source_span_end = (
         source_span_start + len(raw_text) if source_span_start is not None else None
@@ -112,6 +119,12 @@ def _make_page(
         removed_boilerplate_lines=cleaning.removed_boilerplate_lines,
         notes=notes,
     )
+
+
+def _clean_text_needs_ocr(clean_text: str, *, word_count: int) -> bool:
+    if not clean_text.strip():
+        return True
+    return word_count <= 2
 
 
 def _result_from_pages(
@@ -321,7 +334,14 @@ def _make_table(
 
 
 def _table_rows_as_text(rows: list[list[str]]) -> list[str]:
-    return [" | ".join(cell for cell in row if cell) for row in rows if any(row)]
+    return [" | ".join(_trim_trailing_blank_cells(row)) for row in rows if any(row)]
+
+
+def _trim_trailing_blank_cells(row: list[str]) -> list[str]:
+    cells = list(row)
+    while cells and not cells[-1]:
+        cells.pop()
+    return cells
 
 
 def _extract_text_file(path: Path) -> ExtractionResult:
@@ -523,6 +543,8 @@ def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[s
             if _xml_local_name(cell.tag) != "c":
                 continue
             cell_index = _xlsx_cell_index(cell)
+            if cell_index == INVALID_XLSX_CELL_INDEX:
+                continue
             if cell_index is not None:
                 while len(values) < cell_index:
                     values.append("")
@@ -540,12 +562,15 @@ def _xlsx_cell_index(cell: ElementTree.Element) -> int | None:
         return None
     match = re.match(r"([A-Za-z]+)", cell_reference)
     if not match:
-        return None
+        return INVALID_XLSX_CELL_INDEX
 
     index = 0
     for character in match.group(1).upper():
         index = index * 26 + (ord(character) - ord("A") + 1)
-    return index - 1
+    zero_based_index = index - 1
+    if zero_based_index > MAX_XLSX_COLUMN_INDEX:
+        return INVALID_XLSX_CELL_INDEX
+    return zero_based_index
 
 
 def _xlsx_cell_value(cell: ElementTree.Element, shared_strings: list[str]) -> str:
