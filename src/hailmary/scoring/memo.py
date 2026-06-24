@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from hailmary.config import AppConfig
 from hailmary.schemas.documents import IngestionSummary
-from hailmary.schemas.evidence import EvidenceStore
+from hailmary.schemas.evidence import ClaimRecord, EvidenceStore, VerificationStatus
 from hailmary.schemas.scoring import MemoRunSummary, ScoredDeal
 from hailmary.scoring.scorer import score_evidence_store
 from hailmary.utils.slug import slugify
@@ -22,26 +24,35 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
             "No ingested deals were found. Run `hailmary ingest-folder` before scoring."
         )
 
-    summary = IngestionSummary.model_validate_json(summary_path.read_text(encoding="utf-8"))
+    summary = _load_ingestion_summary(summary_path)
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir)
 
     scored_deals: list[ScoredDeal] = []
+    remaining_capital = config.capital_budget
     for deal in summary.deals:
         if deal.evidence_store_path is None:
             raise ScoringError(
                 f"No evidence store was found for {deal.company_name}. "
                 "Run `hailmary ingest-folder` again before scoring."
             )
-        if not deal.evidence_store_path.exists():
+        evidence_store_path = _resolve_saved_path(
+            deal.evidence_store_path,
+            data_dir=config.data_dir,
+            summary_path=summary_path,
+        )
+        if not evidence_store_path.exists():
             raise ScoringError(
                 f"The evidence store for {deal.company_name} is missing at "
-                f"{deal.evidence_store_path}. Run `hailmary ingest-folder` again."
+                f"{evidence_store_path}. Run `hailmary ingest-folder` again."
             )
-        store = EvidenceStore.model_validate_json(
-            deal.evidence_store_path.read_text(encoding="utf-8")
+        store = _load_evidence_store(evidence_store_path, company_name=deal.company_name)
+        scored_deal = score_evidence_store(
+            store,
+            config=config,
+            capital_remaining=remaining_capital,
         )
-        scored_deal = score_evidence_store(store, config=config)
+        remaining_capital = scored_deal.capital_remaining_after or 0
         memo_path = report_dir / f"{slugify(deal.company_name)}-{deal.id}-memo.md"
         _write_private_text(
             memo_path,
@@ -54,14 +65,20 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
 
 
 def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
+    verified_claims = _verified_claims(store)
     lines = [
-        f"# {scored_deal.company_name} Hail Mary Memo",
+        f"# Hail Mary Investment Memo: {scored_deal.company_name}",
         "",
-        f"Recommendation: **{scored_deal.recommendation}**",
-        f"Check size: **{_format_check_size(scored_deal.check_size)}**",
-        f"Score: **{scored_deal.total_score}/{scored_deal.max_score}**",
-        f"Product-market fit level: **{scored_deal.pmf_level}**",
-        f"Next-round fundability risk: **{scored_deal.fundability_risk}**",
+        "## Decision",
+        "",
+        f"**Recommendation:** {scored_deal.recommendation}",
+        f"**Suggested check:** {_format_check_size(scored_deal.check_size)}",
+        f"**Score:** {scored_deal.total_score}/{scored_deal.max_score}",
+        f"**Confidence:** {scored_deal.confidence}",
+        f"**One-line reason:** {scored_deal.one_line_reason}",
+        "**Deadline:** unknown",
+        f"**Round / Instrument:** {_round_summary(verified_claims)} / unknown",
+        f"**Valuation / Cap:** {_valuation_summary(verified_claims)}",
         "",
         "## Kill Gates",
     ]
@@ -78,9 +95,6 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         )
 
     lines.extend(["", "## Verified Deal Terms"])
-    verified_claims = [
-        claim for claim in store.claims if claim.verification_status == "verified"
-    ]
     if verified_claims:
         for claim in verified_claims:
             citation_ids = ", ".join(
@@ -125,6 +139,94 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _load_ingestion_summary(summary_path: Path) -> IngestionSummary:
+    try:
+        raw_summary = summary_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ScoringError(
+            f"Could not read the ingestion summary at {summary_path}: {exc}"
+        ) from exc
+    try:
+        return IngestionSummary.model_validate_json(raw_summary)
+    except ValidationError as exc:
+        raise ScoringError(
+            "The ingestion summary could not be read. "
+            "Run `hailmary ingest-folder` again before scoring."
+        ) from exc
+
+
+def _load_evidence_store(path: Path, *, company_name: str) -> EvidenceStore:
+    try:
+        raw_store = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ScoringError(
+            f"Could not read the evidence store for {company_name} at {path}: {exc}"
+        ) from exc
+    try:
+        return EvidenceStore.model_validate_json(raw_store)
+    except ValidationError as exc:
+        raise ScoringError(
+            f"The evidence store for {company_name} could not be read. "
+            "Run `hailmary ingest-folder` again before scoring."
+        ) from exc
+
+
+def _resolve_saved_path(path: Path, *, data_dir: Path, summary_path: Path) -> Path:
+    if path.is_absolute():
+        return path
+
+    absolute_data_dir = _absolute_path(data_dir).resolve(strict=False)
+    absolute_summary_path = _absolute_path(summary_path).resolve(strict=False)
+    candidate_roots = [
+        absolute_data_dir.parent,
+        absolute_data_dir,
+        absolute_summary_path.parent,
+    ]
+    candidates = [root / path for root in candidate_roots]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _absolute_path(path: Path) -> Path:
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _verified_claims(store: EvidenceStore) -> list[ClaimRecord]:
+    return [
+        claim
+        for claim in store.claims
+        if claim.verification_status == VerificationStatus.VERIFIED
+    ]
+
+
+def _round_summary(verified_claims: list[ClaimRecord]) -> str:
+    round_size = _first_claim_value(verified_claims, labels={"round size"})
+    if round_size is None:
+        return "unknown"
+    return f"round size {round_size}"
+
+
+def _valuation_summary(verified_claims: list[ClaimRecord]) -> str:
+    for label in ("valuation cap", "post-money valuation", "pre-money valuation"):
+        value = _first_claim_value(verified_claims, labels={label})
+        if value is not None:
+            return f"{label} {value}"
+    return "unknown"
+
+
+def _first_claim_value(
+    verified_claims: list[ClaimRecord],
+    *,
+    labels: set[str],
+) -> str | None:
+    for claim in verified_claims:
+        if claim.label in labels:
+            return claim.value
+    return None
 
 
 def _evidence_reference_text(evidence_ids: list[str]) -> str:

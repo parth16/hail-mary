@@ -24,6 +24,12 @@ class FundabilityRisk(StrEnum):
     LOW = "low"
 
 
+class ConfidenceLevel(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class KillGate(BaseModel):
     name: str
     triggered: bool
@@ -52,11 +58,15 @@ class ScoredDeal(BaseModel):
     check_size: int
     total_score: int
     max_score: int = 100
+    confidence: ConfidenceLevel = ConfidenceLevel.LOW
+    one_line_reason: str
     pmf_level: PMFLevel = PMFLevel.UNKNOWN
     fundability_risk: FundabilityRisk = FundabilityRisk.UNKNOWN
     kill_gates: list[KillGate] = Field(default_factory=list)
     score_factors: list[ScoreFactor] = Field(default_factory=list)
     diligence_questions: list[DiligenceQuestion] = Field(default_factory=list)
+    capital_remaining_before: int | None = None
+    capital_remaining_after: int | None = None
     memo_path: Path | None = None
 
     @property

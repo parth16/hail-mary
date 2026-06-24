@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from decimal import Decimal, InvalidOperation
+
 from hailmary.config import CHECK_SIZE_TIERS, AppConfig
 from hailmary.schemas.evidence import (
     ClaimRecord,
@@ -9,6 +12,7 @@ from hailmary.schemas.evidence import (
     VerificationStatus,
 )
 from hailmary.schemas.scoring import (
+    ConfidenceLevel,
     DiligenceQuestion,
     FundabilityRisk,
     KillGate,
@@ -30,9 +34,16 @@ TRACTION_KEYWORDS = (
 )
 EARLY_PMF_KEYWORDS = ("pilot", "beta", "loi", "waitlist", "design partner")
 FUNDABILITY_KEYWORDS = ("lead investor", "institutional", "series a", "seed", "follow-on")
+INVEST_MINIMUM_SCORE = 75
+HARD_MAX_CHECK = max(CHECK_SIZE_TIERS)
 
 
-def score_evidence_store(store: EvidenceStore, *, config: AppConfig) -> ScoredDeal:
+def score_evidence_store(
+    store: EvidenceStore,
+    *,
+    config: AppConfig,
+    capital_remaining: int | None = None,
+) -> ScoredDeal:
     """Score one deal using only validated evidence-store records."""
 
     verified_claims = [
@@ -40,23 +51,47 @@ def score_evidence_store(store: EvidenceStore, *, config: AppConfig) -> ScoredDe
         for claim in store.claims
         if claim.verification_status == VerificationStatus.VERIFIED
     ]
+    available_capital = config.capital_budget if capital_remaining is None else capital_remaining
+    platform_minimum_check = _platform_minimum_check(verified_claims)
     text_index = _text_index(store.evidence)
-    pmf_level = _pmf_level(text_index)
+    pmf_level = _pmf_level(store.evidence)
     fundability_risk = _fundability_risk(store, verified_claims, text_index)
-    kill_gates = _kill_gates(store, verified_claims)
+    confidence = _confidence_level(store, verified_claims)
+    kill_gates = _kill_gates(
+        store,
+        verified_claims,
+        config=config,
+        platform_minimum_check=platform_minimum_check,
+        capital_remaining=available_capital,
+    )
     score_factors = _score_factors(store, verified_claims, pmf_level, fundability_risk)
     total_score = sum(factor.score for factor in score_factors)
     has_kill_gate = any(gate.triggered for gate in kill_gates)
     recommendation = (
         Recommendation.PASS
-        if has_kill_gate or total_score < 70
+        if has_kill_gate or total_score < INVEST_MINIMUM_SCORE
         else Recommendation.INVEST
     )
     check_size = (
         0
         if recommendation == Recommendation.PASS
-        else _check_size_for_score(total_score, config=config)
+        else _check_size_for_score(
+            total_score,
+            config=config,
+            confidence=confidence,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=available_capital,
+        )
     )
+    if recommendation == Recommendation.INVEST and check_size == 0:
+        recommendation = Recommendation.PASS
+        kill_gates.append(
+            KillGate(
+                name="No available check size",
+                triggered=True,
+                reason="No configured check size fits the remaining capital.",
+            )
+        )
 
     return ScoredDeal(
         deal_id=store.deal_id,
@@ -64,6 +99,13 @@ def score_evidence_store(store: EvidenceStore, *, config: AppConfig) -> ScoredDe
         recommendation=recommendation,
         check_size=check_size,
         total_score=total_score,
+        confidence=confidence,
+        one_line_reason=_one_line_reason(
+            recommendation,
+            total_score=total_score,
+            confidence=confidence,
+            kill_gates=kill_gates,
+        ),
         pmf_level=pmf_level,
         fundability_risk=fundability_risk,
         kill_gates=kill_gates,
@@ -74,10 +116,33 @@ def score_evidence_store(store: EvidenceStore, *, config: AppConfig) -> ScoredDe
             pmf_level=pmf_level,
             fundability_risk=fundability_risk,
         ),
+        capital_remaining_before=available_capital,
+        capital_remaining_after=max(0, available_capital - check_size),
     )
 
 
-def _kill_gates(store: EvidenceStore, verified_claims: list[ClaimRecord]) -> list[KillGate]:
+def _kill_gates(
+    store: EvidenceStore,
+    verified_claims: list[ClaimRecord],
+    *,
+    config: AppConfig,
+    platform_minimum_check: int | None,
+    capital_remaining: int,
+) -> list[KillGate]:
+    minimum_above_maximum = (
+        platform_minimum_check is not None
+        and (platform_minimum_check > config.max_check or platform_minimum_check > HARD_MAX_CHECK)
+    )
+    has_scorable_deal = bool(store.evidence) and bool(verified_claims)
+    no_check_available = (
+        has_scorable_deal
+        and not minimum_above_maximum
+        and not _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+        )
+    )
     return [
         KillGate(
             name="No usable source-linked evidence",
@@ -104,6 +169,24 @@ def _kill_gates(store: EvidenceStore, verified_claims: list[ClaimRecord]) -> lis
                 "Evidence exists, but no deal-term claim was verified."
                 if store.evidence and not verified_claims
                 else "At least one deal-term claim has a verified citation."
+            ),
+        ),
+        KillGate(
+            name="Platform minimum above maximum check",
+            triggered=minimum_above_maximum,
+            reason=(
+                "The platform minimum check is above the configured maximum check size."
+                if minimum_above_maximum
+                else "No verified platform minimum exceeds the configured maximum check size."
+            ),
+        ),
+        KillGate(
+            name="No available check size",
+            triggered=no_check_available,
+            reason=(
+                "No configured check size fits the platform minimum and remaining capital."
+                if no_check_available
+                else "At least one configured check size fits the remaining capital."
             ),
         ),
     ]
@@ -167,7 +250,12 @@ def _pmf_factor(store: EvidenceStore, pmf_level: PMFLevel) -> ScoreFactor:
         PMFLevel.EARLY: 10,
         PMFLevel.DEVELOPING: 18,
     }
-    matched_evidence = _evidence_matching_keywords(store.evidence, TRACTION_KEYWORDS)
+    if pmf_level == PMFLevel.DEVELOPING:
+        matched_evidence = _evidence_matching_keywords(store.evidence, TRACTION_KEYWORDS)
+    elif pmf_level == PMFLevel.EARLY:
+        matched_evidence = _evidence_matching_keywords(store.evidence, EARLY_PMF_KEYWORDS)
+    else:
+        matched_evidence = []
     return ScoreFactor(
         name="Product-market fit evidence",
         score=score_by_level[pmf_level],
@@ -228,10 +316,11 @@ def _evidence_quality_factor(store: EvidenceStore) -> ScoreFactor:
     )
 
 
-def _pmf_level(text_index: str) -> PMFLevel:
-    if any(keyword in text_index for keyword in TRACTION_KEYWORDS):
+def _pmf_level(evidence: list[EvidenceRecord]) -> PMFLevel:
+    text_index = _text_index(evidence)
+    if _text_contains_any_keyword(text_index, TRACTION_KEYWORDS):
         return PMFLevel.DEVELOPING
-    if any(keyword in text_index for keyword in EARLY_PMF_KEYWORDS):
+    if _text_contains_any_keyword(text_index, EARLY_PMF_KEYWORDS):
         return PMFLevel.EARLY
     return PMFLevel.UNKNOWN
 
@@ -244,8 +333,8 @@ def _fundability_risk(
     if not store.evidence:
         return FundabilityRisk.UNKNOWN
     has_terms = bool(verified_claims)
-    has_traction = any(keyword in text_index for keyword in TRACTION_KEYWORDS)
-    has_funding_signal = any(keyword in text_index for keyword in FUNDABILITY_KEYWORDS)
+    has_traction = _text_contains_any_keyword(text_index, TRACTION_KEYWORDS)
+    has_funding_signal = _text_contains_any_keyword(text_index, FUNDABILITY_KEYWORDS)
     if has_terms and has_traction and has_funding_signal:
         return FundabilityRisk.LOW
     if has_terms and has_traction:
@@ -304,28 +393,148 @@ def _diligence_questions(
     return sorted(questions, key=lambda question: question.priority)
 
 
-def _check_size_for_score(total_score: int, *, config: AppConfig) -> int:
-    if total_score >= 85:
-        target = 10_000
-    elif total_score >= 78:
-        target = 7_500
-    else:
-        target = 5_000
-    allowed_tiers = [
-        tier
-        for tier in CHECK_SIZE_TIERS
-        if tier == 0 or (config.min_check <= tier <= config.max_check)
-    ]
-    allowed_tiers = [tier for tier in allowed_tiers if tier <= config.capital_budget]
+def _check_size_for_score(
+    total_score: int,
+    *,
+    config: AppConfig,
+    confidence: ConfidenceLevel,
+    platform_minimum_check: int | None,
+    capital_remaining: int,
+) -> int:
+    target = _target_check_size(total_score, confidence=confidence)
+    if platform_minimum_check is not None:
+        target = max(target, platform_minimum_check)
+    allowed_tiers = _available_nonzero_tiers(
+        config,
+        platform_minimum_check=platform_minimum_check,
+        capital_remaining=capital_remaining,
+    )
     if not allowed_tiers:
         return 0
-    nonzero_tiers = [tier for tier in allowed_tiers if tier > 0]
-    if not nonzero_tiers:
-        return 0
-    tiers_at_or_below_target = [tier for tier in nonzero_tiers if tier <= target]
-    if tiers_at_or_below_target:
-        return max(tiers_at_or_below_target)
-    return min(nonzero_tiers)
+    tiers_at_or_above_target = [tier for tier in allowed_tiers if tier >= target]
+    if tiers_at_or_above_target:
+        return min(tiers_at_or_above_target)
+    return max(allowed_tiers)
+
+
+def _target_check_size(total_score: int, *, confidence: ConfidenceLevel) -> int:
+    if total_score >= 90 and confidence == ConfidenceLevel.HIGH:
+        target = 10_000
+    elif total_score >= 86 and confidence != ConfidenceLevel.LOW:
+        target = 7_500
+    elif total_score >= 82 and confidence != ConfidenceLevel.LOW:
+        target = 5_000
+    elif total_score >= INVEST_MINIMUM_SCORE:
+        target = 1_000 if confidence == ConfidenceLevel.LOW else 2_500
+    else:
+        target = 0
+    return target
+
+
+def _available_nonzero_tiers(
+    config: AppConfig,
+    *,
+    platform_minimum_check: int | None,
+    capital_remaining: int,
+) -> list[int]:
+    minimum_check = config.min_check
+    if platform_minimum_check is not None:
+        minimum_check = max(minimum_check, platform_minimum_check)
+    maximum_check = min(config.max_check, capital_remaining, HARD_MAX_CHECK)
+    return [
+        tier
+        for tier in CHECK_SIZE_TIERS
+        if tier > 0 and minimum_check <= tier <= maximum_check
+    ]
+
+
+def _platform_minimum_check(verified_claims: list[ClaimRecord]) -> int | None:
+    minimum_checks = [
+        parsed_value
+        for claim in verified_claims
+        if claim.label == "minimum investment"
+        for parsed_value in [_claim_money_value(claim)]
+        if parsed_value is not None
+    ]
+    if not minimum_checks:
+        return None
+    return max(minimum_checks)
+
+
+def _claim_money_value(claim: ClaimRecord) -> int | None:
+    normalized_prefix = "usd_cents:"
+    if claim.normalized_value.startswith(normalized_prefix):
+        try:
+            return int(claim.normalized_value.removeprefix(normalized_prefix)) // 100
+        except ValueError:
+            return None
+    return _money_text_to_dollars(claim.value)
+
+
+def _money_text_to_dollars(raw_value: str) -> int | None:
+    normalized = raw_value.lower().replace("$", "").replace(",", "").strip()
+    multiplier = Decimal("1")
+    suffixes = {
+        "thousand": Decimal("1000"),
+        "million": Decimal("1000000"),
+        "billion": Decimal("1000000000"),
+        "k": Decimal("1000"),
+        "m": Decimal("1000000"),
+        "b": Decimal("1000000000"),
+    }
+    for suffix, suffix_multiplier in suffixes.items():
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)].strip()
+            multiplier = suffix_multiplier
+            break
+    try:
+        return int((Decimal(normalized) * multiplier).to_integral_value())
+    except InvalidOperation:
+        return None
+
+
+def _confidence_level(
+    store: EvidenceStore,
+    verified_claims: list[ClaimRecord],
+) -> ConfidenceLevel:
+    if store.conflicts or not store.evidence or not verified_claims:
+        return ConfidenceLevel.LOW
+    if len(store.evidence) >= 3 and len(verified_claims) >= 3:
+        return ConfidenceLevel.HIGH
+    return ConfidenceLevel.MEDIUM
+
+
+def _one_line_reason(
+    recommendation: Recommendation,
+    *,
+    total_score: int,
+    confidence: ConfidenceLevel,
+    kill_gates: list[KillGate],
+) -> str:
+    triggered_gates = [gate for gate in kill_gates if gate.triggered]
+    if triggered_gates:
+        return f"Passed because {triggered_gates[0].reason}"
+    if recommendation == Recommendation.PASS:
+        return f"Passed because the score was {total_score}/100, below the investment bar."
+    return (
+        f"Recommended because the score was {total_score}/100, confidence was "
+        f"{confidence}, and no kill gate triggered."
+    )
+
+
+def _text_contains_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(_contains_keyword(text, keyword) for keyword in keywords)
+
+
+def _contains_keyword(text: str, keyword: str) -> bool:
+    pattern = _keyword_pattern(keyword)
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def _keyword_pattern(keyword: str) -> str:
+    escaped_words = [re.escape(part) for part in keyword.split()]
+    escaped_phrase = r"\s+".join(escaped_words)
+    return rf"(?<![A-Za-z0-9]){escaped_phrase}(?![A-Za-z0-9])"
 
 
 def _text_index(evidence: list[EvidenceRecord]) -> str:
@@ -348,5 +557,5 @@ def _evidence_matching_keywords(
     return [
         record
         for record in evidence
-        if any(keyword in record.text.lower() for keyword in keywords)
+        if _text_contains_any_keyword(record.text, keywords)
     ]

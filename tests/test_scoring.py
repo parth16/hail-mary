@@ -4,12 +4,19 @@ import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.ingest.folder_loader import ingest_folder
-from hailmary.schemas.documents import DocumentType, FileType, SourceKind
+from hailmary.schemas.documents import (
+    DocumentType,
+    FileType,
+    IngestedDeal,
+    IngestionSummary,
+    SourceKind,
+)
 from hailmary.schemas.evidence import (
     ClaimConflict,
     ClaimRecord,
@@ -22,16 +29,21 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import Recommendation
+from hailmary.schemas.scoring import PMFLevel, Recommendation, ScoredDeal, ScoreFactor
 from hailmary.scoring import render_markdown_memo, score_evidence_store, score_latest_ingestion
 
 runner = CliRunner()
 
 
-def _evidence(record_id: str, text: str) -> EvidenceRecord:
+def _evidence(
+    record_id: str,
+    text: str,
+    *,
+    deal_id: str = "deal_test",
+) -> EvidenceRecord:
     return EvidenceRecord(
         id=record_id,
-        deal_id="deal_test",
+        deal_id=deal_id,
         document_id="doc_test",
         document_path=Path("memo.txt"),
         evidence_kind=EvidenceKind.PAGE_TEXT,
@@ -43,10 +55,16 @@ def _evidence(record_id: str, text: str) -> EvidenceRecord:
     )
 
 
-def _claim(label: str, value: str, evidence_id: str) -> ClaimRecord:
+def _claim(
+    label: str,
+    value: str,
+    evidence_id: str,
+    *,
+    deal_id: str = "deal_test",
+) -> ClaimRecord:
     return ClaimRecord(
         id=f"claim_{label.replace(' ', '_')}",
-        deal_id="deal_test",
+        deal_id=deal_id,
         claim_type=ClaimType.DEAL_TERM,
         label=label,
         value=value,
@@ -80,10 +98,12 @@ def _store(
     evidence: list[EvidenceRecord],
     claims: list[ClaimRecord],
     conflicts: list[ClaimConflict] | None = None,
+    deal_id: str = "deal_test",
+    company_name: str = "ScoreCo",
 ) -> EvidenceStore:
     return EvidenceStore(
-        deal_id="deal_test",
-        company_name="ScoreCo",
+        deal_id=deal_id,
+        company_name=company_name,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
         evidence=evidence,
         claims=claims,
@@ -120,9 +140,32 @@ def test_score_evidence_store_invests_when_verified_evidence_is_strong() -> None
     )
 
     assert scored.recommendation == Recommendation.INVEST
-    assert scored.check_size == 7_500
+    assert scored.check_size == 5_000
     assert scored.total_score >= 70
     assert not scored.triggered_kill_gates
+
+
+def test_score_evidence_store_keeps_65_to_74_as_pass() -> None:
+    evidence = [
+        _evidence(
+            "ev_all",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_all"),
+        _claim("discount", "20%", "ev_all"),
+        _claim("round size", "$1M", "ev_all"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert 65 <= scored.total_score <= 74
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
 
 
 def test_score_evidence_store_passes_when_terms_conflict() -> None:
@@ -154,6 +197,102 @@ def test_score_evidence_store_passes_when_terms_conflict() -> None:
     )
 
 
+def test_score_evidence_store_passes_when_platform_minimum_exceeds_max_check() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Minimum check $25K."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("minimum investment", "$25K", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data"), max_check=10_000),
+    )
+
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert any(
+        gate.name == "Platform minimum above maximum check"
+        for gate in scored.triggered_kill_gates
+    )
+
+
+def test_score_evidence_store_passes_when_no_nonzero_check_fits() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data"), capital_budget=500),
+    )
+
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert any(
+        gate.name == "No available check size"
+        for gate in scored.triggered_kill_gates
+    )
+
+
+def test_score_evidence_store_matches_traction_keywords_as_words() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. Barrier analysis.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+def test_score_evidence_store_cites_early_pmf_evidence() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. Pilot with a design partner.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.EARLY
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_terms"
+    ]
+
+
 def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
     evidence = [_evidence("ev_terms", "Valuation cap $8M.")]
     claim = _claim("valuation cap", "$8M", "ev_terms")
@@ -162,10 +301,33 @@ def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
 
     markdown = render_markdown_memo(scored, store)
 
-    assert "Recommendation: **PASS**" in markdown
-    assert "Check size: **$0**" in markdown
+    assert markdown.startswith("# Hail Mary Investment Memo: ScoreCo\n\n## Decision")
+    assert "**Recommendation:** PASS" in markdown
+    assert "**Suggested check:** $0" in markdown
+    assert "**Confidence:** medium" in markdown
     assert "ev_terms" in markdown
     assert "not legal, tax, financial, or investment advice" in markdown
+
+
+def test_score_latest_ingestion_tracks_remaining_capital(tmp_path: Path) -> None:
+    stores = [
+        _strong_store(deal_id="deal_one", company_name="Deal One"),
+        _strong_store(deal_id="deal_two", company_name="Deal Two"),
+    ]
+    _write_ingestion_summary(tmp_path, stores)
+
+    result = score_latest_ingestion(
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=2_500)
+    )
+
+    assert result.scored_deals[0].recommendation == Recommendation.INVEST
+    assert result.scored_deals[0].check_size == 2_500
+    assert result.scored_deals[1].recommendation == Recommendation.PASS
+    assert result.scored_deals[1].check_size == 0
+    assert any(
+        gate.name == "No available check size"
+        for gate in result.scored_deals[1].triggered_kill_gates
+    )
 
 
 def test_score_latest_ingestion_writes_private_markdown_memos(tmp_path: Path) -> None:
@@ -189,6 +351,29 @@ def test_score_latest_ingestion_writes_private_markdown_memos(tmp_path: Path) ->
     assert stat.S_IMODE(memo_path.stat().st_mode) == 0o600
 
 
+def test_score_latest_ingestion_rebases_relative_evidence_store_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "PathCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M.",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    ingest_folder(root, config=AppConfig(data_dir=Path("data")))
+
+    subdir = tmp_path / "subdir"
+    subdir.mkdir()
+    monkeypatch.chdir(subdir)
+    result = score_latest_ingestion(config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert result.deal_count == 1
+    assert result.scored_deals[0].memo_path is not None
+
+
 def test_score_deals_missing_ingestion_summary_has_plain_english_error(
     tmp_path: Path,
 ) -> None:
@@ -197,3 +382,83 @@ def test_score_deals_missing_ingestion_summary_has_plain_english_error(
     assert result.exit_code != 0
     assert "No ingested deals were found" in result.output
     assert "Traceback" not in result.output
+
+
+def test_score_deals_bad_ingestion_summary_has_plain_english_error(
+    tmp_path: Path,
+) -> None:
+    processed_dir = tmp_path / "data" / "processed"
+    processed_dir.mkdir(parents=True)
+    (processed_dir / "ingestion_summary.json").write_text("{not json", encoding="utf-8")
+
+    result = runner.invoke(app, ["score-deals", "--data-dir", str(tmp_path / "data")])
+
+    assert result.exit_code != 0
+    assert "The ingestion summary could not be read" in result.output
+    assert "Traceback" not in result.output
+
+
+def _strong_store(*, deal_id: str, company_name: str) -> EvidenceStore:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M.",
+            deal_id=deal_id,
+        ),
+        _evidence(
+            "ev_traction",
+            "ARR revenue growth with paid customers and retention.",
+            deal_id=deal_id,
+        ),
+        _evidence(
+            "ev_funding",
+            "Lead investor committed and seed round is active.",
+            deal_id=deal_id,
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms", deal_id=deal_id),
+        _claim("discount", "20%", "ev_terms", deal_id=deal_id),
+        _claim("round size", "$1M", "ev_terms", deal_id=deal_id),
+    ]
+    return _store(
+        evidence=evidence,
+        claims=claims,
+        deal_id=deal_id,
+        company_name=company_name,
+    )
+
+
+def _write_ingestion_summary(tmp_path: Path, stores: list[EvidenceStore]) -> None:
+    processed_dir = tmp_path / "data" / "processed"
+    processed_dir.mkdir(parents=True)
+    deals: list[IngestedDeal] = []
+    for store in stores:
+        store_path = processed_dir / f"{store.deal_id}.json"
+        store_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+        deals.append(
+            IngestedDeal(
+                id=store.deal_id,
+                company_name=store.company_name,
+                documents=[],
+                evidence_store_path=store_path,
+                evidence_count=store.evidence_count,
+                claim_count=store.claim_count,
+                conflict_count=store.conflict_count,
+            )
+        )
+
+    summary = IngestionSummary(
+        root_path=tmp_path / "pitch-decks",
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        deals=deals,
+        summary_path=processed_dir / "ingestion_summary.json",
+    )
+    summary.summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+
+
+def _score_factor(scored_deal: ScoredDeal, name: str) -> ScoreFactor:
+    for factor in scored_deal.score_factors:
+        if factor.name == name:
+            return factor
+    raise AssertionError(f"Missing score factor: {name}")
