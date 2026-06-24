@@ -58,3 +58,4 @@ Rules for all future Codex runs:
 - PR #9 loop 2: Prompt-injection prefix stripping must also cover delimiter-only prefixes such as quoted strings and Markdown headings, and shared citation validators should use generic wording instead of recommendation-only wording.
 - PR #9 loop 3: Prompt-injection prefix stripping must cover chat or OCR speaker labels such as User: and System prompt:. Research-plan URLs need real scheme, host, and whitespace validation before being stored as planned source URLs.
 - PR #9 loop 4: Prompt-injection prefix stripping must cover Unicode dash speaker labels while preserving context for colon-delimited benign prompt examples. URL validation should catch parser errors as well as missing hosts and raw whitespace.
+- PR #9 loop 5 P1: Prompt-injection detection must catch direct instruction phrases merged mid-line with ordinary evidence by OCR or table extraction, while preserving benign prompt-example context.

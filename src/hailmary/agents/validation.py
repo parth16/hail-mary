@@ -25,6 +25,14 @@ EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = tuple(
         r"^(?:please\s+)?(?:print|reveal|show)\s+the\s+system\s+prompt\b",
     )
 )
+MID_LINE_SOURCE_INSTRUCTION_PATTERN = re.compile(
+    r"\s(?:ignore\s+(?:all\s+|every\s+|previous\s+|the\s+)?instructions?|"
+    r"disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?|"
+    r"forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)|"
+    r"always\s+recommend\s+(?:invest|pass)|"
+    r"do\s+not\s+follow\s+the\s+system|"
+    r"(?:print|reveal|show)\s+the\s+system\s+prompt)\b"
+)
 SOURCE_INSTRUCTION_PREFIX_PATTERN = re.compile(
     r"^(?:(?:"
     r"assistant|chat|developer|important|instruction|instructions|model|note|"
@@ -244,11 +252,12 @@ def _validate_evidence_reference(
 
 
 def _looks_like_embedded_source_instruction(text: str) -> bool:
+    normalized_text = " ".join(text.lower().split())
     return any(
         pattern.search(candidate)
         for candidate in _source_instruction_candidates(text)
         for pattern in EMBEDDED_SOURCE_INSTRUCTION_PATTERNS
-    )
+    ) or _has_mid_line_instruction(normalized_text)
 
 
 def _source_instruction_candidates(text: str) -> list[str]:
@@ -270,3 +279,12 @@ def _strip_source_instruction_prefix(text: str) -> str:
         stripped = SOURCE_INSTRUCTION_PREFIX_PATTERN.sub("", stripped).strip()
         stripped = SOURCE_LIST_PREFIX_PATTERN.sub("", stripped).strip()
     return stripped
+
+
+def _has_mid_line_instruction(text: str) -> bool:
+    for match in MID_LINE_SOURCE_INSTRUCTION_PATTERN.finditer(text):
+        before = text[: match.start()].rstrip()
+        if before.endswith(("prompt:", "example:", "user type", "users type")):
+            continue
+        return True
+    return False
