@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 import hailmary.cli as cli_module
 from hailmary.cli import app
-from hailmary.evals import EvalCategory, EvalHarnessError, builtin_eval_cases
+from hailmary.evals import EvalCategory, EvalHarnessError, builtin_eval_cases, fixtures
 from hailmary.evals.runner import run_builtin_evals
 from hailmary.evals.schemas import EvalCaseResult, EvalRunSummary
 
@@ -25,13 +25,15 @@ def test_builtin_eval_metadata_covers_required_phase_6_categories() -> None:
         EvalCategory.CONTRADICTION,
         EvalCategory.PROMPT_INJECTION,
         EvalCategory.SCORE_CALIBRATION,
+        EvalCategory.MISSING_DATA,
+        EvalCategory.MEMO_SNAPSHOT,
     }
 
 
 def test_run_builtin_evals_passes_all_synthetic_cases(tmp_path: Path) -> None:
     summary = run_builtin_evals(work_dir=tmp_path)
 
-    assert summary.total_count == 6
+    assert summary.total_count == 8
     assert summary.passed
     assert summary.failed_results == []
 
@@ -61,7 +63,41 @@ def test_run_builtin_evals_filters_by_case_id(tmp_path: Path) -> None:
 
 def test_run_builtin_evals_rejects_filters_that_match_nothing(tmp_path: Path) -> None:
     with pytest.raises(EvalHarnessError, match="No evals matched"):
-        run_builtin_evals(case_ids=["missing-case"], work_dir=tmp_path)
+        run_builtin_evals(
+            case_ids=["citation-span-mismatch"],
+            categories=[EvalCategory.SCORE_CALIBRATION],
+            work_dir=tmp_path,
+        )
+
+
+def test_run_builtin_evals_rejects_unknown_case_even_with_valid_case(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(EvalHarnessError, match="Unknown eval case ID: missing-case"):
+        run_builtin_evals(
+            case_ids=["citation-span-mismatch", "missing-case"],
+            work_dir=tmp_path,
+        )
+
+
+def test_run_builtin_evals_reports_fixture_failure_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_fixture() -> None:
+        raise fixtures.EvalFixtureFailure(
+            "Expected a specific scoring result.",
+            {"expected": "PASS", "actual": "INVEST"},
+        )
+
+    monkeypatch.setattr(fixtures, "run_citation_fixture", fail_fixture)
+
+    summary = run_builtin_evals(case_ids=["citation-span-mismatch"], work_dir=tmp_path)
+
+    assert not summary.passed
+    assert summary.failed_results[0].message == "Expected a specific scoring result."
+    assert summary.failed_results[0].details["expected"] == "PASS"
+    assert summary.failed_results[0].details["actual"] == "INVEST"
 
 
 def test_run_evals_command_reports_passes() -> None:
@@ -89,6 +125,17 @@ def test_run_evals_command_rejects_unknown_category() -> None:
 
     assert result.exit_code != 0
     assert "Unknown eval category 'unknown'" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_run_evals_command_rejects_unknown_case() -> None:
+    result = runner.invoke(
+        app,
+        ["run-evals", "--case", "citation-span-mismatch", "--case", "missing-case"],
+    )
+
+    assert result.exit_code != 0
+    assert "Unknown eval case ID: missing-case" in result.output
     assert "Traceback" not in result.output
 
 

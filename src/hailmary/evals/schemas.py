@@ -11,6 +11,8 @@ class EvalCategory(StrEnum):
     CONTRADICTION = "contradiction"
     PROMPT_INJECTION = "prompt_injection"
     SCORE_CALIBRATION = "score_calibration"
+    MISSING_DATA = "missing_data"
+    MEMO_SNAPSHOT = "memo_snapshot"
 
 
 class EvalCaseResult(BaseModel):

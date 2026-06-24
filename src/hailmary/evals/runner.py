@@ -21,7 +21,7 @@ class EvalHarnessError(RuntimeError):
 @dataclass(frozen=True)
 class EvalDefinition:
     metadata: EvalCaseMetadata
-    run: Callable[[Path], bool]
+    run: Callable[[Path], None]
 
 
 def builtin_eval_cases() -> list[EvalCaseMetadata]:
@@ -34,8 +34,10 @@ def run_builtin_evals(
     categories: Sequence[EvalCategory] | None = None,
     work_dir: Path | None = None,
 ) -> EvalRunSummary:
+    definitions = _eval_definitions()
+    _reject_unknown_case_ids(case_ids or [], definitions)
     selected = _select_eval_definitions(
-        _eval_definitions(),
+        definitions,
         case_ids=set(case_ids or []),
         categories=set(categories or []),
     )
@@ -104,7 +106,7 @@ def _eval_definitions() -> list[EvalDefinition]:
                     "recommendation is rejected."
                 ),
             ),
-            run=lambda _: fixtures.run_prompt_injection_fixture(),
+            run=fixtures.run_prompt_injection_fixture,
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
@@ -129,7 +131,48 @@ def _eval_definitions() -> list[EvalDefinition]:
             ),
             run=lambda _: fixtures.run_borderline_score_fixture(),
         ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="missing-data-pass",
+                category=EvalCategory.MISSING_DATA,
+                name="Missing data pass gate",
+                description=(
+                    "Checks that missing source-linked evidence produces PASS, a $0 "
+                    "check, a no-evidence kill gate, and diligence questions."
+                ),
+            ),
+            run=lambda _: fixtures.run_missing_data_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="memo-required-sections",
+                category=EvalCategory.MEMO_SNAPSHOT,
+                name="Memo required section snapshot",
+                description=(
+                    "Checks that Markdown memo rendering keeps the decision, score, "
+                    "evidence, diligence, and advice disclaimer sections."
+                ),
+            ),
+            run=lambda _: fixtures.run_memo_snapshot_fixture(),
+        ),
     ]
+
+
+def _reject_unknown_case_ids(
+    case_ids: Sequence[str],
+    definitions: list[EvalDefinition],
+) -> None:
+    known_case_ids = {definition.metadata.id for definition in definitions}
+    unknown_case_ids = sorted(set(case_ids) - known_case_ids)
+    if not unknown_case_ids:
+        return
+    valid_values = ", ".join(sorted(known_case_ids))
+    unknown_values = ", ".join(unknown_case_ids)
+    case_word = "ID" if len(unknown_case_ids) == 1 else "IDs"
+    raise EvalHarnessError(
+        f"Unknown eval case {case_word}: {unknown_values}. "
+        f"Valid case IDs are: {valid_values}."
+    )
 
 
 def _select_eval_definitions(
@@ -159,7 +202,19 @@ def _run_one(definition: EvalDefinition, work_dir: Path) -> EvalCaseResult:
     case_work_dir = work_dir / metadata.id
     case_work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        passed = definition.run(case_work_dir)
+        definition.run(case_work_dir)
+    except fixtures.EvalFixtureFailure as exc:
+        return EvalCaseResult(
+            id=metadata.id,
+            category=metadata.category,
+            name=metadata.name,
+            passed=False,
+            message=str(exc),
+            details={
+                "description": metadata.description,
+                **exc.details,
+            },
+        )
     except Exception as exc:
         return EvalCaseResult(
             id=metadata.id,
@@ -174,7 +229,7 @@ def _run_one(definition: EvalDefinition, work_dir: Path) -> EvalCaseResult:
         id=metadata.id,
         category=metadata.category,
         name=metadata.name,
-        passed=passed,
-        message="Passed." if passed else "The expected behavior did not happen.",
+        passed=True,
+        message="Passed.",
         details={"description": metadata.description},
     )
