@@ -41,6 +41,7 @@ def test_ingest_folder_command_writes_summary(tmp_path: Path, monkeypatch: Monke
 
     assert result.exit_code == 0, result.output
     assert "Found 1 deal and 1 document" in result.output
+    assert "source-linked evidence" in result.output
 
     summary_path = data_dir / "processed" / "ingestion_summary.json"
     saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))

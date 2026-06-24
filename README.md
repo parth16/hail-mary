@@ -42,7 +42,7 @@ uv run hailmary init
 uv run hailmary ingest-folder ./pitch-decks
 ```
 
-`init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts basic text when supported, and saves a JSON summary under `data/processed/`.
+`init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`.
 
 ## GitHub Workflow
 
