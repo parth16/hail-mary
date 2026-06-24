@@ -59,6 +59,13 @@ class EvidenceRecord(BaseModel):
     source_span_start: int | None = None
     source_span_end: int | None = None
     source_freshness: SourceFreshness = SourceFreshness.UNKNOWN
+    provider_id: str | None = None
+    provider_name: str | None = None
+    source_url: str | None = None
+    source_api: str | None = None
+    retrieved_at: datetime | None = None
+    external_confidence: str | None = None
+    licensing_notes: str | None = None
 
 
 class EvidenceCitation(BaseModel):

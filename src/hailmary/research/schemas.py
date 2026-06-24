@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from hailmary.schemas.documents import SourceKind
+from hailmary.schemas.documents import DocumentType, SourceKind
 
 
 class ResearchProviderCategory(StrEnum):
@@ -91,3 +92,111 @@ class ResearchPlanRunSummary(BaseModel):
     @property
     def task_count(self) -> int:
         return self.plan.task_count
+
+
+class ResearchResultInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deal_id: str | None = None
+    company_name: str | None = None
+    provider_id: str
+    provider_name: str | None = None
+    title: str
+    text: str
+    retrieved_at: datetime
+    source_url: str | None = None
+    source_api: str | None = None
+    confidence: str
+    licensing_notes: str
+    source_kind: SourceKind = SourceKind.WEB
+    document_type: DocumentType = DocumentType.WEB_PAGE
+
+    @field_validator(
+        "deal_id",
+        "company_name",
+        "provider_name",
+        "source_url",
+        "source_api",
+        mode="before",
+    )
+    @classmethod
+    def blank_optional_text_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator(
+        "provider_id",
+        "provider_name",
+        "title",
+        "text",
+        "source_url",
+        "source_api",
+        "confidence",
+        "licensing_notes",
+    )
+    @classmethod
+    def strip_text(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+    @field_validator("provider_id", "title", "text", "confidence", "licensing_notes")
+    @classmethod
+    def require_nonblank_text(cls, value: str) -> str:
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def require_deal_and_source_reference(self) -> Self:
+        if self.deal_id is None and self.company_name is None:
+            raise ValueError("Each research result needs a deal_id or company_name.")
+        if self.source_url is None and self.source_api is None:
+            raise ValueError("Each research result needs a source_url or source_api.")
+        return self
+
+
+class ResearchResultsFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[ResearchResultInput] = Field(default_factory=list)
+
+    @field_validator("results")
+    @classmethod
+    def require_results(cls, value: list[ResearchResultInput]) -> list[ResearchResultInput]:
+        if not value:
+            raise ValueError("Research results file must contain at least one result.")
+        return value
+
+
+class ResearchImportDealSummary(BaseModel):
+    deal_id: str
+    company_name: str
+    evidence_store_path: Path
+    imported_count: int = 0
+    skipped_duplicate_count: int = 0
+
+
+class ResearchImportRunSummary(BaseModel):
+    input_path: Path
+    imported_at: datetime
+    deals: list[ResearchImportDealSummary] = Field(default_factory=list)
+
+    @property
+    def deal_count(self) -> int:
+        return len(self.deals)
+
+    @property
+    def imported_count(self) -> int:
+        return sum(deal.imported_count for deal in self.deals)
+
+    @property
+    def skipped_duplicate_count(self) -> int:
+        return sum(deal.skipped_duplicate_count for deal in self.deals)
+
+    @property
+    def updated_store_paths(self) -> list[Path]:
+        return [
+            deal.evidence_store_path
+            for deal in self.deals
+            if deal.imported_count
+        ]

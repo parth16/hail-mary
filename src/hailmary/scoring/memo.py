@@ -308,10 +308,29 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
         if evidence.table_index is not None
         else "document"
     )
+    external_details = _external_source_details(evidence)
+    detail_text = f"; {external_details}" if external_details else ""
     return (
         f"- {evidence.id}: {evidence.document_path} "
-        f"({locator}, {evidence.evidence_kind})."
+        f"({locator}, {evidence.evidence_kind}{detail_text})."
     )
+
+
+def _external_source_details(evidence: EvidenceRecord) -> str:
+    details: list[str] = []
+    if evidence.provider_name:
+        details.append(f"provider: {evidence.provider_name}")
+    if evidence.source_url:
+        details.append(f"source page: {evidence.source_url}")
+    if evidence.source_api:
+        details.append(f"data service source: {evidence.source_api}")
+    if evidence.retrieved_at:
+        details.append(f"retrieved at: {evidence.retrieved_at.isoformat()}")
+    if evidence.external_confidence:
+        details.append(f"confidence: {evidence.external_confidence}")
+    if evidence.licensing_notes:
+        details.append(f"licensing: {evidence.licensing_notes}")
+    return "; ".join(details)
 
 
 def _round_summary(verified_claims: list[ClaimRecord]) -> str:

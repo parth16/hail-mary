@@ -28,6 +28,8 @@ MONEY_PATTERN = (
 )
 PERCENT_PATTERN = r"\d+(?:\.\d+)?\s?%"
 TERM_SEPARATOR = r"\s*(?:(?:is|of|at|:|\|)\s*)?"
+NO_EVIDENCE_NOTE = "No usable extracted text was available for evidence records."
+CONFLICT_NOTE = "Some extracted deal terms conflict and need human review."
 
 
 @dataclass(frozen=True)
@@ -104,46 +106,79 @@ def build_evidence_store(
     for document in deal.documents:
         evidence_records.extend(_document_evidence_records(document, built_at=built_at))
 
+    return refresh_deal_term_claims(
+        EvidenceStore(
+            deal_id=deal.id,
+            company_name=deal.company_name,
+            created_at=built_at,
+            evidence=evidence_records,
+        )
+    )
+
+
+def refresh_deal_term_claims(store: EvidenceStore) -> EvidenceStore:
+    """Rebuild deterministic deal-term claims from the store's current evidence."""
+
     claims = _extract_deal_term_claims(
-        deal_id=deal.id,
-        evidence_records=evidence_records,
+        deal_id=store.deal_id,
+        evidence_records=store.evidence,
     )
-    conflicts = _find_conflicts(deal.id, claims)
-    conflicted_claim_ids = {claim_id for conflict in conflicts for claim_id in conflict.claim_ids}
-    if conflicted_claim_ids:
-        claims = [
-            claim.model_copy(
-                update={
-                    "verification_status": VerificationStatus.CONFLICTED,
-                    "quality": claim.quality.model_copy(
-                        update={
-                            "verification_status": VerificationStatus.CONFLICTED,
-                            "confidence": 0.2,
-                            "score_impact": "excluded_until_conflict_is_resolved",
-                        }
-                    ),
-                }
-            )
-            if claim.id in conflicted_claim_ids
-            else claim
-            for claim in claims
-        ]
-
-    notes = []
-    if not evidence_records:
-        notes.append("No usable extracted text was available for evidence records.")
-    if conflicts:
-        notes.append("Some extracted deal terms conflict and need human review.")
-
-    return EvidenceStore(
-        deal_id=deal.id,
-        company_name=deal.company_name,
-        created_at=built_at,
-        evidence=evidence_records,
-        claims=claims,
+    conflicts = _find_conflicts(store.deal_id, claims)
+    claims = _mark_conflicted_claims(claims, conflicts)
+    notes = _refresh_store_notes(
+        store.notes,
+        has_evidence=bool(store.evidence),
         conflicts=conflicts,
-        notes=notes,
     )
+    return store.model_copy(
+        update={
+            "claims": claims,
+            "conflicts": conflicts,
+            "notes": notes,
+        }
+    )
+
+
+def _mark_conflicted_claims(
+    claims: list[ClaimRecord],
+    conflicts: list[ClaimConflict],
+) -> list[ClaimRecord]:
+    conflicted_claim_ids = {claim_id for conflict in conflicts for claim_id in conflict.claim_ids}
+    if not conflicted_claim_ids:
+        return claims
+    return [
+        claim.model_copy(
+            update={
+                "verification_status": VerificationStatus.CONFLICTED,
+                "quality": claim.quality.model_copy(
+                    update={
+                        "verification_status": VerificationStatus.CONFLICTED,
+                        "confidence": 0.2,
+                        "score_impact": "excluded_until_conflict_is_resolved",
+                    }
+                ),
+            }
+        )
+        if claim.id in conflicted_claim_ids
+        else claim
+        for claim in claims
+    ]
+
+
+def _refresh_store_notes(
+    notes: list[str],
+    *,
+    has_evidence: bool,
+    conflicts: list[ClaimConflict],
+) -> list[str]:
+    refreshed_notes = [
+        note for note in notes if note not in {NO_EVIDENCE_NOTE, CONFLICT_NOTE}
+    ]
+    if not has_evidence:
+        refreshed_notes.append(NO_EVIDENCE_NOTE)
+    if conflicts:
+        refreshed_notes.append(CONFLICT_NOTE)
+    return refreshed_notes
 
 
 def _document_evidence_records(

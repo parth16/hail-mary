@@ -8,16 +8,24 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from hailmary.agents.packets import build_agent_input_packet
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.research import (
+    ResearchImportError,
     ResearchPlanError,
     ResearchProviderCategory,
     ResearchTaskStatus,
     builtin_research_providers,
+    import_research_results,
     prepare_research_plan,
 )
+from hailmary.schemas.agents import AgentRole
+from hailmary.schemas.documents import IngestedDeal
+from hailmary.schemas.evidence import EvidenceStore
+from hailmary.scoring.memo import render_markdown_memo
+from hailmary.scoring.scorer import score_evidence_store
 
 runner = CliRunner()
 BUILT_AT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -254,3 +262,243 @@ def test_prepare_research_plan_command_has_plain_english_error(
     assert result.exit_code != 0
     assert "Use --website only when the plan has exactly one company" in result.output
     assert "Traceback" not in result.output
+
+
+def test_import_research_results_appends_source_linked_external_evidence(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
+
+    result = import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 1
+    assert result.skipped_duplicate_count == 0
+    assert result.deals[0].company_name == "Acme AI"
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    external_evidence = saved_store.evidence[-1]
+    assert external_evidence.provider_id == "sec_form_d"
+    assert external_evidence.provider_name == "SEC EDGAR Form D search"
+    assert external_evidence.source_url == "https://www.sec.gov/example/acme-ai"
+    assert external_evidence.external_confidence == "high: exact company match"
+    assert external_evidence.licensing_notes == "Public government source."
+    assert external_evidence.source_span_start == 0
+    assert external_evidence.source_span_end == len(external_evidence.text)
+    assert {claim.label for claim in saved_store.claims} >= {
+        "minimum investment",
+        "valuation cap",
+    }
+    scored_deal = score_evidence_store(saved_store, config=config)
+    memo = render_markdown_memo(scored_deal, saved_store)
+    assert "provider: SEC EDGAR Form D search" in memo
+    assert "source page: https://www.sec.gov/example/acme-ai" in memo
+    packet = build_agent_input_packet(
+        saved_store,
+        scored_deal,
+        role=AgentRole.PRODUCT_MARKET_FIT,
+    )
+    packet_evidence = next(evidence for evidence in packet.evidence if evidence.provider_id)
+    assert packet_evidence.provider_name == "SEC EDGAR Form D search"
+    assert packet_evidence.source_url == "https://www.sec.gov/example/acme-ai"
+
+    summary = json.loads((tmp_path / "data" / "processed" / "ingestion_summary.json").read_text())
+    assert summary["deals"][0]["evidence_count"] == saved_store.evidence_count
+    assert summary["deals"][0]["claim_count"] == saved_store.claim_count
+
+
+def test_import_research_results_skips_duplicate_records(tmp_path: Path) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 0
+    assert result.skipped_duplicate_count == 1
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    assert len([evidence for evidence in saved_store.evidence if evidence.provider_id]) == 1
+
+
+def test_import_research_results_fails_before_writing_for_unknown_deal(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(
+        tmp_path,
+        extra_results=[
+            _research_result(company_name="MissingCo", title="Unknown company source"),
+        ],
+    )
+    assert deal.evidence_store_path is not None
+    before = deal.evidence_store_path.read_text(encoding="utf-8")
+
+    with pytest.raises(ResearchImportError, match="no ingested deal has that exact name"):
+        import_research_results(
+            config=config,
+            results_path=results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+    after = deal.evidence_store_path.read_text(encoding="utf-8")
+    assert after == before
+
+
+def test_import_research_results_requires_source_url_or_api(tmp_path: Path) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-missing-source.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                source_url=None,
+                source_api=None,
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match="source_url or source_api"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_rejects_unknown_result_fields(tmp_path: Path) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-extra-field.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                unsupported_note="This field should fail instead of being ignored.",
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match="unsupported_note"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_requires_ingested_deals(tmp_path: Path) -> None:
+    results_path = tmp_path / "research-results.json"
+    _write_results(results_path, [_research_result()])
+
+    with pytest.raises(ResearchImportError, match="No ingested deals"):
+        import_research_results(
+            config=AppConfig(data_dir=tmp_path / "data"),
+            results_path=results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_command_has_plain_english_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _config, _deal, results_path = _ingest_deal_and_write_results(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "import-research-results",
+            str(results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Imported 1 external research evidence record into 1 deal" in result.output
+    assert "No websites or APIs were contacted" in result.output
+
+
+def test_import_research_results_command_has_plain_english_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "bad-research-results.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                source_url="https://example .com",
+            )
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "import-research-results",
+            str(bad_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "source_url cannot contain spaces" in result.output
+    assert "Traceback" not in result.output
+
+
+def _ingest_deal_and_write_results(
+    tmp_path: Path,
+    *,
+    extra_results: list[dict[str, object]] | None = None,
+) -> tuple[AppConfig, IngestedDeal, Path]:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(data_dir=tmp_path / "data")
+    summary = ingest_folder(root, config=config)
+    results_path = tmp_path / "research-results.json"
+    results = [_research_result(company_name="Acme AI")]
+    if extra_results:
+        results.extend(extra_results)
+    _write_results(results_path, results)
+    return config, summary.deals[0], results_path
+
+
+def _research_result(**overrides: object) -> dict[str, object]:
+    result: dict[str, object] = {
+        "company_name": "Acme AI",
+        "provider_id": "sec_form_d",
+        "title": "Acme AI Form D",
+        "text": (
+            "Acme AI reports revenue growth from customers. Minimum investment $2,500."
+        ),
+        "retrieved_at": "2026-01-01T12:00:00Z",
+        "source_url": "https://www.sec.gov/example/acme-ai",
+        "confidence": "high: exact company match",
+        "licensing_notes": "Public government source.",
+    }
+    result.update(overrides)
+    return result
+
+
+def _write_results(path: Path, results: list[dict[str, object]]) -> None:
+    path.write_text(json.dumps({"results": results}), encoding="utf-8")
