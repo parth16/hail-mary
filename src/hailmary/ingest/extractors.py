@@ -156,7 +156,9 @@ def _document_ocr_recommended(pages: list[ExtractedPage]) -> bool:
     ocr_pages = [page for page in pages if page.needs_ocr]
     if not ocr_pages:
         return False
-    if any(page.notes or not page.raw_text.strip() for page in ocr_pages):
+    if any(page.notes for page in ocr_pages):
+        return True
+    if any(not page.raw_text.strip() for page in ocr_pages):
         return True
 
     return len(ocr_pages) * 2 > len(pages)
@@ -572,16 +574,16 @@ def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[s
             cell_index = _xlsx_cell_index(cell)
             if cell_index == INVALID_XLSX_CELL_INDEX:
                 continue
+            cell_value = _xlsx_cell_value(cell, shared_strings)
             if cell_index is not None:
                 if cell_index > MAX_XLSX_COLUMN_INDEX:
                     continue
                 gap = cell_index - len(values)
                 if gap > MAX_XLSX_BLANK_GAP:
                     values.append(f"[{gap} blank columns]")
-                    values.append(_xlsx_cell_value(cell, shared_strings))
-                    continue
-                values.extend([""] * max(gap, 0))
-            values.append(_xlsx_cell_value(cell, shared_strings))
+                else:
+                    values.extend([""] * max(gap, 0))
+            values.append(cell_value)
         while values and not values[-1]:
             values.pop()
         if any(values):
