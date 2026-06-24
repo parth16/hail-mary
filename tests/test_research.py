@@ -317,7 +317,7 @@ def test_prepare_research_results_template_writes_private_fillable_file(
         "title": "",
         "text": "",
         "retrieved_at": "",
-        "source_url": "https://example.com",
+        "source_url": "",
         "source_api": "",
         "confidence": "",
         "licensing_notes": (
@@ -352,7 +352,7 @@ def test_prepare_research_results_template_marks_meridian_as_platform_source(
     )
     assert meridian_result["source_kind"] == "meridian"
     assert meridian_result["document_type"] == "platform_deal_page"
-    assert meridian_result["source_url"] == "https://portal.angellist.com/m/example/invest"
+    assert meridian_result["source_url"] == ""
 
 
 def test_prepare_research_results_template_uses_latest_plan_when_omitted(
@@ -375,6 +375,33 @@ def test_prepare_research_results_template_uses_latest_plan_when_omitted(
         created_at=datetime(2026, 1, 3, tzinfo=UTC),
     )
 
+    assert result.plan_path == latest_plan.output_path.resolve(strict=False)
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert {item["company_name"] for item in saved["results"]} == {"NewerCo"}
+
+
+def test_prepare_research_results_template_uses_suffixed_plan_for_same_second(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    prepare_research_plan(
+        config=config,
+        company_names=["OlderCo"],
+        created_at=created_at,
+    )
+    latest_plan = prepare_research_plan(
+        config=config,
+        company_names=["NewerCo"],
+        created_at=created_at,
+    )
+
+    result = prepare_research_results_template(
+        config=config,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert latest_plan.output_path.name.endswith("-2.json")
     assert result.plan_path == latest_plan.output_path.resolve(strict=False)
     saved = json.loads(result.output_path.read_text(encoding="utf-8"))
     assert {item["company_name"] for item in saved["results"]} == {"NewerCo"}
@@ -429,6 +456,7 @@ def test_prepare_research_results_template_command_writes_template(
     assert "--dry-run" in result.output
     templates = list((tmp_path / "data" / "research-results-templates").glob("*.json"))
     assert len(templates) == 1
+    assert templates[0].name in result.output.replace("\n", "")
 
 
 def test_prepare_research_results_template_command_has_plain_english_error(

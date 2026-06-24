@@ -434,6 +434,7 @@ def _ensure_dedicated_data_dir(path: Path) -> None:
         "reports",
         "agent-packets",
         "research-plans",
+        "research-results-templates",
         "browser-profiles",
     }
     try:
@@ -457,6 +458,7 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         data_dir / "reports",
         data_dir / "agent-packets",
         data_dir / "research-plans",
+        data_dir / "research-results-templates",
     }
     allowed_profile_root = data_dir / "browser-profiles"
 

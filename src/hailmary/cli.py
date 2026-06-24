@@ -510,7 +510,8 @@ def prepare_research_results_template_command(
     console.print(f"Saved the private JSON template to {result.output_path}.")
     console.print("No websites, APIs, paid databases, or Meridian pages were contacted.")
     console.print(
-        "Fill in source-backed facts, then run `hailmary import-research-results --dry-run`."
+        "Fill in source-backed facts, then run "
+        f"`hailmary import-research-results {result.output_path} --dry-run`."
     )
 
 

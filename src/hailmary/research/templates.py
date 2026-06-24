@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -76,7 +77,18 @@ def _latest_research_plan_path(data_dir: Path) -> Path:
         raise ResearchTemplateError(
             "No research plan JSON files were found. Run `hailmary prepare-research-plan` first."
         )
-    return max(candidates, key=lambda path: path.name).resolve(strict=False)
+    return max(candidates, key=_research_plan_sort_key).resolve(strict=False)
+
+
+def _research_plan_sort_key(path: Path) -> tuple[str, int]:
+    match = re.fullmatch(
+        r"research-plan-(\d{8}-\d{6})(?:-(\d+))?\.json",
+        path.name,
+    )
+    if match is None:
+        return (path.name, 0)
+    suffix = int(match.group(2) or "1")
+    return (match.group(1), suffix)
 
 
 def _resolve_input_file(path: Path, *, description: str) -> Path:
@@ -129,7 +141,7 @@ def _template_result_for_task(task: ResearchTask) -> dict[str, str]:
         "title": "",
         "text": "",
         "retrieved_at": "",
-        "source_url": task.url or "",
+        "source_url": "",
         "source_api": "",
         "confidence": "",
         "licensing_notes": task.licensing_notes,

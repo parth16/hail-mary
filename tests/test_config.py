@@ -51,6 +51,18 @@ def test_local_state_uses_owner_only_permissions(
     assert stat.S_IMODE((tmp_path / ".hailmary" / "config.yaml").stat().st_mode) == 0o600
 
 
+def test_local_state_accepts_research_results_templates_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "local-data"
+    (data_dir / "research-results-templates").mkdir(parents=True)
+
+    create_local_state(AppConfig(data_dir=data_dir), force=True)
+
+    assert (data_dir / "research-results-templates").is_dir()
+
+
 def test_local_state_rejects_data_dir_inside_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
