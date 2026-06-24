@@ -25,6 +25,7 @@ from hailmary.schemas.agents import (
     AgentRecommendationRationale,
     AgentReviewOutput,
     AgentRole,
+    AgentSummaryPoint,
 )
 from hailmary.schemas.documents import (
     DocumentType,
@@ -125,6 +126,33 @@ def test_build_agent_input_packet_keeps_cited_quote_when_truncating() -> None:
     assert len(packet.evidence[0].text) <= 80
 
 
+def test_build_agent_input_packet_keeps_all_selected_claim_quotes_when_truncating() -> None:
+    long_prefix = "Background. " * 40
+    evidence = [
+        _evidence(
+            "ev_late_quotes",
+            f"{long_prefix}Valuation cap $8M. Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_late_quotes"),
+        _claim("discount", "20%", "ev_late_quotes"),
+    ]
+    store = _store(evidence=evidence, claims=claims)
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.DEAL_TERMS,
+        max_evidence_chars=80,
+    )
+
+    assert "$8M" in packet.evidence[0].text
+    assert "20%" in packet.evidence[0].text
+    assert len(packet.evidence[0].text) <= 80
+
+
 def test_build_agent_input_packet_caps_cited_evidence_records() -> None:
     evidence = [_evidence(f"ev_{index}", f"Evidence record {index}.") for index in range(60)]
     store = _store(evidence=evidence, claims=[])
@@ -211,7 +239,7 @@ def test_validate_agent_output_accepts_known_evidence_ids_and_quotes() -> None:
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The cited evidence supports the narrow finding.",
+        summary=_supported_summary("The cited evidence supports the narrow finding."),
         findings=[
             AgentFinding(
                 title="Pricing term is present",
@@ -246,7 +274,7 @@ def test_validate_agent_output_rejects_unknown_evidence_id() -> None:
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The finding cites an invented ID.",
+        summary=_supported_summary("The finding cites an invented ID."),
         findings=[
             AgentFinding(
                 title="Invented evidence",
@@ -271,7 +299,7 @@ def test_validate_agent_output_rejects_quote_that_is_not_in_packet() -> None:
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The finding cites a stale quote.",
+        summary=_supported_summary("The finding cites a stale quote."),
         findings=[
             AgentFinding(
                 title="Stale quote",
@@ -300,7 +328,7 @@ def test_validate_agent_output_requires_evidence_or_unsupported_flag() -> None:
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The finding is missing support.",
+        summary=_supported_summary("The finding is missing support."),
         findings=[
             AgentFinding(
                 title="Unsupported customer claim",
@@ -325,7 +353,7 @@ def test_validate_agent_output_allows_unsupported_finding_without_evidence() -> 
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The unsupported claim is marked correctly.",
+        summary=_supported_summary("The unsupported claim is marked correctly."),
         findings=[
             AgentFinding(
                 title="Unsupported customer claim",
@@ -343,6 +371,75 @@ def test_validate_agent_output_allows_unsupported_finding_without_evidence() -> 
     assert result.valid
 
 
+def test_validate_agent_output_requires_summary_evidence_or_unsupported_flag() -> None:
+    packet = _agent_packet()
+    output = AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary=[AgentSummaryPoint(summary="This summary point has no support.")],
+        findings=[
+            AgentFinding(
+                title="Supported finding",
+                finding="A valuation cap is present.",
+                confidence=ConfidenceLevel.LOW,
+                materiality="medium",
+                evidence=[AgentEvidenceReference(evidence_id="ev_terms")],
+            )
+        ],
+    )
+
+    result = validate_agent_output(output, packet)
+
+    assert not result.valid
+    assert result.issues[0].location == "summary[0].evidence"
+    assert "evidence ID" in result.issues[0].message
+
+
+def test_validate_agent_output_allows_unsupported_summary_without_evidence() -> None:
+    packet = _agent_packet()
+    output = AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary=[
+            AgentSummaryPoint(
+                summary="This unsupported summary point is clearly marked.",
+                unsupported=True,
+            )
+        ],
+    )
+
+    result = validate_agent_output(output, packet)
+
+    assert result.valid
+
+
+def test_validate_agent_output_blocks_score_changes_on_unsupported_findings() -> None:
+    packet = _agent_packet()
+    output = AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        findings=[
+            AgentFinding(
+                title="Unsupported negative score",
+                finding="The unsupported finding tries to change the score.",
+                confidence=ConfidenceLevel.LOW,
+                materiality="medium",
+                score_delta=-1,
+                unsupported=True,
+            )
+        ],
+    )
+
+    result = validate_agent_output(output, packet)
+
+    assert not result.valid
+    assert result.issues[0].location == "findings[0].score_delta"
+    assert "cannot change the score" in result.issues[0].message
+
+
 def test_validate_agent_output_requires_final_decision_recommendation() -> None:
     store = _strong_store()
     scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
@@ -355,7 +452,7 @@ def test_validate_agent_output_requires_final_decision_recommendation() -> None:
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The final decision omitted the required recommendation.",
+        summary=_supported_summary("The final decision omitted the required recommendation."),
         findings=[
             AgentFinding(
                 title="Evidence gap",
@@ -380,7 +477,6 @@ def test_validate_agent_output_counts_recommendation_as_substantive_output() -> 
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The recommendation is the whole output.",
         recommendation=AgentRecommendationRationale(
             recommendation=Recommendation.PASS,
             check_size=0,
@@ -400,7 +496,7 @@ def test_validate_agent_output_requires_evidence_for_invest_recommendation() -> 
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The recommendation omits cited evidence.",
+        summary=_supported_summary("The recommendation omits cited evidence."),
         recommendation=AgentRecommendationRationale(
             recommendation=Recommendation.INVEST,
             check_size=1_000,
@@ -423,7 +519,12 @@ def test_agent_review_output_rejects_extra_fields() -> None:
                 "deal_id": "deal_test",
                 "company_name": "AgentCo",
                 "agent_role": AgentRole.OVERALL,
-                "summary": "Valid summary.",
+                "summary": [
+                    {
+                        "summary": "Valid summary.",
+                        "evidence": [{"evidence_id": "ev_terms"}],
+                    }
+                ],
                 "findings": [
                     {
                         "title": "Supported finding",
@@ -553,7 +654,7 @@ def test_validate_agent_output_command_reports_unknown_evidence_id(
         deal_id=packet.deal_id,
         company_name=packet.company_name,
         agent_role=packet.agent_role,
-        summary="The finding cites an invented ID.",
+        summary=_supported_summary("The finding cites an invented ID."),
         findings=[
             AgentFinding(
                 title="Invented evidence",
@@ -587,6 +688,15 @@ def _agent_packet() -> AgentInputPacket:
         role=AgentRole.OVERALL,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
+
+
+def _supported_summary(text: str) -> list[AgentSummaryPoint]:
+    return [
+        AgentSummaryPoint(
+            summary=text,
+            evidence=[AgentEvidenceReference(evidence_id="ev_terms")],
+        )
+    ]
 
 
 def _strong_store(

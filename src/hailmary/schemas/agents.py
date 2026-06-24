@@ -131,6 +131,12 @@ class AgentDiligenceQuestion(StrictAgentOutputModel):
     evidence: list[AgentEvidenceReference] = Field(default_factory=list)
 
 
+class AgentSummaryPoint(StrictAgentOutputModel):
+    summary: str
+    evidence: list[AgentEvidenceReference] = Field(default_factory=list)
+    unsupported: bool = False
+
+
 class AgentRecommendationRationale(StrictAgentOutputModel):
     recommendation: Recommendation
     check_size: int = Field(default=0)
@@ -154,7 +160,7 @@ class AgentReviewOutput(StrictAgentOutputModel):
     deal_id: str
     company_name: str
     agent_role: AgentRole
-    summary: str
+    summary: list[AgentSummaryPoint] = Field(default_factory=list)
     findings: list[AgentFinding] = Field(default_factory=list)
     diligence_questions: list[AgentDiligenceQuestion] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)

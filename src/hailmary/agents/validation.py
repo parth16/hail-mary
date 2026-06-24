@@ -42,17 +42,18 @@ def validate_agent_output(
             )
         )
     if (
-        not output.findings
+        not output.summary
+        and not output.findings
         and not output.diligence_questions
         and not output.limitations
         and output.recommendation is None
     ):
         issues.append(
             AgentValidationIssue(
-                location="findings",
+                location="summary",
                 message=(
-                    "The output needs at least one finding, diligence question, or "
-                    "limitation."
+                    "The output needs at least one summary point, finding, diligence "
+                    "question, limitation, or recommendation."
                 ),
             )
         )
@@ -63,6 +64,25 @@ def validate_agent_output(
                 message="Final-decision agent output needs an INVEST or PASS recommendation.",
             )
         )
+
+    for summary_index, summary in enumerate(output.summary):
+        if not summary.unsupported and not summary.evidence:
+            issues.append(
+                AgentValidationIssue(
+                    location=f"summary[{summary_index}].evidence",
+                    message=(
+                        "This summary point needs at least one evidence ID or must be "
+                        "marked unsupported."
+                    ),
+                )
+            )
+        for reference_index, reference in enumerate(summary.evidence):
+            _validate_evidence_reference(
+                reference,
+                evidence_by_id=evidence_by_id,
+                location=f"summary[{summary_index}].evidence[{reference_index}]",
+                issues=issues,
+            )
 
     for finding_index, finding in enumerate(output.findings):
         if not finding.unsupported and not finding.evidence:
@@ -75,11 +95,11 @@ def validate_agent_output(
                     ),
                 )
             )
-        if finding.unsupported and finding.score_delta > 0:
+        if finding.unsupported and finding.score_delta != 0:
             issues.append(
                 AgentValidationIssue(
                     location=f"findings[{finding_index}].score_delta",
-                    message="Unsupported findings cannot increase the score.",
+                    message="Unsupported findings cannot change the score.",
                 )
             )
         for reference_index, reference in enumerate(finding.evidence):

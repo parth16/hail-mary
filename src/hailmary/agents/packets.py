@@ -257,7 +257,7 @@ def build_agent_input_packet(
     )
     selected_evidence_ids = [evidence.id for evidence in selected_evidence]
     allowed_evidence_ids = set(selected_evidence_ids)
-    quote_by_evidence_id = _preferred_quote_by_evidence_id(verified_claims)
+    quotes_by_evidence_id = _preferred_quotes_by_evidence_id(verified_claims)
     selected_claims = [
         _claim_item(claim, allowed_evidence_ids=allowed_evidence_ids)
         for claim in verified_claims
@@ -287,7 +287,7 @@ def build_agent_input_packet(
             _evidence_item(
                 evidence,
                 max_evidence_chars=max_evidence_chars,
-                preferred_quote=quote_by_evidence_id.get(evidence.id),
+                preferred_quotes=quotes_by_evidence_id.get(evidence.id, []),
             )
             for evidence in selected_evidence
         ],
@@ -402,28 +402,29 @@ def _claim_item(
     )
 
 
-def _preferred_quote_by_evidence_id(
+def _preferred_quotes_by_evidence_id(
     verified_claims: list[ClaimRecord],
-) -> dict[str, str]:
-    quote_by_id: dict[str, str] = {}
+) -> dict[str, list[str]]:
+    quotes_by_id: dict[str, list[str]] = {}
     for claim in verified_claims:
         for citation in claim.citations:
-            if citation.evidence_id not in quote_by_id:
-                quote_by_id[citation.evidence_id] = citation.quote
-    return quote_by_id
+            quotes = quotes_by_id.setdefault(citation.evidence_id, [])
+            if citation.quote not in quotes:
+                quotes.append(citation.quote)
+    return quotes_by_id
 
 
 def _evidence_item(
     evidence: EvidenceRecord,
     *,
     max_evidence_chars: int,
-    preferred_quote: str | None,
+    preferred_quotes: list[str],
 ) -> AgentEvidenceItem:
     truncated = len(evidence.text) > max_evidence_chars
     text = _packet_evidence_text(
         evidence.text,
         max_evidence_chars=max_evidence_chars,
-        preferred_quote=preferred_quote,
+        preferred_quotes=preferred_quotes,
     )
     return AgentEvidenceItem(
         id=evidence.id,
@@ -442,25 +443,28 @@ def _packet_evidence_text(
     text: str,
     *,
     max_evidence_chars: int,
-    preferred_quote: str | None,
+    preferred_quotes: list[str],
 ) -> str:
     if len(text) <= max_evidence_chars:
         return text
-    if not preferred_quote:
+    quotes = [quote for quote in preferred_quotes if quote and quote in text]
+    if not quotes:
         return text[:max_evidence_chars].rstrip()
 
-    quote_start = text.find(preferred_quote)
-    if quote_start == -1:
-        return text[:max_evidence_chars].rstrip()
+    quote_only_text = "\n...\n".join(quotes)
+    if len(quote_only_text) <= max_evidence_chars:
+        return quote_only_text
 
-    if len(preferred_quote) >= max_evidence_chars:
-        return preferred_quote[:max_evidence_chars].rstrip()
+    anchor_quote = quotes[0]
+    if len(anchor_quote) >= max_evidence_chars:
+        return anchor_quote[:max_evidence_chars].rstrip()
 
-    context_budget = max_evidence_chars - len(preferred_quote)
+    quote_start = text.find(anchor_quote)
+    context_budget = max_evidence_chars - len(anchor_quote)
     prefix_budget = context_budget // 2
     suffix_budget = context_budget - prefix_budget
     start = max(0, quote_start - prefix_budget)
-    end = min(len(text), quote_start + len(preferred_quote) + suffix_budget)
+    end = min(len(text), quote_start + len(anchor_quote) + suffix_budget)
     if end - start < max_evidence_chars:
         start = max(0, end - max_evidence_chars)
     return text[start:end].strip()
