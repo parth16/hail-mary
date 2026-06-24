@@ -336,6 +336,40 @@ def test_import_research_results_skips_duplicate_records(tmp_path: Path) -> None
     assert len([evidence for evidence in saved_store.evidence if evidence.provider_id]) == 1
 
 
+def test_import_research_results_skips_duplicate_with_different_title(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    retitled_results_path = tmp_path / "research-results-retitled.json"
+    _write_results(
+        retitled_results_path,
+        [
+            _research_result(
+                title="Retitled copy of same source excerpt",
+            )
+        ],
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=retitled_results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 0
+    assert result.skipped_duplicate_count == 1
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    assert len([evidence for evidence in saved_store.evidence if evidence.provider_id]) == 1
+
+
 def test_import_research_results_keeps_one_document_id_per_external_source(
     tmp_path: Path,
 ) -> None:
@@ -366,6 +400,40 @@ def test_import_research_results_keeps_one_document_id_per_external_source(
     assert len(imported_evidence) == 2
     assert len({evidence.id for evidence in imported_evidence}) == 2
     assert len({evidence.document_id for evidence in imported_evidence}) == 1
+
+
+def test_import_research_results_escapes_external_metadata_in_memos(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(
+        tmp_path,
+        extra_results=[
+            _research_result(
+                title="Metadata escape test",
+                text="Acme AI has customers and a minimum investment $2,500.",
+                source_url="https://www.sec.gov/example/acme-ai-metadata",
+                provider_name="SEC source\n# Fake Heading",
+                confidence="high\n## Fake Confidence",
+                licensing_notes="[fake](https://example.com)\n- Fake claim",
+            )
+        ],
+    )
+
+    import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    memo = render_markdown_memo(score_evidence_store(saved_store, config=config), saved_store)
+    assert "\n# Fake Heading" not in memo
+    assert "\n## Fake Confidence" not in memo
+    assert "\\# Fake Heading" in memo
+    assert "\\[fake\\]\\(https://example.com\\)" in memo
 
 
 def test_import_research_results_fails_before_writing_for_unknown_deal(
@@ -405,6 +473,38 @@ def test_import_research_results_requires_source_url_or_api(tmp_path: Path) -> N
     )
 
     with pytest.raises(ResearchImportError, match="source_url or source_api"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize(
+    ("source_url", "message"),
+    [
+        ("https://example.com:bad/path", "invalid port"),
+        ("https://example.com:99999/path", "invalid port"),
+        ("https://user:token@example.com/path", "username or password"),
+    ],
+)
+def test_import_research_results_rejects_unsafe_source_urls(
+    tmp_path: Path,
+    source_url: str,
+    message: str,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-bad-url.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                source_url=source_url,
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match=message):
         import_research_results(
             config=config,
             results_path=bad_results_path,

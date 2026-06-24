@@ -319,18 +319,27 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
 def _external_source_details(evidence: EvidenceRecord) -> str:
     details: list[str] = []
     if evidence.provider_name:
-        details.append(f"provider: {evidence.provider_name}")
+        details.append(f"provider: {_memo_metadata_value(evidence.provider_name)}")
     if evidence.source_url:
-        details.append(f"source page: {evidence.source_url}")
+        details.append(f"source page: {_memo_metadata_value(evidence.source_url)}")
     if evidence.source_api:
-        details.append(f"data service source: {evidence.source_api}")
+        details.append(f"data service source: {_memo_metadata_value(evidence.source_api)}")
     if evidence.retrieved_at:
         details.append(f"retrieved at: {evidence.retrieved_at.isoformat()}")
     if evidence.external_confidence:
-        details.append(f"confidence: {evidence.external_confidence}")
+        details.append(f"confidence: {_memo_metadata_value(evidence.external_confidence)}")
     if evidence.licensing_notes:
-        details.append(f"licensing: {evidence.licensing_notes}")
+        details.append(f"licensing: {_memo_metadata_value(evidence.licensing_notes)}")
     return "; ".join(details)
+
+
+def _memo_metadata_value(value: str) -> str:
+    collapsed = " ".join(value.split())
+    markdown_characters = "\\`*_{}[]()#+!|>"
+    return "".join(
+        f"\\{character}" if character in markdown_characters else character
+        for character in collapsed
+    )
 
 
 def _round_summary(verified_claims: list[ClaimRecord]) -> str:

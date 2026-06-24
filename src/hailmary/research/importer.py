@@ -250,6 +250,16 @@ def _validate_source_url(source_url: str, *, index: int) -> None:
         raise ResearchImportError(
             f"Research result {index} source_url must include a website host."
         )
+    try:
+        _port = parsed.port
+    except ValueError as exc:
+        raise ResearchImportError(
+            f"Research result {index} source_url has an invalid port."
+        ) from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise ResearchImportError(
+            f"Research result {index} source_url cannot include a username or password."
+        )
     if any(character.isspace() for character in source_url):
         raise ResearchImportError(f"Research result {index} source_url cannot contain spaces.")
 
@@ -455,7 +465,6 @@ def _result_digest(result: ResearchResultInput, *, deal_id: str) -> str:
             result.provider_id,
             result.source_kind.value,
             source_reference,
-            result.title,
             result.text,
         ]
     )
