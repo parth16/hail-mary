@@ -175,7 +175,11 @@ def _deals_from_latest_ingestion(summary_path: Path) -> list[ResearchDealInput]:
             "`hailmary ingest-folder` again or pass `--company`."
         )
     return [
-        ResearchDealInput(deal_id=deal.id, company_name=deal.company_name)
+        ResearchDealInput(
+            deal_id=deal.id,
+            company_name=deal.company_name,
+            from_ingestion=True,
+        )
         for deal in summary.deals
     ]
 

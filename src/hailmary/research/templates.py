@@ -13,7 +13,12 @@ from pydantic import ValidationError
 from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.documents import DocumentType, SourceKind
 
-from .schemas import ResearchPlan, ResearchResultsTemplateRunSummary, ResearchTask
+from .schemas import (
+    ResearchDealInput,
+    ResearchPlan,
+    ResearchResultsTemplateRunSummary,
+    ResearchTask,
+)
 
 
 class ResearchTemplateError(RuntimeError):
@@ -34,7 +39,10 @@ def prepare_research_results_template(
     created_at = _as_utc(created_at or datetime.now(UTC))
     resolved_plan_path = _resolve_plan_path(plan_path, data_dir=config.data_dir)
     plan = _load_research_plan(resolved_plan_path)
-    results = [_template_result_for_task(task) for task in plan.tasks]
+    deal_by_id = {deal.deal_id: deal for deal in plan.deals}
+    results = [
+        _template_result_for_task(task, deal_by_id=deal_by_id) for task in plan.tasks
+    ]
 
     output_dir = config.data_dir / "research-results-templates"
     _ensure_private_directory(output_dir, private_root=config.data_dir)
@@ -132,9 +140,14 @@ def _load_research_plan(path: Path) -> ResearchPlan:
     return plan
 
 
-def _template_result_for_task(task: ResearchTask) -> dict[str, str]:
+def _template_result_for_task(
+    task: ResearchTask,
+    *,
+    deal_by_id: dict[str, ResearchDealInput],
+) -> dict[str, str]:
+    deal = deal_by_id.get(task.deal_id)
     return {
-        "deal_id": task.deal_id,
+        "deal_id": task.deal_id if deal is not None and deal.from_ingestion else "",
         "company_name": task.company_name,
         "provider_id": task.provider_id,
         "provider_name": task.provider_name,

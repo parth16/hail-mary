@@ -310,7 +310,7 @@ def test_prepare_research_results_template_writes_private_fillable_file(
         item for item in saved["results"] if item["provider_id"] == "company_website"
     )
     assert website_result == {
-        "deal_id": plan_result.plan.deals[0].deal_id,
+        "deal_id": "",
         "company_name": "Acme AI",
         "provider_id": "company_website",
         "provider_name": "Company website",
@@ -327,6 +327,27 @@ def test_prepare_research_results_template_writes_private_fillable_file(
         "source_kind": "web",
         "document_type": "web_page",
     }
+
+
+def test_prepare_research_results_template_keeps_ingested_deal_ids(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(data_dir=tmp_path / "data")
+    summary = ingest_folder(root, config=config)
+    plan_result = prepare_research_plan(config=config, created_at=BUILT_AT)
+
+    result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert {item["deal_id"] for item in saved["results"]} == {summary.deals[0].id}
 
 
 def test_prepare_research_results_template_marks_meridian_as_platform_source(
@@ -517,6 +538,40 @@ def test_import_research_results_skips_untouched_template_rows(
     assert result.imported_count == 1
     assert result.skipped_duplicate_count == 0
     assert result.deal_count == 1
+
+
+def test_import_research_results_reports_original_template_row_number(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    plan_result = prepare_research_plan(config=config, created_at=BUILT_AT)
+    template_result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    template_payload["results"][1].update(
+        {
+            "title": "Bad source URL excerpt",
+            "text": "Acme AI reports revenue growth from customers.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "source_url": "https://example .com/bad",
+            "confidence": "high: exact source",
+        }
+    )
+    template_result.output_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match=r"Research result 2 .*source_url"):
+        import_research_results(
+            config=config,
+            results_path=template_result.output_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
 
 
 def test_import_research_results_appends_source_linked_external_evidence(
