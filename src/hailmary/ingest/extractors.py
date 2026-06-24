@@ -568,6 +568,7 @@ def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[s
         if _xml_local_name(row.tag) != "row":
             continue
         values: list[str] = []
+        next_source_column = 0
         for cell in row:
             if _xml_local_name(cell.tag) != "c":
                 continue
@@ -575,14 +576,19 @@ def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[s
             if cell_index == INVALID_XLSX_CELL_INDEX:
                 continue
             cell_value = _xlsx_cell_value(cell, shared_strings)
+            if not cell_value:
+                continue
             if cell_index is not None:
                 if cell_index > MAX_XLSX_COLUMN_INDEX:
                     continue
-                gap = cell_index - len(values)
+                gap = cell_index - next_source_column
                 if gap > MAX_XLSX_BLANK_GAP:
                     values.append(f"[{gap} blank columns]")
                 else:
                     values.extend([""] * max(gap, 0))
+                next_source_column = max(next_source_column, cell_index + 1)
+            else:
+                next_source_column += 1
             values.append(cell_value)
         while values and not values[-1]:
             values.pop()

@@ -575,7 +575,7 @@ def test_xlsx_impossible_cell_reference_is_skipped(tmp_path: Path) -> None:
     assert "Impossible" not in result.combined_text
 
 
-def test_xlsx_valid_but_huge_sparse_gap_is_skipped(tmp_path: Path) -> None:
+def test_xlsx_valid_but_huge_sparse_gap_is_compacted(tmp_path: Path) -> None:
     xlsx_path = tmp_path / "model.xlsx"
     with zipfile.ZipFile(xlsx_path, "w") as workbook:
         workbook.writestr(
@@ -607,6 +607,75 @@ def test_xlsx_valid_but_huge_sparse_gap_is_skipped(tmp_path: Path) -> None:
     assert result.tables[0].column_count == 3
     assert "Far away" in result.combined_text
     assert result.combined_text.count(" | ") == 2
+
+
+def test_xlsx_empty_far_right_cell_does_not_create_gap_marker(tmp_path: Path) -> None:
+    xlsx_path = tmp_path / "model.xlsx"
+    with zipfile.ZipFile(xlsx_path, "w") as workbook:
+        workbook.writestr(
+            "xl/sharedStrings.xml",
+            """
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <si><t>Revenue</t></si>
+            </sst>
+            """,
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row r="1">
+                  <c r="A1" t="s"><v>0</v></c>
+                  <c r="XFD1"/>
+                </row>
+              </sheetData>
+            </worksheet>
+            """,
+        )
+
+    result = extract_document(xlsx_path)
+
+    assert result.tables[0].rows == [["Revenue"]]
+    assert result.tables[0].column_count == 1
+    assert "blank columns" not in result.combined_text
+
+
+def test_xlsx_compacted_gap_tracks_source_position(tmp_path: Path) -> None:
+    xlsx_path = tmp_path / "model.xlsx"
+    with zipfile.ZipFile(xlsx_path, "w") as workbook:
+        workbook.writestr(
+            "xl/sharedStrings.xml",
+            """
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <si><t>Revenue</t></si>
+              <si><t>Far away</t></si>
+              <si><t>Adjacent</t></si>
+            </sst>
+            """,
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row r="1">
+                  <c r="A1" t="s"><v>0</v></c>
+                  <c r="DG1" t="s"><v>1</v></c>
+                  <c r="DH1" t="s"><v>2</v></c>
+                </row>
+              </sheetData>
+            </worksheet>
+            """,
+        )
+
+    result = extract_document(xlsx_path)
+
+    assert result.tables[0].rows == [
+        ["Revenue", "[109 blank columns]", "Far away", "Adjacent"]
+    ]
+    assert result.tables[0].column_count == 4
+    assert result.combined_text.count("blank columns") == 1
 
 
 def test_xlsx_negative_shared_string_index_is_left_raw(tmp_path: Path) -> None:
