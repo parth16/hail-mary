@@ -7,9 +7,9 @@ from pydantic import ValidationError
 
 from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.documents import IngestionSummary
-from hailmary.schemas.evidence import ClaimRecord, EvidenceStore, VerificationStatus
+from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import MemoRunSummary, Recommendation, ScoredDeal
-from hailmary.scoring.scorer import score_evidence_store
+from hailmary.scoring.scorer import score_evidence_store, validated_verified_claims
 from hailmary.utils.slug import slugify
 
 
@@ -143,18 +143,8 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
 
     lines.extend(["", "## Evidence Used"])
     if store.evidence:
-        for evidence in store.evidence[:25]:
-            locator = (
-                f"page {evidence.page_number}"
-                if evidence.page_number is not None
-                else f"table {evidence.table_index}"
-                if evidence.table_index is not None
-                else "document"
-            )
-            lines.append(
-                f"- {evidence.id}: {evidence.document_path} ({locator}, "
-                f"{evidence.evidence_kind})."
-            )
+        for evidence in _memo_evidence_records(store, scored_deal, verified_claims):
+            lines.append(_evidence_line(evidence))
     else:
         lines.append("- No source-linked evidence records were available.")
 
@@ -211,10 +201,15 @@ def _load_evidence_store(path: Path, *, company_name: str) -> EvidenceStore:
 
 
 def _resolve_saved_path(path: Path, *, data_dir: Path, summary_path: Path) -> Path:
-    if path.is_absolute():
-        return path
-
     absolute_data_dir = _absolute_path(data_dir).resolve(strict=False)
+    if path.is_absolute():
+        resolved_path = path.resolve(strict=False)
+        if not _is_relative_to(resolved_path, absolute_data_dir):
+            raise ScoringError(
+                f"The evidence store path {path} is outside the private data directory."
+            )
+        return resolved_path
+
     absolute_summary_path = _absolute_path(summary_path).resolve(strict=False)
     candidate_roots = [
         Path.cwd().resolve(strict=False),
@@ -247,11 +242,62 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 
 def _verified_claims(store: EvidenceStore) -> list[ClaimRecord]:
-    return [
-        claim
-        for claim in store.claims
-        if claim.verification_status == VerificationStatus.VERIFIED
-    ]
+    return validated_verified_claims(store)
+
+
+def _memo_evidence_records(
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+    verified_claims: list[ClaimRecord],
+) -> list[EvidenceRecord]:
+    cited_ids = _cited_evidence_ids(scored_deal, verified_claims)
+    included_ids: set[str] = set()
+    selected: list[EvidenceRecord] = []
+
+    for evidence in store.evidence[:25]:
+        selected.append(evidence)
+        included_ids.add(evidence.id)
+    for evidence in store.evidence:
+        if evidence.id in cited_ids and evidence.id not in included_ids:
+            selected.append(evidence)
+            included_ids.add(evidence.id)
+    return selected
+
+
+def _cited_evidence_ids(
+    scored_deal: ScoredDeal,
+    verified_claims: list[ClaimRecord],
+) -> set[str]:
+    cited_ids = {
+        evidence_id
+        for factor in scored_deal.score_factors
+        for evidence_id in factor.evidence_ids
+    }
+    cited_ids.update(
+        citation.evidence_id
+        for claim in verified_claims
+        for citation in claim.citations
+    )
+    cited_ids.update(
+        evidence_id
+        for question in scored_deal.diligence_questions
+        for evidence_id in question.evidence_ids
+    )
+    return cited_ids
+
+
+def _evidence_line(evidence: EvidenceRecord) -> str:
+    locator = (
+        f"page {evidence.page_number}"
+        if evidence.page_number is not None
+        else f"table {evidence.table_index}"
+        if evidence.table_index is not None
+        else "document"
+    )
+    return (
+        f"- {evidence.id}: {evidence.document_path} "
+        f"({locator}, {evidence.evidence_kind})."
+    )
 
 
 def _round_summary(verified_claims: list[ClaimRecord]) -> str:
@@ -324,5 +370,10 @@ def _write_private_text(path: Path, text: str, *, description: str) -> None:
         with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
             handle.write(text)
         path.chmod(0o600)
+    except UnicodeEncodeError as exc:
+        raise ScoringError(
+            f"Could not write {description} at {path}: the memo contains text "
+            "that cannot be saved as UTF-8."
+        ) from exc
     except OSError as exc:
         raise ScoringError(f"Could not write {description} at {path}: {exc}") from exc

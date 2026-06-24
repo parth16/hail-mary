@@ -38,6 +38,7 @@ from hailmary.schemas.scoring import (
     ScoreFactor,
 )
 from hailmary.scoring import render_markdown_memo, score_evidence_store, score_latest_ingestion
+from hailmary.scoring.memo import ScoringError, _write_private_text
 
 runner = CliRunner()
 
@@ -300,6 +301,29 @@ def test_score_evidence_store_ignores_negated_traction_phrases() -> None:
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
 
 
+def test_score_evidence_store_ignores_coordinated_negated_traction() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "The company has no customers or revenue yet.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
 def test_score_evidence_store_keeps_mixed_current_traction_evidence() -> None:
     evidence = [
         _evidence(
@@ -418,6 +442,22 @@ def test_score_evidence_store_requires_verified_pricing_terms_to_invest() -> Non
     )
 
 
+def test_score_evidence_store_revalidates_claim_citations() -> None:
+    evidence = [_evidence("ev_terms", "Discount 20%. Round size $1M.")]
+    claims = [_claim("valuation cap", "$8M", "ev_terms")]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.recommendation == Recommendation.PASS
+    assert any(
+        gate.name == "No verified deal terms"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
     evidence = [_evidence("ev_terms", "Valuation cap $8M.")]
     claim = _claim("valuation cap", "$8M", "ev_terms")
@@ -432,6 +472,21 @@ def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
     assert "**Confidence:** medium" in markdown
     assert "ev_terms" in markdown
     assert "not legal, tax, financial, or investment advice" in markdown
+
+
+def test_render_markdown_memo_includes_cited_evidence_beyond_first_25() -> None:
+    evidence = [
+        _evidence(f"ev_{index}", f"Background evidence {index}.")
+        for index in range(29)
+    ]
+    evidence.append(_evidence("ev_29", "Valuation cap $8M."))
+    claim = _claim("valuation cap", "$8M", "ev_29")
+    store = _store(evidence=evidence, claims=[claim])
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert "- ev_29:" in markdown
 
 
 def test_score_latest_ingestion_tracks_remaining_capital(tmp_path: Path) -> None:
@@ -544,6 +599,39 @@ def test_score_latest_ingestion_resolves_nested_relative_data_dir_paths(
     assert result.scored_deals[0].memo_path is not None
 
 
+def test_score_latest_ingestion_rejects_absolute_evidence_path_outside_data_dir(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    processed_dir = data_dir / "processed"
+    processed_dir.mkdir(parents=True)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    store = _strong_store(deal_id="deal_outside", company_name="Outside Store")
+    outside_store_path = outside_dir / "store.json"
+    outside_store_path.write_text(store.model_dump_json(indent=2), encoding="utf-8")
+    summary = IngestionSummary(
+        root_path=tmp_path / "pitch-decks",
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        deals=[
+            IngestedDeal(
+                id=store.deal_id,
+                company_name=store.company_name,
+                documents=[],
+                evidence_store_path=outside_store_path,
+                evidence_count=store.evidence_count,
+                claim_count=store.claim_count,
+                conflict_count=store.conflict_count,
+            )
+        ],
+        summary_path=processed_dir / "ingestion_summary.json",
+    )
+    summary.summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+
+    with pytest.raises(ScoringError, match="outside the private data directory"):
+        score_latest_ingestion(config=AppConfig(data_dir=data_dir))
+
+
 def test_score_deals_missing_ingestion_summary_has_plain_english_error(
     tmp_path: Path,
 ) -> None:
@@ -608,6 +696,15 @@ def test_score_latest_ingestion_non_utf8_evidence_store_has_plain_english_error(
     assert result.exit_code != 0
     assert "evidence store for Deal One is not plain text" in result.output
     assert "Traceback" not in result.output
+
+
+def test_write_private_text_wraps_unicode_encode_errors(tmp_path: Path) -> None:
+    with pytest.raises(ScoringError, match="cannot be saved as UTF-8"):
+        _write_private_text(
+            tmp_path / "memo.md",
+            "bad surrogate \udcff",
+            description="Markdown memo",
+        )
 
 
 def _strong_store(*, deal_id: str, company_name: str) -> EvidenceStore:

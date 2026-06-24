@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from hailmary.config import CHECK_SIZE_TIERS, AppConfig
 from hailmary.schemas.evidence import (
     ClaimRecord,
+    EvidenceCitation,
     EvidenceRecord,
     EvidenceStore,
     SourceFreshness,
@@ -38,6 +39,8 @@ INVEST_MINIMUM_SCORE = 75
 HARD_MAX_CHECK = max(CHECK_SIZE_TIERS)
 NEGATED_TRACTION_PATTERNS = (
     re.compile(r"\bpre[-\s]?revenue\b", re.IGNORECASE),
+    re.compile(r"\bno\s+(?:paid\s+)?customers?\s+or\s+revenue\b", re.IGNORECASE),
+    re.compile(r"\bno\s+revenue\s+or\s+(?:paid\s+)?customers?\b", re.IGNORECASE),
     re.compile(r"\bno\s+(?:paid\s+)?customers?\b", re.IGNORECASE),
     re.compile(r"\bno\s+revenue\b", re.IGNORECASE),
     re.compile(r"\bwithout\s+(?:customers?|revenue|usage|retention)\b", re.IGNORECASE),
@@ -66,11 +69,7 @@ def score_evidence_store(
 ) -> ScoredDeal:
     """Score one deal using only validated evidence-store records."""
 
-    verified_claims = [
-        claim
-        for claim in store.claims
-        if claim.verification_status == VerificationStatus.VERIFIED
-    ]
+    verified_claims = validated_verified_claims(store)
     available_capital = config.capital_budget if capital_remaining is None else capital_remaining
     platform_minimum_check = _platform_minimum_check(verified_claims)
     pmf_level = _pmf_level(store.evidence)
@@ -138,6 +137,45 @@ def score_evidence_store(
         capital_remaining_before=available_capital,
         capital_remaining_after=max(0, available_capital - check_size),
     )
+
+
+def validated_verified_claims(store: EvidenceStore) -> list[ClaimRecord]:
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    return [
+        claim
+        for claim in store.claims
+        if claim.verification_status == VerificationStatus.VERIFIED
+        and _claim_citations_are_valid(claim, evidence_by_id)
+    ]
+
+
+def _claim_citations_are_valid(
+    claim: ClaimRecord,
+    evidence_by_id: dict[str, EvidenceRecord],
+) -> bool:
+    if not claim.citations:
+        return False
+    return all(_citation_is_valid(citation, evidence_by_id) for citation in claim.citations)
+
+
+def _citation_is_valid(
+    citation: EvidenceCitation,
+    evidence_by_id: dict[str, EvidenceRecord],
+) -> bool:
+    if citation.verification_status != VerificationStatus.VERIFIED:
+        return False
+    evidence = evidence_by_id.get(citation.evidence_id)
+    if evidence is None:
+        return False
+
+    start = citation.source_span_start
+    end = citation.source_span_end
+    if (
+        0 <= start < end <= len(evidence.text)
+        and evidence.text[start:end] == citation.quote
+    ):
+        return True
+    return citation.quote in evidence.text
 
 
 def _kill_gates(
