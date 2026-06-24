@@ -28,6 +28,7 @@ from hailmary.ingest.folder_loader import (
     ingest_folder as ingest_folder_path,
 )
 from hailmary.research import (
+    ResearchCollectionError,
     ResearchImportError,
     ResearchPlanError,
     ResearchProvider,
@@ -36,6 +37,7 @@ from hailmary.research import (
     ResearchTemplateError,
     builtin_research_providers,
     import_research_results,
+    prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
 )
@@ -512,6 +514,73 @@ def prepare_research_results_template_command(
     data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
     console.print(
         "Fill in source-backed facts, then run "
+        f"`hailmary import-research-results {result.output_path}{data_dir_option} --dry-run`."
+    )
+
+
+@app.command("prepare-public-research-results")
+def prepare_public_research_results_command(
+    company: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--company",
+            help=(
+                "Company to prepare public research results for. Use more than once "
+                "for multiple companies."
+            ),
+        ),
+    ] = None,
+    sec_form_d_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sec-form-d-results",
+            help=(
+                "Local JSON file of SEC Form D search results. Hail Mary reads this "
+                "file and does not contact SEC."
+            ),
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should write the private results file.",
+        ),
+    ] = None,
+) -> None:
+    """Prepare import-ready public research results from local source files."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = prepare_public_research_results(
+            config=config,
+            company_names=company or [],
+            sec_form_d_results_path=sec_form_d_results,
+        )
+    except ResearchCollectionError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    result_word = "result" if result.result_count == 1 else "results"
+    company_word = "company" if result.deal_count == 1 else "companies"
+    if result.output_path is None:
+        console.print(
+            f"No matching public research {result_word} were found for "
+            f"{result.deal_count} {company_word}."
+        )
+        console.print("No results file was saved.")
+        console.print("No websites or software data feeds were contacted.")
+        return
+
+    console.print(
+        f"Prepared {result.result_count} public research {result_word} for "
+        f"{result.deal_count} {company_word}."
+    )
+    console.print(f"Saved the private JSON results file to {result.output_path}.")
+    console.print("No websites or software data feeds were contacted.")
+    data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
+    console.print(
+        "After ingesting the matching deal folders, run "
         f"`hailmary import-research-results {result.output_path}{data_dir_option} --dry-run`."
     )
 

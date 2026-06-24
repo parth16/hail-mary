@@ -1,3 +1,11 @@
+from hailmary.research.collection import (
+    ResearchCollectionDealSummary,
+    ResearchCollectionError,
+    ResearchCollectionRunSummary,
+    SecFormDPublicAdapter,
+    SecFormDSearchResult,
+    prepare_public_research_results,
+)
 from hailmary.research.importer import ResearchImportError, import_research_results
 from hailmary.research.planner import ResearchPlanError, prepare_research_plan
 from hailmary.research.providers import (
@@ -26,6 +34,9 @@ from hailmary.research.templates import (
 
 __all__ = [
     "ResearchAccessMode",
+    "ResearchCollectionDealSummary",
+    "ResearchCollectionError",
+    "ResearchCollectionRunSummary",
     "ResearchDealInput",
     "ResearchImportDealSummary",
     "ResearchImportError",
@@ -41,9 +52,12 @@ __all__ = [
     "ResearchTask",
     "ResearchTaskStatus",
     "ResearchTemplateError",
+    "SecFormDPublicAdapter",
+    "SecFormDSearchResult",
     "builtin_provider_adapters",
     "builtin_research_providers",
     "import_research_results",
+    "prepare_public_research_results",
     "prepare_research_plan",
     "prepare_research_results_template",
 ]
