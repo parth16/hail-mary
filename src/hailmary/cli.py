@@ -18,6 +18,7 @@ from hailmary.ingest.folder_loader import (
 from hailmary.ingest.folder_loader import (
     ingest_folder as ingest_folder_path,
 )
+from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 
 app = typer.Typer(
     help="Evaluate private startup deals from local diligence documents.",
@@ -158,3 +159,42 @@ def ingest_folder(
             f"Could not read {len(summary.unreadable_paths)} {path_word}. "
             "Hail Mary did not scan those locations, so diligence documents may be missing."
         )
+
+
+@app.command("score-deals")
+def score_deals(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read generated evidence and write reports.",
+        ),
+    ] = None,
+) -> None:
+    """Score ingested deals and write local Markdown memos."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = score_latest_ingestion(config=config)
+    except ScoringError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    deal_word = "deal" if result.deal_count == 1 else "deals"
+    memo_word = "memo" if result.deal_count == 1 else "memos"
+    console.print(f"Scored {result.deal_count} {deal_word}.")
+    console.print(f"Saved Markdown {memo_word} to {result.report_dir}.")
+    for scored_deal in result.scored_deals:
+        console.print(
+            f"{scored_deal.company_name}: {scored_deal.recommendation}, "
+            f"check size {_format_check_size(scored_deal.check_size)}, "
+            f"score {scored_deal.total_score}/{scored_deal.max_score}."
+        )
+
+
+def _format_check_size(check_size: int) -> str:
+    if check_size == 0:
+        return "$0"
+    if check_size % 1_000 == 0:
+        return f"${check_size // 1_000}K"
+    return f"${check_size / 1_000:g}K"
