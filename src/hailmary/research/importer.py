@@ -50,6 +50,29 @@ SUPPORTED_DOCUMENT_TYPES = {
     DocumentType.PLATFORM_DEAL_PAGE,
     DocumentType.MEMO,
 }
+RESEARCH_RESULT_FIELDS = {
+    "deal_id",
+    "company_name",
+    "provider_id",
+    "provider_name",
+    "title",
+    "text",
+    "retrieved_at",
+    "source_url",
+    "source_api",
+    "confidence",
+    "licensing_notes",
+    "source_kind",
+    "document_type",
+}
+TEMPLATE_FACT_FIELDS = {
+    "title",
+    "text",
+    "retrieved_at",
+    "source_url",
+    "source_api",
+    "confidence",
+}
 
 
 @dataclass(frozen=True)
@@ -203,11 +226,34 @@ def _load_results_file(path: Path) -> ResearchResultsFile:
         raise ResearchImportError(
             "The research results file must be a JSON object with a `results` list."
         )
+    raw_payload = _drop_blank_template_rows(raw_payload)
     try:
         return ResearchResultsFile.model_validate(raw_payload)
     except ValidationError as exc:
         detail = _first_validation_detail(exc)
         raise ResearchImportError(f"The research results file is incomplete: {detail}") from exc
+
+
+def _drop_blank_template_rows(raw_payload: dict[str, object]) -> dict[str, object]:
+    raw_results = raw_payload.get("results")
+    if not isinstance(raw_results, list):
+        return raw_payload
+    filtered_results = [
+        result for result in raw_results if not _is_blank_template_result(result)
+    ]
+    return {**raw_payload, "results": filtered_results}
+
+
+def _is_blank_template_result(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if not set(result).issubset(RESEARCH_RESULT_FIELDS):
+        return False
+    return all(_is_blank_template_value(result.get(field)) for field in TEMPLATE_FACT_FIELDS)
+
+
+def _is_blank_template_value(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _validate_results(results: list[ResearchResultInput], *, imported_at: datetime) -> None:

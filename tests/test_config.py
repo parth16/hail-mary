@@ -618,12 +618,22 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
         Path("local-data/raw"),
         Path("local-data/agent-packets"),
         Path("local-data/research-plans"),
+        Path("local-data/research-results-templates"),
     ]:
         with pytest.raises(ConfigError, match="Meridian browser profile directory cannot"):
             create_local_state(
                 AppConfig(data_dir=Path("local-data"), meridian_profile_dir=profile_dir),
                 force=True,
             )
+
+    with pytest.raises(ConfigError, match="research-results-templates"):
+        create_local_state(
+            AppConfig(
+                data_dir=Path("local-data"),
+                meridian_profile_dir=Path("local-data/research-results-templates"),
+            ),
+            force=True,
+        )
 
 
 def test_init_rejects_meridian_profile_config_path_overlap(

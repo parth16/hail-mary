@@ -479,6 +479,46 @@ def test_prepare_research_results_template_command_has_plain_english_error(
     assert "Traceback" not in result.output
 
 
+def test_import_research_results_skips_untouched_template_rows(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    plan_result = prepare_research_plan(config=config, created_at=BUILT_AT)
+    template_result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    template_payload["results"][0].update(
+        {
+            "title": "Exact public source excerpt",
+            "text": (
+                "Acme AI reports revenue growth from customers. "
+                "Minimum investment $2,500."
+            ),
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "source_url": "https://example.com/exact-acme-source",
+            "confidence": "high: exact source",
+        }
+    )
+    template_result.output_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=template_result.output_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+        dry_run=True,
+    )
+
+    assert result.imported_count == 1
+    assert result.skipped_duplicate_count == 0
+    assert result.deal_count == 1
+
+
 def test_import_research_results_appends_source_linked_external_evidence(
     tmp_path: Path,
 ) -> None:
