@@ -399,6 +399,19 @@ def test_import_research_results_rejects_unknown_result_fields(tmp_path: Path) -
         )
 
 
+def test_import_research_results_requires_results_key(tmp_path: Path) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-missing-results.json"
+    bad_results_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ResearchImportError, match="results"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
 def test_import_research_results_requires_ingested_deals(tmp_path: Path) -> None:
     results_path = tmp_path / "research-results.json"
     _write_results(results_path, [_research_result()])

@@ -158,7 +158,7 @@ class ResearchResultInput(BaseModel):
 class ResearchResultsFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    results: list[ResearchResultInput] = Field(default_factory=list)
+    results: list[ResearchResultInput]
 
     @field_validator("results")
     @classmethod
