@@ -104,6 +104,28 @@ def test_evidence_store_flags_conflicting_deal_terms(tmp_path: Path) -> None:
     assert {
         claim["quality"]["verification_status"] for claim in saved_store["claims"]
     } == {VerificationStatus.CONFLICTED}
+    assert {claim["quality"]["confidence"] for claim in saved_store["claims"]} == {0.2}
+    assert {
+        claim["quality"]["score_impact"] for claim in saved_store["claims"]
+    } == {"excluded_until_conflict_is_resolved"}
+
+
+def test_table_evidence_is_not_duplicated_as_page_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "TableOnlyCo"
+    company.mkdir(parents=True)
+    (company / "terms.csv").write_text("Valuation cap,$8M\n", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    assert [evidence["evidence_kind"] for evidence in saved_store["evidence"]] == [
+        EvidenceKind.TABLE_TEXT
+    ]
+    assert deal.evidence_count == 1
+    assert deal.claim_count == 1
 
 
 def test_verify_citation_checks_evidence_id_span_and_quote() -> None:

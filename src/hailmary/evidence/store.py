@@ -116,7 +116,11 @@ def build_evidence_store(
                 update={
                     "verification_status": VerificationStatus.CONFLICTED,
                     "quality": claim.quality.model_copy(
-                        update={"verification_status": VerificationStatus.CONFLICTED}
+                        update={
+                            "verification_status": VerificationStatus.CONFLICTED,
+                            "confidence": 0.2,
+                            "score_impact": "excluded_until_conflict_is_resolved",
+                        }
                     ),
                 }
             )
@@ -150,10 +154,17 @@ def _document_evidence_records(
     records: list[EvidenceRecord] = []
     source = document.source
     source_freshness = _source_freshness(source, now=built_at)
+    table_texts = {
+        table.clean_text.strip()
+        for table in document.tables
+        if table.clean_text.strip()
+    }
 
     for page in document.pages:
         text = page.clean_text.strip()
         if not text:
+            continue
+        if text in table_texts:
             continue
         records.append(
             EvidenceRecord(
@@ -172,8 +183,6 @@ def _document_evidence_records(
                 file_type=source.file_type,
                 text=text,
                 page_number=page.page_number,
-                source_span_start=page.source_span_start,
-                source_span_end=page.source_span_end,
                 source_freshness=source_freshness,
             )
         )

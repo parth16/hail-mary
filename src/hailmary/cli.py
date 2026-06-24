@@ -110,6 +110,9 @@ def ingest_folder(
     evidence_count = sum(deal.evidence_count for deal in summary.deals)
     claim_count = sum(deal.claim_count for deal in summary.deals)
     conflict_count = sum(deal.conflict_count for deal in summary.deals)
+    deals_without_evidence = [
+        deal for deal in summary.deals if deal.documents and deal.evidence_count == 0
+    ]
     if evidence_count:
         evidence_word = "record" if evidence_count == 1 else "records"
         claim_word = "claim" if claim_count == 1 else "claims"
@@ -117,9 +120,11 @@ def ingest_folder(
             f"Built {evidence_count} source-linked evidence {evidence_word} "
             f"and {claim_count} deal-term {claim_word}."
         )
-    elif summary.document_count:
+    if deals_without_evidence:
+        deal_names = ", ".join(deal.company_name for deal in deals_without_evidence)
+        deal_word = "deal" if len(deals_without_evidence) == 1 else "deals"
         console.print(
-            "No usable evidence text was built from these documents. "
+            f"No usable evidence text was built for {deal_word}: {deal_names}. "
             "Hail Mary stored the files it could read, but cannot use their text yet."
         )
     if conflict_count:

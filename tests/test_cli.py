@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from hailmary.cli import app
 from hailmary.ingest import folder_loader
 from hailmary.ingest.extractors import ExtractionResult
+from hailmary.ingest.extractors import extract_document as real_extract_document
 from hailmary.schemas.documents import ExtractedPage, ExtractionQuality
 
 runner = CliRunner()
@@ -106,6 +107,37 @@ def test_ingest_folder_warns_when_no_usable_evidence_is_built(
     assert result.exit_code == 0, result.output
     assert "No usable evidence text was built" in result.output
     assert "cannot use their text yet" in result.output
+
+
+def test_ingest_folder_warns_for_each_deal_without_usable_evidence(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "pitch-decks"
+    empty_source = root / "EmptyCo"
+    full_source = root / "FullCo"
+    empty_source.mkdir(parents=True)
+    full_source.mkdir(parents=True)
+    (empty_source / "empty.pdf").write_bytes(b"%PDF-1.4")
+    (full_source / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+
+    def fake_extract_document(path: Path) -> ExtractionResult:
+        if path.name == "empty.pdf":
+            return ExtractionResult(
+                pages=[],
+                page_count=1,
+                extraction_quality=ExtractionQuality.LOW,
+            )
+        return real_extract_document(path)
+
+    monkeypatch.setattr(folder_loader, "extract_document", fake_extract_document)
+
+    result = runner.invoke(app, ["ingest-folder", str(root)])
+
+    assert result.exit_code == 0, result.output
+    assert "source-linked evidence" in result.output
+    assert "No usable evidence text was built for deal: EmptyCo" in result.output
+    assert "FullCo" not in result.output.split("No usable evidence text was built", 1)[1]
 
 
 def test_ingest_folder_unreadable_path_has_plain_english_warning(
