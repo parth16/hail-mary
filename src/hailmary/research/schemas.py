@@ -226,6 +226,8 @@ class ResearchResultInput(BaseModel):
 class ResearchResultsFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    _skipped_blank_template_row_count: int = PrivateAttr(default=0)
+
     results: list[ResearchResultInput]
 
     @field_validator("results")
@@ -248,6 +250,7 @@ class ResearchImportRunSummary(BaseModel):
     input_path: Path
     imported_at: datetime
     dry_run: bool = False
+    skipped_blank_template_row_count: int = 0
     deals: list[ResearchImportDealSummary] = Field(default_factory=list)
 
     @property
