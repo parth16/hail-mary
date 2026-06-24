@@ -238,6 +238,33 @@ def test_pdf_low_text_divider_with_readable_page_does_not_warn_document(
     assert not result.vision_recommended
 
 
+def test_pdf_empty_page_with_readable_page_warns_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class TextPage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        pages = [
+            TextPage(""),
+            TextPage("Readable traction text with customer growth and revenue context."),
+        ]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert result.ocr_recommended
+    assert result.vision_recommended
+
+
 def test_pdf_mostly_low_text_pages_recommend_ocr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -429,6 +456,17 @@ def test_csv_extraction_filters_blank_rows_from_table_metadata(tmp_path: Path) -
     assert result.tables[0].row_count == 2
 
 
+def test_csv_extraction_skips_empty_tables(tmp_path: Path) -> None:
+    csv_path = tmp_path / "empty.csv"
+    csv_path.write_text(",\n,\n", encoding="utf-8")
+
+    result = extract_document(csv_path)
+
+    assert result.pages == []
+    assert result.tables == []
+    assert result.table_count == 0
+
+
 def test_csv_parser_error_is_recorded_without_crashing(tmp_path: Path) -> None:
     csv_path = tmp_path / "model.csv"
     csv_path.write_text(f"notes\n{'A' * 32}\n", encoding="utf-8")
@@ -565,9 +603,10 @@ def test_xlsx_valid_but_huge_sparse_gap_is_skipped(tmp_path: Path) -> None:
 
     result = extract_document(xlsx_path)
 
-    assert result.tables[0].rows == [["Revenue"]]
-    assert result.tables[0].column_count == 1
-    assert "Far away" not in result.combined_text
+    assert result.tables[0].rows == [["Revenue", "[16382 blank columns]", "Far away"]]
+    assert result.tables[0].column_count == 3
+    assert "Far away" in result.combined_text
+    assert result.combined_text.count(" | ") == 2
 
 
 def test_xlsx_negative_shared_string_index_is_left_raw(tmp_path: Path) -> None:

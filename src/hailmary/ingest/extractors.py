@@ -156,7 +156,7 @@ def _document_ocr_recommended(pages: list[ExtractedPage]) -> bool:
     ocr_pages = [page for page in pages if page.needs_ocr]
     if not ocr_pages:
         return False
-    if any(page.notes for page in ocr_pages):
+    if any(page.notes or not page.raw_text.strip() for page in ocr_pages):
         return True
 
     return len(ocr_pages) * 2 > len(pages)
@@ -498,8 +498,9 @@ def _extract_csv(path: Path) -> ExtractionResult:
             extraction_quality=ExtractionQuality.LOW,
             notes=f"Could not parse the CSV file: {exc}",
         )
-    raw_text = "\n".join(_table_rows_as_text(rows))
-    tables = [_make_table(rows, table_index=1, source_span_start=0)] if rows else []
+    content_rows = _table_rows_with_content(rows)
+    raw_text = "\n".join(_table_rows_as_text(content_rows))
+    tables = [_make_table(content_rows, table_index=1, source_span_start=0)] if content_rows else []
     return _single_page_result(raw_text, page_count=1, notes=notes, tables=tables)
 
 
@@ -576,6 +577,8 @@ def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[s
                     continue
                 gap = cell_index - len(values)
                 if gap > MAX_XLSX_BLANK_GAP:
+                    values.append(f"[{gap} blank columns]")
+                    values.append(_xlsx_cell_value(cell, shared_strings))
                     continue
                 values.extend([""] * max(gap, 0))
             values.append(_xlsx_cell_value(cell, shared_strings))
