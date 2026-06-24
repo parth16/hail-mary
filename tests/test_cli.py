@@ -172,7 +172,7 @@ def test_init_force_recovers_invalid_saved_config(
     assert result.exit_code == 0, result.output
     assert "Created local config" in result.output
     config_text = (config_dir / "config.yaml").read_text(encoding="utf-8")
-    assert "data_dir: local-data" in config_text
+    assert 'data_dir: "local-data"' in config_text
     assert "local_only: true" in config_text
 
 

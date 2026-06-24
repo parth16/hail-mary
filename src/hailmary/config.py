@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -708,12 +709,16 @@ def _default_config_text(config: AppConfig) -> str:
     web_research = "true" if config.enable_web_research else "false"
 
     return f"""# Local Hail Mary settings. Do not commit this file.
-data_dir: {config.data_dir.as_posix()}
+data_dir: {_yaml_string(config.data_dir.as_posix())}
 local_only: {local_only}
-log_level: {config.log_level}
+log_level: {_yaml_string(config.log_level)}
 capital_budget: {config.capital_budget}
 min_check: {config.min_check}
 max_check: {config.max_check}
-meridian_profile_dir: {config.meridian_profile_dir.as_posix()}
+meridian_profile_dir: {_yaml_string(config.meridian_profile_dir.as_posix())}
 enable_web_research: {web_research}
 """
+
+
+def _yaml_string(value: str) -> str:
+    return json.dumps(value)

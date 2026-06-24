@@ -32,9 +32,10 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
 
     root_path = _resolve_scan_root(root_path)
     allow_private_raw_root = _is_private_raw_root(root_path, config)
+    is_private_raw_collection_root = _is_private_raw_collection_root(root_path, config)
     use_collection_subfolders = _uses_collection_subfolders(
         root_path,
-        allow_private_raw_root=allow_private_raw_root,
+        is_private_raw_collection_root=is_private_raw_collection_root,
     )
     run_started_at = datetime.now(UTC)
     deals_by_id: dict[str, IngestedDeal] = {}
@@ -177,7 +178,7 @@ def _resolve_scan_root(root_path: Path) -> Path:
 def _uses_collection_subfolders(
     root_path: Path,
     *,
-    allow_private_raw_root: bool,
+    is_private_raw_collection_root: bool,
 ) -> bool:
     collection_folder_names = {
         "companies",
@@ -197,7 +198,7 @@ def _uses_collection_subfolders(
         "startups",
     }
     normalized_root_name = slugify(root_path.name)
-    return allow_private_raw_root or normalized_root_name in collection_folder_names
+    return is_private_raw_collection_root or normalized_root_name in collection_folder_names
 
 
 def _deal_name_for_path(
@@ -320,16 +321,25 @@ def _is_generated_output_path(
 
 
 def _is_private_raw_root(root_path: Path, config: AppConfig) -> bool:
-    raw_root = (
-        config.data_dir / "raw"
-        if config.data_dir.is_absolute()
-        else Path.cwd() / config.data_dir / "raw"
-    ).resolve(strict=False)
+    raw_root = _private_raw_root(config)
     try:
         root_path.relative_to(raw_root)
     except ValueError:
         return False
     return True
+
+
+def _is_private_raw_collection_root(root_path: Path, config: AppConfig) -> bool:
+    return root_path == _private_raw_root(config)
+
+
+def _private_raw_root(config: AppConfig) -> Path:
+    raw_root = (
+        config.data_dir / "raw"
+        if config.data_dir.is_absolute()
+        else Path.cwd() / config.data_dir / "raw"
+    )
+    return raw_root.resolve(strict=False)
 
 
 def _ensure_private_directory(path: Path, *, private_root: Path) -> None:

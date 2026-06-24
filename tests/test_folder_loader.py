@@ -187,6 +187,22 @@ def test_private_raw_folder_can_be_ingested(tmp_path: Path) -> None:
     assert summary.deals[0].company_name == "RawCo"
 
 
+def test_direct_private_raw_company_folder_scan_uses_root_folder_name(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    raw_company = data_dir / "raw" / "RawCo"
+    closing = raw_company / "Closing"
+    closing.mkdir(parents=True)
+    (raw_company / "memo.txt").write_text("Memo about RawCo.", encoding="utf-8")
+    (closing / "safe.txt").write_text("Simple Agreement for Future Equity.", encoding="utf-8")
+
+    summary = ingest_folder(raw_company, config=AppConfig(data_dir=data_dir))
+
+    assert summary.document_count == 2
+    assert len(summary.deals) == 1
+    assert summary.deals[0].company_name == "RawCo"
+    assert {document.source.company_name for document in summary.deals[0].documents} == {"RawCo"}
+
+
 def test_spreadsheets_are_recorded_with_extracted_text(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "SpreadsheetCo"

@@ -386,7 +386,7 @@ def test_init_from_subdirectory_anchors_explicit_relative_data_dir(
     assert (repo_root / "local-data" / "processed").is_dir()
     assert not (src_dir / "local-data").exists()
     config_text = (repo_root / ".hailmary" / "config.yaml").read_text(encoding="utf-8")
-    assert f"data_dir: {(repo_root / 'local-data').as_posix()}" in config_text
+    assert f'data_dir: "{(repo_root / "local-data").as_posix()}"' in config_text
 
 
 def test_init_ignores_data_dir_in_target_git_repo(
@@ -405,6 +405,19 @@ def test_init_ignores_data_dir_in_target_git_repo(
     create_local_state(AppConfig(data_dir=target_repo / "local-data"), force=True)
 
     assert "local-data/" in target_exclude.read_text(encoding="utf-8")
+
+
+def test_init_quotes_saved_paths_that_look_like_yaml_syntax(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    create_local_state(AppConfig(data_dir=Path("!data")), force=True)
+
+    config_text = (tmp_path / ".hailmary" / "config.yaml").read_text(encoding="utf-8")
+    assert 'data_dir: "!data"' in config_text
+    assert 'meridian_profile_dir: "!data/browser-profiles/meridian"' in config_text
+    assert load_config().data_dir == Path("!data")
 
 
 def test_load_config_reads_saved_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
