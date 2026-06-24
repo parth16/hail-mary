@@ -73,6 +73,7 @@ uv run hailmary import-research-results research-results.json
       "company_name": "ExampleCo",
       "title": "ExampleCo Form D",
       "text": "ExampleCo filed a Form D for a $1,000,000 offering.",
+      "retrieved_at": "2026-01-01T12:00:00Z",
       "source_url": "https://www.sec.gov/example"
     }
   ]

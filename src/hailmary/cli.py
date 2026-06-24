@@ -576,6 +576,14 @@ def prepare_public_research_results_command(
         f"Prepared {result.result_count} public research {result_word} for "
         f"{result.deal_count} {company_word}."
     )
+    zero_result_companies = [
+        deal.company_name for deal in result.deals if deal.result_count == 0
+    ]
+    if zero_result_companies:
+        console.print(
+            "No public research results were prepared for: "
+            f"{', '.join(zero_result_companies)}."
+        )
     console.print(f"Saved the private JSON results file to {result.output_path}.")
     console.print("No websites or software data feeds were contacted.")
     data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""

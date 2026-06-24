@@ -31,7 +31,7 @@ class SecFormDSearchResult(BaseModel):
     title: str
     text: str
     source_url: str
-    retrieved_at: datetime | None = None
+    retrieved_at: datetime
     filed_at: datetime | None = None
     accession_number: str | None = None
 
@@ -64,13 +64,14 @@ class SecFormDSearchResult(BaseModel):
     @model_validator(mode="after")
     def validate_source_url(self) -> Self:
         _validate_http_url(self.source_url, field_name="source_url")
+        _validate_sec_source_url(self.source_url)
         return self
 
 
 class SecFormDSearchResultsFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    results: list[SecFormDSearchResult] = Field(default_factory=list)
+    results: list[SecFormDSearchResult]
 
 
 class ResearchCollectionDealSummary(BaseModel):
@@ -109,7 +110,7 @@ class LocalSecFormDSearchClient:
 
     def search(self, company_name: str) -> Iterable[SecFormDSearchResult]:
         for result in self.results:
-            if _match_confidence(company_name, result.company_name) is not None:
+            if _exact_company_name_match(company_name, result.company_name):
                 yield result
 
 
@@ -128,8 +129,7 @@ class SecFormDPublicAdapter:
         provider = _provider_by_id(self.provider_id)
         results: list[ResearchResultInput] = []
         for search_result in self.client.search(deal.company_name):
-            confidence = _match_confidence(deal.company_name, search_result.company_name)
-            if confidence is None:
+            if not _exact_company_name_match(deal.company_name, search_result.company_name):
                 continue
             try:
                 result = ResearchResultInput(
@@ -138,9 +138,9 @@ class SecFormDPublicAdapter:
                     provider_name=provider.name,
                     title=search_result.title,
                     text=search_result.text,
-                    retrieved_at=search_result.retrieved_at or collected_at,
+                    retrieved_at=_as_utc(search_result.retrieved_at),
                     source_url=search_result.source_url,
-                    confidence=confidence,
+                    confidence="high: exact company name match from a local SEC Form D source file",
                     licensing_notes=provider.licensing_notes,
                     source_kind=provider.source_kind,
                 )
@@ -285,19 +285,12 @@ def _clean_company_names(company_names: list[str]) -> list[str]:
     return deduped
 
 
-def _match_confidence(query_company_name: str, result_company_name: str) -> str | None:
+def _exact_company_name_match(query_company_name: str, result_company_name: str) -> bool:
     query = _normalize_company_name(query_company_name)
     result = _normalize_company_name(result_company_name)
     if not query or not result:
-        return None
-    if query == result:
-        return "high: exact company name match from a local SEC Form D source file"
-    if query in result or result in query:
-        return (
-            "medium: related company name match from a local SEC Form D source file; "
-            "verify before relying on it"
-        )
-    return None
+        return False
+    return query == result
 
 
 def _normalize_company_name(value: str) -> str:
@@ -353,6 +346,17 @@ def _validate_http_url(url: str, *, field_name: str) -> None:
         raise ValueError(f"{field_name} cannot include a username or password")
     if any(character.isspace() for character in url):
         raise ValueError(f"{field_name} cannot contain spaces")
+
+
+def _validate_sec_source_url(url: str) -> None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    normalized_host = host.casefold()
+    if normalized_host == "sec.gov" or normalized_host.endswith(".sec.gov"):
+        return
+    raise ValueError(
+        "source_url must use an SEC website host such as www.sec.gov or data.sec.gov"
+    )
 
 
 def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
