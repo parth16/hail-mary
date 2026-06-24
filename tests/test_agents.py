@@ -101,6 +101,30 @@ def test_build_agent_input_packet_truncates_long_evidence_text() -> None:
     assert len(packet.evidence[0].text) <= 80
 
 
+def test_build_agent_input_packet_keeps_cited_quote_when_truncating() -> None:
+    long_prefix = "Background. " * 40
+    evidence = [
+        _evidence(
+            "ev_late_quote",
+            f"{long_prefix}Valuation cap $8M. Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [_claim("valuation cap", "$8M", "ev_late_quote")]
+    store = _store(evidence=evidence, claims=claims)
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.DEAL_TERMS,
+        max_evidence_chars=80,
+    )
+
+    assert packet.evidence[0].truncated is True
+    assert "$8M" in packet.evidence[0].text
+    assert len(packet.evidence[0].text) <= 80
+
+
 def test_build_agent_input_packet_caps_cited_evidence_records() -> None:
     evidence = [_evidence(f"ev_{index}", f"Evidence record {index}.") for index in range(60)]
     store = _store(evidence=evidence, claims=[])

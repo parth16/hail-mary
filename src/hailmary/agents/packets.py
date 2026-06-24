@@ -257,6 +257,7 @@ def build_agent_input_packet(
     )
     selected_evidence_ids = [evidence.id for evidence in selected_evidence]
     allowed_evidence_ids = set(selected_evidence_ids)
+    quote_by_evidence_id = _preferred_quote_by_evidence_id(verified_claims)
     selected_claims = [
         _claim_item(claim, allowed_evidence_ids=allowed_evidence_ids)
         for claim in verified_claims
@@ -283,7 +284,11 @@ def build_agent_input_packet(
             fundability_risk=scored_deal.fundability_risk,
         ),
         evidence=[
-            _evidence_item(evidence, max_evidence_chars=max_evidence_chars)
+            _evidence_item(
+                evidence,
+                max_evidence_chars=max_evidence_chars,
+                preferred_quote=quote_by_evidence_id.get(evidence.id),
+            )
             for evidence in selected_evidence
         ],
         verified_claims=selected_claims,
@@ -397,15 +402,29 @@ def _claim_item(
     )
 
 
+def _preferred_quote_by_evidence_id(
+    verified_claims: list[ClaimRecord],
+) -> dict[str, str]:
+    quote_by_id: dict[str, str] = {}
+    for claim in verified_claims:
+        for citation in claim.citations:
+            if citation.evidence_id not in quote_by_id:
+                quote_by_id[citation.evidence_id] = citation.quote
+    return quote_by_id
+
+
 def _evidence_item(
     evidence: EvidenceRecord,
     *,
     max_evidence_chars: int,
+    preferred_quote: str | None,
 ) -> AgentEvidenceItem:
-    text = evidence.text
-    truncated = len(text) > max_evidence_chars
-    if truncated:
-        text = text[:max_evidence_chars].rstrip()
+    truncated = len(evidence.text) > max_evidence_chars
+    text = _packet_evidence_text(
+        evidence.text,
+        max_evidence_chars=max_evidence_chars,
+        preferred_quote=preferred_quote,
+    )
     return AgentEvidenceItem(
         id=evidence.id,
         text=text,
@@ -417,6 +436,34 @@ def _evidence_item(
         table_index=evidence.table_index,
         truncated=truncated,
     )
+
+
+def _packet_evidence_text(
+    text: str,
+    *,
+    max_evidence_chars: int,
+    preferred_quote: str | None,
+) -> str:
+    if len(text) <= max_evidence_chars:
+        return text
+    if not preferred_quote:
+        return text[:max_evidence_chars].rstrip()
+
+    quote_start = text.find(preferred_quote)
+    if quote_start == -1:
+        return text[:max_evidence_chars].rstrip()
+
+    if len(preferred_quote) >= max_evidence_chars:
+        return preferred_quote[:max_evidence_chars].rstrip()
+
+    context_budget = max_evidence_chars - len(preferred_quote)
+    prefix_budget = context_budget // 2
+    suffix_budget = context_budget - prefix_budget
+    start = max(0, quote_start - prefix_budget)
+    end = min(len(text), quote_start + len(preferred_quote) + suffix_budget)
+    if end - start < max_evidence_chars:
+        start = max(0, end - max_evidence_chars)
+    return text[start:end].strip()
 
 
 def _load_ingestion_summary(summary_path: Path) -> IngestionSummary:

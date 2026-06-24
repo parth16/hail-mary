@@ -471,6 +471,29 @@ def test_score_evidence_store_ignores_negated_early_pmf_language() -> None:
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
 
 
+def test_score_evidence_store_ignores_coordinated_negated_pmf_language() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "The company has no usage or retention yet.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
 def test_score_evidence_store_excludes_negated_early_pmf_from_citations() -> None:
     evidence = [
         _evidence(
@@ -711,6 +734,45 @@ def test_render_markdown_memo_includes_conflict_evidence_beyond_first_25() -> No
 
     assert "- ev_29:" in markdown
     assert "- ev_30:" in markdown
+
+
+def test_render_markdown_memo_excludes_stale_conflict_evidence_beyond_first_25() -> None:
+    evidence = [
+        _evidence(f"ev_{index}", f"Background evidence {index}.")
+        for index in range(25)
+    ]
+    evidence.extend(
+        [
+            _evidence("ev_valid", "Valuation cap $8M."),
+            _evidence("ev_stale", "Stale background with no matching valuation."),
+        ]
+    )
+    valid_claim = _claim("valuation cap", "$8M", "ev_valid").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    stale_claim = _claim("valuation cap", "$10M", "ev_stale").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    conflict = ClaimConflict(
+        id="conflict_valuation",
+        deal_id="deal_test",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["valuation cap:$10M", "valuation cap:$8M"],
+        claim_ids=[valid_claim.id, stale_claim.id],
+        notes="One conflict side is stale.",
+    )
+    store = _store(
+        evidence=evidence,
+        claims=[valid_claim, stale_claim],
+        conflicts=[conflict],
+    )
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert "- ev_valid:" in markdown
+    assert "- ev_stale:" not in markdown
 
 
 def test_score_latest_ingestion_tracks_remaining_capital(tmp_path: Path) -> None:

@@ -50,6 +50,12 @@ NEGATED_TRACTION_PATTERNS = (
         r"\s+or\s+(?:paid\s+)?customers?\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"\bno\s+(?:usage|retention|growth|pilots?|beta|lois?|waitlist)"
+        r"(?:\s+(?:or|and)\s+"
+        r"(?:usage|retention|growth|pilots?|beta|lois?|waitlist))*\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bno\s+(?:paid\s+)?customers?\b", re.IGNORECASE),
     re.compile(r"\bno\s+revenue\b", re.IGNORECASE),
     re.compile(
