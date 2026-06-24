@@ -55,6 +55,7 @@ After the first push:
 - open PRs as ready for review, not drafts
 - self-review changes before pushing
 - include validation commands, test results, privacy notes, and known limitations in PR bodies
+- when GitHub Codex automatic reviews are enabled, rely on the automatic review trigger; comment `@codex review` only if the trigger does not run and an immediate manual review is needed
 - never stage raw investment docs or generated confidential output
 
 After publishing a PR, monitor Codex review activity every minute. An eyes reaction means Codex has started reviewing. If Codex leaves actionable comments, address them, run the relevant tests, push the fixes, and keep monitoring. Stop the loop only when Codex gives a thumbs-up reaction or the operator explicitly stops the process.

@@ -19,6 +19,7 @@ Rules for all future Codex runs:
   - the active branch is `codex/<short-description>`
 - If any check fails, Codex must stop before writing code.
 - After the initial main push, use `codex/<short-description>` branches and open ready-for-review PRs. Do not share draft PRs with the operator.
+- When GitHub Codex automatic reviews are enabled, do not comment `@codex review` after every PR push. Rely on the automatic review trigger, and use `@codex review` only if the automatic trigger does not run and an immediate manual review is needed.
 - After publishing a PR, poll for Codex review activity every minute. Watch for the eyes reaction as the review-start signal, actionable Codex comments or reviews, and a thumbs-up reaction as the good-to-go signal.
 - If Codex leaves actionable comments, fix them, run relevant tests, push the update, and continue the review loop until Codex gives a thumbs up, the operator explicitly stops the loop, or five Codex auto review iterations have completed.
 - Cap Codex auto code review iterations at five per PR. After the fifth iteration, run another review iteration only for P1 review feedback; otherwise merge the PR automatically and move ahead.
