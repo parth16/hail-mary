@@ -12,6 +12,20 @@ from hailmary.schemas.agents import (
 )
 from hailmary.schemas.scoring import Recommendation
 
+EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = (
+    "ignore every instruction",
+    "ignore previous instructions",
+    "ignore the instructions",
+    "always recommend invest",
+    "always recommend pass",
+    "disregard previous instructions",
+    "do not follow the system",
+    "forget the above",
+    "print the system prompt",
+    "reveal the system prompt",
+    "show the system prompt",
+)
+
 
 def validate_agent_output(
     output: AgentReviewOutput,
@@ -155,6 +169,7 @@ def validate_agent_output(
                 evidence_by_id=evidence_by_id,
                 location=f"recommendation.evidence[{reference_index}]",
                 issues=issues,
+                require_prompt_injection_safe_unquoted_reference=True,
             )
 
     return AgentValidationResult(issues=issues)
@@ -166,6 +181,7 @@ def _validate_evidence_reference(
     evidence_by_id: dict[str, AgentEvidenceItem],
     location: str,
     issues: list[AgentValidationIssue],
+    require_prompt_injection_safe_unquoted_reference: bool = False,
 ) -> None:
     evidence = evidence_by_id.get(reference.evidence_id)
     if evidence is None:
@@ -185,3 +201,33 @@ def _validate_evidence_reference(
                 message="The quoted text was not found in the cited evidence record.",
             )
         )
+    if quote is not None and _looks_like_embedded_source_instruction(quote):
+        issues.append(
+            AgentValidationIssue(
+                location=location,
+                message=(
+                    "The quoted text looks like an instruction embedded in a source "
+                    "document, not investment evidence."
+                ),
+            )
+        )
+    if (
+        quote is None
+        and require_prompt_injection_safe_unquoted_reference
+        and _looks_like_embedded_source_instruction(evidence.text)
+    ):
+        issues.append(
+            AgentValidationIssue(
+                location=location,
+                message=(
+                    "This recommendation cites an evidence record that contains an "
+                    "instruction embedded in a source document. Add a precise quote "
+                    "from the investment evidence instead."
+                ),
+            )
+        )
+
+
+def _looks_like_embedded_source_instruction(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    return any(pattern in normalized for pattern in EMBEDDED_SOURCE_INSTRUCTION_PATTERNS)
