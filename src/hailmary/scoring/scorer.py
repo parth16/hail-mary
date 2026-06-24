@@ -91,8 +91,8 @@ def score_evidence_store(
 ) -> ScoredDeal:
     """Score one deal using only validated evidence-store records."""
 
-    verified_claims = validated_verified_claims(store)
     valid_conflicts = validated_conflicts(store)
+    verified_claims = validated_verified_claims(store)
     available_capital = config.capital_budget if capital_remaining is None else capital_remaining
     platform_minimum_check = _platform_minimum_check(verified_claims)
     pmf_level = _pmf_level(store.evidence)
@@ -172,10 +172,15 @@ def score_evidence_store(
 
 def validated_verified_claims(store: EvidenceStore) -> list[ClaimRecord]:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    valid_conflict_claim_ids = {
+        claim_id for conflict in validated_conflicts(store) for claim_id in conflict.claim_ids
+    }
     return [
         claim
         for claim in store.claims
-        if claim.verification_status == VerificationStatus.VERIFIED
+        if claim.id not in valid_conflict_claim_ids
+        and claim.verification_status
+        in {VerificationStatus.VERIFIED, VerificationStatus.CONFLICTED}
         and _claim_citations_are_valid(claim, evidence_by_id)
     ]
 

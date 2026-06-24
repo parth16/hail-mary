@@ -220,6 +220,46 @@ def test_score_evidence_store_passes_when_terms_conflict() -> None:
     )
 
 
+def test_score_evidence_store_reuses_valid_claim_from_stale_conflict() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    valid_claim = _claim("valuation cap", "$8M", "ev_terms").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    stale_claim = _claim("valuation cap", "$10M", "ev_terms").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    claims = [
+        valid_claim,
+        stale_claim,
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+    conflict = ClaimConflict(
+        id="conflict_valuation",
+        deal_id="deal_test",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["$10M", "$8M"],
+        claim_ids=[valid_claim.id, stale_claim.id],
+        notes="One side of this stored conflict is stale.",
+    )
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims, conflicts=[conflict]),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert not any(
+        gate.name == "Conflicting material deal terms"
+        for gate in scored.triggered_kill_gates
+    )
+    assert "valuation cap" in _score_factor(scored, "Deal-term clarity").explanation
+
+
 def test_score_evidence_store_passes_when_platform_minimum_exceeds_max_check() -> None:
     evidence = [
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Minimum check $25K."),

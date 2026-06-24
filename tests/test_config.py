@@ -600,7 +600,11 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    for profile_dir in [Path("local-data"), Path("local-data/raw")]:
+    for profile_dir in [
+        Path("local-data"),
+        Path("local-data/raw"),
+        Path("local-data/agent-packets"),
+    ]:
         with pytest.raises(ConfigError, match="Meridian browser profile directory cannot"):
             create_local_state(
                 AppConfig(data_dir=Path("local-data"), meridian_profile_dir=profile_dir),

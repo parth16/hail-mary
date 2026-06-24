@@ -5,7 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from hailmary.config import CHECK_SIZE_TIERS
 from hailmary.schemas.documents import DocumentType, SourceKind
@@ -106,12 +106,16 @@ class AgentPacketRunSummary(BaseModel):
         return len(self.packets)
 
 
-class AgentEvidenceReference(BaseModel):
+class StrictAgentOutputModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AgentEvidenceReference(StrictAgentOutputModel):
     evidence_id: str
     quote: str | None = None
 
 
-class AgentFinding(BaseModel):
+class AgentFinding(StrictAgentOutputModel):
     title: str
     finding: str
     confidence: ConfidenceLevel
@@ -121,13 +125,13 @@ class AgentFinding(BaseModel):
     unsupported: bool = False
 
 
-class AgentDiligenceQuestion(BaseModel):
+class AgentDiligenceQuestion(StrictAgentOutputModel):
     question: str
     reason: str
     evidence: list[AgentEvidenceReference] = Field(default_factory=list)
 
 
-class AgentRecommendationRationale(BaseModel):
+class AgentRecommendationRationale(StrictAgentOutputModel):
     recommendation: Recommendation
     check_size: int = Field(default=0)
     reason: str
@@ -146,7 +150,7 @@ class AgentRecommendationRationale(BaseModel):
         return self
 
 
-class AgentReviewOutput(BaseModel):
+class AgentReviewOutput(StrictAgentOutputModel):
     deal_id: str
     company_name: str
     agent_role: AgentRole

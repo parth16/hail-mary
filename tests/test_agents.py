@@ -44,7 +44,7 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import ConfidenceLevel, Recommendation
+from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoreFactor
 from hailmary.scoring.scorer import score_evidence_store
 
 runner = CliRunner()
@@ -98,6 +98,35 @@ def test_build_agent_input_packet_truncates_long_evidence_text() -> None:
 
     assert packet.evidence[0].truncated is True
     assert len(packet.evidence[0].text) <= 80
+
+
+def test_build_agent_input_packet_caps_cited_evidence_records() -> None:
+    evidence = [_evidence(f"ev_{index}", f"Evidence record {index}.") for index in range(60)]
+    store = _store(evidence=evidence, claims=[])
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored_deal = scored_deal.model_copy(
+        update={
+            "score_factors": [
+                ScoreFactor(
+                    name="Large cited set",
+                    score=1,
+                    max_score=1,
+                    explanation="Synthetic cited evidence set.",
+                    evidence_ids=[record.id for record in evidence],
+                )
+            ]
+        }
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.GROUNDING_AUDITOR,
+        max_evidence_records=50,
+    )
+
+    assert len(packet.evidence) == 50
+    assert packet.allowed_evidence_ids == [f"ev_{index}" for index in range(50)]
 
 
 def test_validate_agent_output_accepts_known_evidence_ids_and_quotes() -> None:
@@ -236,6 +265,59 @@ def test_validate_agent_output_allows_unsupported_finding_without_evidence() -> 
     result = validate_agent_output(output, packet)
 
     assert result.valid
+
+
+def test_validate_agent_output_requires_final_decision_recommendation() -> None:
+    store = _strong_store()
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.FINAL_DECISION,
+    )
+    output = AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary="The final decision omitted the required recommendation.",
+        findings=[
+            AgentFinding(
+                title="Evidence gap",
+                finding="The model did not make a final recommendation.",
+                confidence=ConfidenceLevel.LOW,
+                materiality="high",
+                unsupported=True,
+            )
+        ],
+    )
+
+    result = validate_agent_output(output, packet)
+
+    assert not result.valid
+    assert result.issues[0].location == "recommendation"
+    assert "needs an INVEST or PASS recommendation" in result.issues[0].message
+
+
+def test_agent_review_output_rejects_extra_fields() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        AgentReviewOutput.model_validate(
+            {
+                "deal_id": "deal_test",
+                "company_name": "AgentCo",
+                "agent_role": AgentRole.OVERALL,
+                "summary": "Valid summary.",
+                "findings": [
+                    {
+                        "title": "Supported finding",
+                        "finding": "A supported finding.",
+                        "confidence": ConfidenceLevel.LOW,
+                        "materiality": "medium",
+                        "evidence": [{"evidence_id": "ev_terms"}],
+                    }
+                ],
+                "uncited_rationale": "This extra field should fail.",
+            }
+        )
 
 
 def test_agent_recommendation_requires_fixed_check_sizes() -> None:

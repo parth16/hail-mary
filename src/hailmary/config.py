@@ -447,6 +447,7 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         data_dir / "raw",
         data_dir / "processed",
         data_dir / "reports",
+        data_dir / "agent-packets",
     }
     allowed_profile_root = data_dir / "browser-profiles"
 
@@ -464,7 +465,8 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         if profile_dir == reserved_path:
             raise ConfigError(
                 "The Meridian browser profile directory cannot be the data, raw, "
-                "processed, or reports folder. Choose a separate generated-data folder."
+                "processed, reports, or agent-packets folder. Choose a separate "
+                "generated-data folder."
             )
         try:
             profile_dir.relative_to(reserved_path)

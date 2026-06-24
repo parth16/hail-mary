@@ -5,6 +5,7 @@ from hailmary.schemas.agents import (
     AgentEvidenceReference,
     AgentInputPacket,
     AgentReviewOutput,
+    AgentRole,
     AgentValidationIssue,
     AgentValidationResult,
     is_allowed_check_size,
@@ -48,6 +49,13 @@ def validate_agent_output(
                     "The output needs at least one finding, diligence question, or "
                     "limitation."
                 ),
+            )
+        )
+    if packet.agent_role == AgentRole.FINAL_DECISION and output.recommendation is None:
+        issues.append(
+            AgentValidationIssue(
+                location="recommendation",
+                message="Final-decision agent output needs an INVEST or PASS recommendation.",
             )
         )
 

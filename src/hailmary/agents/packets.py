@@ -323,6 +323,8 @@ def _select_evidence_records(
     selected_ids: set[str] = set()
 
     for evidence in store.evidence:
+        if len(selected) >= max_evidence_records:
+            break
         if evidence.id in cited_ids:
             selected.append(evidence)
             selected_ids.add(evidence.id)
