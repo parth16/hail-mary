@@ -43,11 +43,14 @@ uv run hailmary ingest-folder ./pitch-decks
 uv run hailmary score-deals
 uv run hailmary prepare-agent-packets
 uv run hailmary validate-agent-output output.json packet.json
+uv run hailmary run-evals
 ```
 
 `init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `score-deals` reads the local evidence stores and writes deterministic Markdown memos under `data/reports/`.
 
 `prepare-agent-packets` writes local JSON packets under `data/agent-packets/` for structured model review. These packets include selected evidence excerpts, allowed evidence IDs, verified claims, deterministic score context, and the required output schema. `validate-agent-output` checks a model's JSON output against the packet, rejecting invented evidence IDs, unsupported findings that are not marked unsupported, and quotes that do not appear in the cited evidence record.
+
+`run-evals` runs local synthetic correctness checks. The built-in evals cover text extraction and ingestion, citation span validation, conflicting deal terms, prompt-injection safeguards, and score calibration. They do not use real deal documents.
 
 ## GitHub Workflow
 

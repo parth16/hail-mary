@@ -19,6 +19,7 @@ from hailmary.config import (
     create_local_state,
     load_config,
 )
+from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
 from hailmary.ingest.folder_loader import (
     IngestionError,
 )
@@ -260,6 +261,72 @@ def validate_agent_output_command(
     console.print(
         "Agent output passed validation. Every cited evidence ID is in the packet."
     )
+
+
+@app.command("run-evals")
+def run_evals_command(
+    case: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--case",
+            help="Run one built-in synthetic eval case by ID. Can be used more than once.",
+        ),
+    ] = None,
+    category: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--category",
+            help=(
+                "Run one eval category. Can be used more than once. Valid values: "
+                "extraction, citation, contradiction, prompt_injection, "
+                "score_calibration."
+            ),
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print the eval results as JSON.",
+        ),
+    ] = False,
+) -> None:
+    """Run local synthetic correctness evals."""
+
+    try:
+        categories = _parse_eval_categories(category or [])
+        summary = run_builtin_evals(case_ids=case or [], categories=categories)
+    except EvalHarnessError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    if json_output:
+        console.out(summary.model_dump_json(indent=2))
+    else:
+        eval_word = "eval" if summary.total_count == 1 else "evals"
+        console.print(
+            f"Ran {summary.total_count} synthetic {eval_word}. "
+            f"{summary.passed_count} passed, {summary.failed_count} failed."
+        )
+        for result in summary.failed_results:
+            console.print(f"- {result.id}: {result.message}")
+
+    if not summary.passed:
+        raise typer.Exit(1) from None
+
+
+def _parse_eval_categories(raw_categories: list[str]) -> list[EvalCategory]:
+    categories: list[EvalCategory] = []
+    valid_values = ", ".join(category.value for category in EvalCategory)
+    for raw_category in raw_categories:
+        try:
+            categories.append(EvalCategory(raw_category))
+        except ValueError as exc:
+            raise EvalHarnessError(
+                f"Unknown eval category {raw_category!r}. Valid categories are: "
+                f"{valid_values}."
+            ) from exc
+    return categories
 
 
 def _format_check_size(check_size: int) -> str:
