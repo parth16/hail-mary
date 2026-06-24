@@ -5,6 +5,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from docx import Document
 
 from hailmary.ingest import extractors
 from hailmary.ingest.extractors import extract_document
@@ -136,7 +137,103 @@ def test_raw_only_text_page_is_kept_after_watermark_cleanup(tmp_path: Path) -> N
 
     assert result.pages
     assert result.pages[0].clean_text == ""
+    assert result.pages[0].removed_boilerplate_lines == 3
     assert "Not for distribution" in result.combined_raw_text
+
+
+def test_pdf_empty_page_is_marked_for_ocr_and_vision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class EmptyPage:
+        def extract_text(self) -> str:
+            return ""
+
+    class ScannedReader:
+        pages = [EmptyPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: ScannedReader())
+
+    result = extract_document(pdf_path)
+
+    assert result.ocr_recommended
+    assert result.vision_recommended
+    assert result.pages[0].needs_ocr
+    assert result.pages[0].vision_recommended
+    assert result.pages[0].source_span_start == 0
+    assert result.pages[0].source_span_end == 0
+
+
+def test_pdf_text_page_records_source_span(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class TextPage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        pages = [
+            TextPage("First page has enough traction words to count as readable text."),
+            TextPage("Second page also has enough readable words for extraction quality."),
+        ]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert not result.vision_recommended
+    assert result.pages[0].source_span_start == 0
+    assert result.pages[0].source_span_end == len(Reader.pages[0].text)
+    assert result.pages[1].source_span_start == len(Reader.pages[0].text) + 2
+
+
+def test_docx_table_extraction_records_structured_rows(tmp_path: Path) -> None:
+    docx_path = tmp_path / "memo.docx"
+    document = Document()
+    document.add_paragraph("Acme diligence memo.")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Metric"
+    table.cell(0, 1).text = "Value"
+    table.cell(1, 0).text = "ARR"
+    table.cell(1, 1).text = "$1M"
+    document.save(str(docx_path))
+
+    result = extract_document(docx_path)
+
+    assert result.table_count == 1
+    assert result.tables[0].rows == [["Metric", "Value"], ["ARR", "$1M"]]
+    assert result.tables[0].row_count == 2
+    assert result.tables[0].column_count == 2
+    assert "ARR | $1M" in result.combined_text
+
+
+def test_html_table_extraction_records_structured_rows(tmp_path: Path) -> None:
+    html_path = tmp_path / "deal.html"
+    html_path.write_text(
+        """
+        <html><body>
+          <table>
+            <tr><th>Customer</th><th>Status</th></tr>
+            <tr><td>Acme Bank</td><td>Pilot</td></tr>
+          </table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    result = extract_document(html_path)
+
+    assert result.table_count == 1
+    assert result.tables[0].rows == [["Customer", "Status"], ["Acme Bank", "Pilot"]]
+    assert "Customer | Status" in result.tables[0].clean_text
 
 
 def test_csv_extraction_records_table_text(tmp_path: Path) -> None:
@@ -148,6 +245,8 @@ def test_csv_extraction_records_table_text(tmp_path: Path) -> None:
     assert result.pages
     assert "year | revenue" in result.combined_text
     assert "2026 | 100" in result.combined_text
+    assert result.table_count == 1
+    assert result.tables[0].rows == [["year", "revenue"], ["2026", "100"]]
 
 
 def test_csv_parser_error_is_recorded_without_crashing(tmp_path: Path) -> None:
@@ -192,6 +291,8 @@ def test_xlsx_extraction_records_table_text(tmp_path: Path) -> None:
 
     assert result.pages
     assert "Revenue | 100" in result.combined_text
+    assert result.table_count == 1
+    assert result.tables[0].rows == [["Revenue", "100"]]
 
 
 def test_xlsx_negative_shared_string_index_is_left_raw(tmp_path: Path) -> None:

@@ -10,18 +10,26 @@ from xml.etree import ElementTree
 
 from bs4 import BeautifulSoup
 from docx import Document
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from hailmary.ingest.document_classifier import classify_file_type
-from hailmary.schemas.documents import ExtractedPage, ExtractionQuality, FileType
-from hailmary.utils.text_cleaning import clean_extracted_text
+from hailmary.schemas.documents import (
+    ExtractedPage,
+    ExtractedTable,
+    ExtractionQuality,
+    FileType,
+)
+from hailmary.utils.text_cleaning import clean_extracted_text_with_metadata
 
 
 class ExtractionResult(BaseModel):
     pages: list[ExtractedPage]
+    tables: list[ExtractedTable] = Field(default_factory=list)
     page_count: int | None
     extraction_quality: ExtractionQuality
+    ocr_recommended: bool = False
+    vision_recommended: bool = False
     notes: str | None = None
 
     @property
@@ -31,6 +39,10 @@ class ExtractionResult(BaseModel):
     @property
     def combined_raw_text(self) -> str:
         return "\n\n".join(page.raw_text for page in self.pages if page.raw_text)
+
+    @property
+    def table_count(self) -> int:
+        return len(self.tables)
 
 
 def extract_document(path: Path) -> ExtractionResult:
@@ -71,6 +83,54 @@ def _quality_from_pages(pages: list[ExtractedPage]) -> ExtractionQuality:
     return ExtractionQuality.LOW
 
 
+def _make_page(
+    raw_text: str,
+    *,
+    page_number: int | None,
+    needs_ocr: bool | None,
+    vision_recommended: bool | None = False,
+    source_span_start: int | None = None,
+    notes: str | None = None,
+) -> ExtractedPage:
+    cleaning = clean_extracted_text_with_metadata(raw_text)
+    word_count = len(cleaning.clean_text.split())
+    page_needs_ocr = word_count < 10 if needs_ocr is None else needs_ocr
+    page_needs_vision = page_needs_ocr if vision_recommended is None else vision_recommended
+    source_span_end = (
+        source_span_start + len(raw_text) if source_span_start is not None else None
+    )
+    return ExtractedPage(
+        page_number=page_number,
+        raw_text=raw_text,
+        clean_text=cleaning.clean_text,
+        word_count=word_count,
+        needs_ocr=page_needs_ocr,
+        vision_recommended=page_needs_vision,
+        source_span_start=source_span_start,
+        source_span_end=source_span_end,
+        removed_boilerplate_lines=cleaning.removed_boilerplate_lines,
+        notes=notes,
+    )
+
+
+def _result_from_pages(
+    pages: list[ExtractedPage],
+    *,
+    page_count: int | None,
+    tables: list[ExtractedTable] | None = None,
+    notes: str | None = None,
+) -> ExtractionResult:
+    return ExtractionResult(
+        pages=pages,
+        tables=tables or [],
+        page_count=page_count,
+        extraction_quality=_quality_from_pages(pages),
+        ocr_recommended=any(page.needs_ocr for page in pages),
+        vision_recommended=any(page.vision_recommended for page in pages),
+        notes=notes,
+    )
+
+
 def _extract_pdf(path: Path) -> ExtractionResult:
     try:
         reader = PdfReader(path)
@@ -94,6 +154,7 @@ def _extract_pdf(path: Path) -> ExtractionResult:
         )
 
     pages: list[ExtractedPage] = []
+    source_offset = 0
     for index in range(page_count):
         try:
             page = pages_proxy[index]
@@ -103,22 +164,21 @@ def _extract_pdf(path: Path) -> ExtractionResult:
             raw_text = ""
             notes = f"Could not extract text from page {index + 1}: {exc}"
 
-        clean_text = clean_extracted_text(raw_text)
         pages.append(
-            ExtractedPage(
+            _make_page(
+                raw_text,
                 page_number=index + 1,
-                raw_text=raw_text,
-                clean_text=clean_text,
-                word_count=len(clean_text.split()),
-                needs_ocr=len(clean_text.split()) < 10,
+                needs_ocr=None,
+                vision_recommended=None,
+                source_span_start=source_offset,
                 notes=notes,
             )
         )
+        source_offset += len(raw_text) + 2
 
-    return ExtractionResult(
-        pages=pages,
+    return _result_from_pages(
+        pages,
         page_count=page_count,
-        extraction_quality=_quality_from_pages(pages),
         notes=_page_failure_notes(pages),
     )
 
@@ -135,7 +195,8 @@ def _extract_docx(path: Path) -> ExtractionResult:
         )
 
     try:
-        raw_text = "\n".join(_docx_text_parts(document))
+        text_parts = _docx_text_parts(document)
+        tables = _docx_tables(document)
     except Exception as exc:
         return ExtractionResult(
             pages=[],
@@ -144,28 +205,26 @@ def _extract_docx(path: Path) -> ExtractionResult:
             notes=f"Could not extract text from the DOCX file: {exc}",
         )
 
-    clean_text = clean_extracted_text(raw_text)
-    page = ExtractedPage(
+    table_text = [table.clean_text for table in tables if table.clean_text]
+    raw_text = "\n".join([*text_parts, *table_text])
+    page = _make_page(
+        raw_text,
         page_number=None,
-        raw_text=raw_text,
-        clean_text=clean_text,
-        word_count=len(clean_text.split()),
         needs_ocr=False,
-        notes=None,
+        source_span_start=0,
     )
 
     pages = _pages_with_raw_text(page)
-    return ExtractionResult(
-        pages=pages,
+    return _result_from_pages(
+        pages,
+        tables=tables,
         page_count=None,
-        extraction_quality=_quality_from_pages(pages),
     )
 
 
 def _docx_text_parts(document: Any) -> list[str]:
     text_parts: list[str] = []
     text_parts.extend(_paragraph_text(document.paragraphs))
-    text_parts.extend(_table_text(document.tables))
 
     for section in document.sections:
         containers = [
@@ -178,7 +237,6 @@ def _docx_text_parts(document: Any) -> list[str]:
         ]
         for container in containers:
             text_parts.extend(_paragraph_text(container.paragraphs))
-            text_parts.extend(_table_text(container.tables))
 
     return text_parts
 
@@ -191,14 +249,42 @@ def _paragraph_text(paragraphs: Iterable[Any]) -> list[str]:
     ]
 
 
-def _table_text(tables: Iterable[Any]) -> list[str]:
-    table_text: list[str] = []
-    for table in tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if cells:
-                table_text.append(" | ".join(cells))
-    return table_text
+def _docx_tables(document: Any) -> list[ExtractedTable]:
+    tables: list[ExtractedTable] = []
+    table_index = 1
+    for table in _iter_docx_tables(document):
+        rows = _docx_table_rows(table)
+        if not rows:
+            continue
+        tables.append(_make_table(rows, table_index=table_index, page_number=None))
+        table_index += 1
+    return tables
+
+
+def _iter_docx_tables(document: Any) -> Iterable[Any]:
+    yield from document.tables
+    for section in document.sections:
+        containers = [
+            section.header,
+            section.first_page_header,
+            section.even_page_header,
+            section.footer,
+            section.first_page_footer,
+            section.even_page_footer,
+        ]
+        for container in containers:
+            yield from container.tables
+
+
+def _docx_table_rows(table: Any) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for row in table.rows:
+        cells = [" ".join(cell.text.split()) for cell in row.cells]
+        while cells and not cells[-1]:
+            cells.pop()
+        if any(cells):
+            rows.append(cells)
+    return rows
 
 
 def _page_failure_notes(pages: list[ExtractedPage]) -> str | None:
@@ -206,6 +292,34 @@ def _page_failure_notes(pages: list[ExtractedPage]) -> str | None:
     if not page_notes:
         return None
     return " ".join(page_notes)
+
+
+def _make_table(
+    rows: list[list[str]],
+    *,
+    table_index: int,
+    page_number: int | None = None,
+    source_span_start: int | None = None,
+    notes: str | None = None,
+) -> ExtractedTable:
+    normalized_rows = [[cell.strip() for cell in row] for row in rows]
+    text = "\n".join(_table_rows_as_text(normalized_rows))
+    source_span_end = source_span_start + len(text) if source_span_start is not None else None
+    return ExtractedTable(
+        page_number=page_number,
+        table_index=table_index,
+        rows=normalized_rows,
+        clean_text=text,
+        row_count=len(normalized_rows),
+        column_count=max((len(row) for row in normalized_rows), default=0),
+        source_span_start=source_span_start,
+        source_span_end=source_span_end,
+        notes=notes,
+    )
+
+
+def _table_rows_as_text(rows: list[list[str]]) -> list[str]:
+    return [" | ".join(cell for cell in row if cell) for row in rows if any(row)]
 
 
 def _extract_text_file(path: Path) -> ExtractionResult:
@@ -223,21 +337,18 @@ def _extract_text_file(path: Path) -> ExtractionResult:
             notes=f"Could not read the text file: {exc}",
         )
 
-    clean_text = clean_extracted_text(raw_text)
-    page = ExtractedPage(
+    page = _make_page(
+        raw_text,
         page_number=None,
-        raw_text=raw_text,
-        clean_text=clean_text,
-        word_count=len(clean_text.split()),
         needs_ocr=False,
+        source_span_start=0,
         notes=notes,
     )
 
     pages = _pages_with_raw_text(page)
-    return ExtractionResult(
-        pages=pages,
+    return _result_from_pages(
+        pages,
         page_count=1,
-        extraction_quality=_quality_from_pages(pages),
         notes=notes,
     )
 
@@ -261,24 +372,41 @@ def _extract_html(path: Path) -> ExtractionResult:
     for element in soup(["script", "style", "noscript"]):
         element.decompose()
 
+    tables = _html_tables(soup)
     raw_text = soup.get_text(separator="\n")
-    clean_text = clean_extracted_text(raw_text)
-    page = ExtractedPage(
+    page = _make_page(
+        raw_text,
         page_number=None,
-        raw_text=raw_text,
-        clean_text=clean_text,
-        word_count=len(clean_text.split()),
         needs_ocr=False,
+        source_span_start=0,
         notes=notes,
     )
 
     pages = _pages_with_raw_text(page)
-    return ExtractionResult(
-        pages=pages,
+    return _result_from_pages(
+        pages,
+        tables=tables,
         page_count=1,
-        extraction_quality=_quality_from_pages(pages),
         notes=notes,
     )
+
+
+def _html_tables(soup: BeautifulSoup) -> list[ExtractedTable]:
+    tables: list[ExtractedTable] = []
+    for table_index, table in enumerate(soup.find_all("table"), start=1):
+        rows: list[list[str]] = []
+        for row in table.find_all("tr"):
+            cells = [
+                " ".join(cell.get_text(" ").split())
+                for cell in row.find_all(["th", "td"])
+            ]
+            while cells and not cells[-1]:
+                cells.pop()
+            if any(cells):
+                rows.append(cells)
+        if rows:
+            tables.append(_make_table(rows, table_index=table_index))
+    return tables
 
 
 def _extract_csv(path: Path) -> ExtractionResult:
@@ -296,9 +424,8 @@ def _extract_csv(path: Path) -> ExtractionResult:
             notes=f"Could not read the CSV file: {exc}",
         )
 
-    rows = csv.reader(io.StringIO(csv_text))
     try:
-        raw_text = "\n".join(" | ".join(cell.strip() for cell in row) for row in rows)
+        rows = [[cell.strip() for cell in row] for row in csv.reader(io.StringIO(csv_text))]
     except csv.Error as exc:
         return ExtractionResult(
             pages=[],
@@ -306,7 +433,9 @@ def _extract_csv(path: Path) -> ExtractionResult:
             extraction_quality=ExtractionQuality.LOW,
             notes=f"Could not parse the CSV file: {exc}",
         )
-    return _single_page_result(raw_text, page_count=1, notes=notes)
+    raw_text = "\n".join(_table_rows_as_text(rows))
+    tables = [_make_table(rows, table_index=1, source_span_start=0)] if rows else []
+    return _single_page_result(raw_text, page_count=1, notes=notes, tables=tables)
 
 
 def _extract_xlsx(path: Path) -> ExtractionResult:
@@ -318,8 +447,8 @@ def _extract_xlsx(path: Path) -> ExtractionResult:
                 for name in workbook.namelist()
                 if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
             )
-            sheet_text = [
-                _xlsx_sheet_text(workbook.read(sheet_name), shared_strings)
+            sheet_rows = [
+                _xlsx_sheet_rows(workbook.read(sheet_name), shared_strings)
                 for sheet_name in sheet_names
             ]
     except (OSError, RuntimeError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
@@ -330,8 +459,18 @@ def _extract_xlsx(path: Path) -> ExtractionResult:
             notes=f"Could not read the XLSX file: {exc}",
         )
 
-    raw_text = "\n".join(text for text in sheet_text if text)
-    return _single_page_result(raw_text, page_count=len(sheet_names), notes=None)
+    tables = [
+        _make_table(rows, table_index=index)
+        for index, rows in enumerate(sheet_rows, start=1)
+        if rows
+    ]
+    raw_text = "\n".join(table.clean_text for table in tables if table.clean_text)
+    return _single_page_result(
+        raw_text,
+        page_count=len(sheet_names),
+        notes=None,
+        tables=tables,
+    )
 
 
 def _xlsx_shared_strings(workbook: zipfile.ZipFile) -> list[str]:
@@ -354,9 +493,9 @@ def _xlsx_shared_strings(workbook: zipfile.ZipFile) -> list[str]:
     return strings
 
 
-def _xlsx_sheet_text(sheet_xml: bytes, shared_strings: list[str]) -> str:
+def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[str]]:
     root = ElementTree.fromstring(sheet_xml)
-    row_lines: list[str] = []
+    rows: list[list[str]] = []
     for row in root.iter():
         if _xml_local_name(row.tag) != "row":
             continue
@@ -367,8 +506,8 @@ def _xlsx_sheet_text(sheet_xml: bytes, shared_strings: list[str]) -> str:
         ]
         stripped_values = [value for value in values if value]
         if stripped_values:
-            row_lines.append(" | ".join(stripped_values))
-    return "\n".join(row_lines)
+            rows.append(stripped_values)
+    return rows
 
 
 def _xlsx_cell_value(cell: ElementTree.Element, shared_strings: list[str]) -> str:
@@ -409,22 +548,21 @@ def _single_page_result(
     *,
     page_count: int | None,
     notes: str | None,
+    tables: list[ExtractedTable] | None = None,
 ) -> ExtractionResult:
-    clean_text = clean_extracted_text(raw_text)
-    page = ExtractedPage(
+    page = _make_page(
+        raw_text,
         page_number=None,
-        raw_text=raw_text,
-        clean_text=clean_text,
-        word_count=len(clean_text.split()),
         needs_ocr=False,
+        source_span_start=0,
         notes=notes,
     )
 
     pages = _pages_with_raw_text(page)
-    return ExtractionResult(
-        pages=pages,
+    return _result_from_pages(
+        pages,
+        tables=tables,
         page_count=page_count,
-        extraction_quality=_quality_from_pages(pages),
         notes=notes,
     )
 
