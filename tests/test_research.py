@@ -538,6 +538,7 @@ def test_import_research_results_skips_untouched_template_rows(
 
     assert result.imported_count == 1
     assert result.skipped_duplicate_count == 0
+    assert result.skipped_blank_template_row_count == len(template_payload["results"]) - 1
     assert result.deal_count == 1
 
 
@@ -1088,6 +1089,51 @@ def test_import_research_results_command_dry_run_has_plain_english_preview(
     assert "- Acme AI: would add 1 record." in result.output
     assert "No evidence stores were changed." in result.output
     assert "No websites or APIs were contacted." in result.output
+    assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
+
+
+def test_import_research_results_command_reports_untouched_template_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    plan_result = prepare_research_plan(config=config, created_at=BUILT_AT)
+    template_result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    template_payload["results"][0].update(
+        {
+            "title": "Exact public source excerpt",
+            "text": "Acme AI reports revenue growth from customers.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "source_url": "https://example.com/exact-acme-source",
+            "confidence": "high: exact source",
+        }
+    )
+    template_result.output_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+    assert deal.evidence_store_path is not None
+    before_store = deal.evidence_store_path.read_text(encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "import-research-results",
+            str(template_result.output_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Skipped 7 untouched template rows." in result.output
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 

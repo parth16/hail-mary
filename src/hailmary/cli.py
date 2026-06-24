@@ -569,6 +569,12 @@ def import_research_results_command(
         console.print(
             f"Skipped {result.skipped_duplicate_count} duplicate {duplicate_word}."
         )
+    if result.skipped_blank_template_row_count:
+        row_word = "row" if result.skipped_blank_template_row_count == 1 else "rows"
+        console.print(
+            f"Skipped {result.skipped_blank_template_row_count} untouched template "
+            f"{row_word}."
+        )
     if result.dry_run:
         for deal in result.deals:
             if deal.imported_count:
