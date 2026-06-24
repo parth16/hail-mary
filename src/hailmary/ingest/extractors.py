@@ -25,6 +25,7 @@ from hailmary.utils.text_cleaning import clean_extracted_text_with_metadata
 
 MAX_XLSX_COLUMN_INDEX = 16_383
 MAX_XLSX_COLUMN_LETTERS = 3
+MAX_XLSX_BLANK_GAP = 100
 INVALID_XLSX_CELL_INDEX = -1
 
 
@@ -155,11 +156,10 @@ def _document_ocr_recommended(pages: list[ExtractedPage]) -> bool:
     ocr_pages = [page for page in pages if page.needs_ocr]
     if not ocr_pages:
         return False
-    if any(page.notes or not page.raw_text.strip() for page in ocr_pages):
+    if any(page.notes for page in ocr_pages):
         return True
 
-    readable_pages = [page for page in pages if page.word_count > 2]
-    return not readable_pages
+    return len(ocr_pages) * 2 > len(pages)
 
 
 def _extract_pdf(path: Path) -> ExtractionResult:
@@ -334,7 +334,7 @@ def _make_table(
     source_span_start: int | None = None,
     notes: str | None = None,
 ) -> ExtractedTable:
-    normalized_rows = [[cell.strip() for cell in row] for row in rows]
+    normalized_rows = _table_rows_with_content(rows)
     text = "\n".join(_table_rows_as_text(normalized_rows))
     source_span_end = source_span_start + len(text) if source_span_start is not None else None
     return ExtractedTable(
@@ -351,7 +351,16 @@ def _make_table(
 
 
 def _table_rows_as_text(rows: list[list[str]]) -> list[str]:
-    return [" | ".join(_trim_trailing_blank_cells(row)) for row in rows if any(row)]
+    return [" | ".join(row) for row in _table_rows_with_content(rows)]
+
+
+def _table_rows_with_content(rows: list[list[str]]) -> list[list[str]]:
+    normalized_rows: list[list[str]] = []
+    for row in rows:
+        cells = _trim_trailing_blank_cells([cell.strip() for cell in row])
+        if any(cells):
+            normalized_rows.append(cells)
+    return normalized_rows
 
 
 def _trim_trailing_blank_cells(row: list[str]) -> list[str]:
@@ -565,7 +574,10 @@ def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[s
             if cell_index is not None:
                 if cell_index > MAX_XLSX_COLUMN_INDEX:
                     continue
-                values.extend([""] * max(cell_index - len(values), 0))
+                gap = cell_index - len(values)
+                if gap > MAX_XLSX_BLANK_GAP:
+                    continue
+                values.extend([""] * max(gap, 0))
             values.append(_xlsx_cell_value(cell, shared_strings))
         while values and not values[-1]:
             values.pop()

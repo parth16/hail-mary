@@ -238,6 +238,34 @@ def test_pdf_low_text_divider_with_readable_page_does_not_warn_document(
     assert not result.vision_recommended
 
 
+def test_pdf_mostly_low_text_pages_recommend_ocr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class TextPage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        pages = [
+            TextPage("1"),
+            TextPage("2"),
+            TextPage("Readable traction text with customer growth and revenue context."),
+        ]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert result.ocr_recommended
+    assert result.vision_recommended
+
+
 def test_pdf_text_page_records_source_span(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -388,7 +416,17 @@ def test_csv_extraction_preserves_interior_blank_cells(tmp_path: Path) -> None:
 
     assert "metric |  | value" in result.tables[0].clean_text
     assert "ARR |  | 100" in result.tables[0].clean_text
-    assert result.tables[0].column_count == 4
+    assert result.tables[0].column_count == 3
+
+
+def test_csv_extraction_filters_blank_rows_from_table_metadata(tmp_path: Path) -> None:
+    csv_path = tmp_path / "model.csv"
+    csv_path.write_text("metric,value\n,\nARR,100\n", encoding="utf-8")
+
+    result = extract_document(csv_path)
+
+    assert result.tables[0].rows == [["metric", "value"], ["ARR", "100"]]
+    assert result.tables[0].row_count == 2
 
 
 def test_csv_parser_error_is_recorded_without_crashing(tmp_path: Path) -> None:
@@ -497,6 +535,39 @@ def test_xlsx_impossible_cell_reference_is_skipped(tmp_path: Path) -> None:
     assert result.tables[0].rows == [["Revenue"]]
     assert result.tables[0].column_count == 1
     assert "Impossible" not in result.combined_text
+
+
+def test_xlsx_valid_but_huge_sparse_gap_is_skipped(tmp_path: Path) -> None:
+    xlsx_path = tmp_path / "model.xlsx"
+    with zipfile.ZipFile(xlsx_path, "w") as workbook:
+        workbook.writestr(
+            "xl/sharedStrings.xml",
+            """
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <si><t>Revenue</t></si>
+              <si><t>Far away</t></si>
+            </sst>
+            """,
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row r="1">
+                  <c r="A1" t="s"><v>0</v></c>
+                  <c r="XFD1" t="s"><v>1</v></c>
+                </row>
+              </sheetData>
+            </worksheet>
+            """,
+        )
+
+    result = extract_document(xlsx_path)
+
+    assert result.tables[0].rows == [["Revenue"]]
+    assert result.tables[0].column_count == 1
+    assert "Far away" not in result.combined_text
 
 
 def test_xlsx_negative_shared_string_index_is_left_raw(tmp_path: Path) -> None:
