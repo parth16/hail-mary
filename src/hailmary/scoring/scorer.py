@@ -43,6 +43,19 @@ NEGATED_TRACTION_PATTERNS = (
     re.compile(r"\bwithout\s+(?:customers?|revenue|usage|retention)\b", re.IGNORECASE),
     re.compile(r"\bnot\s+(?:yet\s+)?(?:generating\s+)?revenue\b", re.IGNORECASE),
 )
+NEGATED_FUNDING_PATTERNS = (
+    re.compile(r"\bno\s+lead\s+investor\b", re.IGNORECASE),
+    re.compile(r"\bwithout\s+(?:a\s+)?lead\s+investor\b", re.IGNORECASE),
+    re.compile(r"\bno\s+institutional(?:\s+(?:investors?|follow[-\s]?on))?\b", re.IGNORECASE),
+    re.compile(r"\bwithout\s+institutional(?:\s+investors?)?\b", re.IGNORECASE),
+    re.compile(r"\bno\s+(?:seed|follow[-\s]?on)(?:\s+\w+){0,3}\b", re.IGNORECASE),
+    re.compile(r"\bno\s+(?:\w+\s+){0,3}follow[-\s]?on\b", re.IGNORECASE),
+)
+PRICING_TERM_LABELS = {
+    "post-money valuation",
+    "pre-money valuation",
+    "valuation cap",
+}
 
 
 def score_evidence_store(
@@ -60,9 +73,8 @@ def score_evidence_store(
     ]
     available_capital = config.capital_budget if capital_remaining is None else capital_remaining
     platform_minimum_check = _platform_minimum_check(verified_claims)
-    text_index = _text_index(store.evidence)
     pmf_level = _pmf_level(store.evidence)
-    fundability_risk = _fundability_risk(store, verified_claims, text_index)
+    fundability_risk = _fundability_risk(store, verified_claims)
     confidence = _confidence_level(store, verified_claims)
     kill_gates = _kill_gates(
         store,
@@ -150,6 +162,7 @@ def _kill_gates(
             capital_remaining=capital_remaining,
         )
     )
+    missing_key_terms = has_scorable_deal and not _has_pricing_term(verified_claims)
     return [
         KillGate(
             name="No usable source-linked evidence",
@@ -176,6 +189,15 @@ def _kill_gates(
                 "Evidence exists, but no deal-term claim was verified."
                 if store.evidence and not verified_claims
                 else "At least one deal-term claim has a verified citation."
+            ),
+        ),
+        KillGate(
+            name="Missing key investment terms",
+            triggered=missing_key_terms,
+            reason=(
+                "No verified valuation or valuation-cap term was found."
+                if missing_key_terms
+                else "A verified valuation or valuation-cap term is available."
             ),
         ),
         KillGate(
@@ -282,7 +304,7 @@ def _fundability_factor(
         FundabilityRisk.MEDIUM: 13,
         FundabilityRisk.LOW: 18,
     }
-    matched_evidence = _evidence_matching_keywords(store.evidence, FUNDABILITY_KEYWORDS)
+    matched_evidence = _positive_funding_evidence(store.evidence)
     return ScoreFactor(
         name="Next-round fundability",
         score=score_by_risk[fundability_risk],
@@ -335,13 +357,12 @@ def _pmf_level(evidence: list[EvidenceRecord]) -> PMFLevel:
 def _fundability_risk(
     store: EvidenceStore,
     verified_claims: list[ClaimRecord],
-    text_index: str,
 ) -> FundabilityRisk:
     if not store.evidence:
         return FundabilityRisk.UNKNOWN
     has_terms = bool(verified_claims)
     has_traction = bool(_positive_traction_evidence(store.evidence))
-    has_funding_signal = _text_contains_any_keyword(text_index, FUNDABILITY_KEYWORDS)
+    has_funding_signal = bool(_positive_funding_evidence(store.evidence))
     if has_terms and has_traction and has_funding_signal:
         return FundabilityRisk.LOW
     if has_terms and has_traction:
@@ -371,6 +392,14 @@ def _diligence_questions(
                 priority=2,
                 question="Confirm valuation, round size, discount, and minimum check.",
                 reason="No verified deal-term claims were available.",
+            )
+        )
+    elif not _has_pricing_term(verified_claims):
+        questions.append(
+            DiligenceQuestion(
+                priority=2,
+                question="Confirm the valuation, valuation cap, or priced-round valuation.",
+                reason="The evidence did not include a verified pricing term.",
             )
         )
     if pmf_level == PMFLevel.UNKNOWN:
@@ -468,6 +497,10 @@ def _platform_minimum_check(verified_claims: list[ClaimRecord]) -> int | None:
     return max(minimum_checks)
 
 
+def _has_pricing_term(verified_claims: list[ClaimRecord]) -> bool:
+    return any(claim.label in PRICING_TERM_LABELS for claim in verified_claims)
+
+
 def _claim_money_value(claim: ClaimRecord) -> int | None:
     normalized_prefix = "usd_cents:"
     if claim.normalized_value.startswith(normalized_prefix):
@@ -506,7 +539,10 @@ def _confidence_level(
 ) -> ConfidenceLevel:
     if store.conflicts or not store.evidence or not verified_claims:
         return ConfidenceLevel.LOW
-    if len(store.evidence) >= 3 and len(verified_claims) >= 3:
+    source_document_ids = {evidence.document_id for evidence in store.evidence}
+    source_kinds = {evidence.source_kind for evidence in store.evidence}
+    has_independent_sources = len(source_document_ids) >= 2 or len(source_kinds) >= 2
+    if len(store.evidence) >= 3 and len(verified_claims) >= 3 and has_independent_sources:
         return ConfidenceLevel.HIGH
     return ConfidenceLevel.MEDIUM
 
@@ -537,13 +573,73 @@ def _positive_traction_evidence(evidence: list[EvidenceRecord]) -> list[Evidence
     return [
         record
         for record in evidence
-        if _text_contains_any_keyword(record.text, TRACTION_KEYWORDS)
-        and not _contains_negated_traction(record.text)
+        if _text_contains_positive_keyword(
+            record.text,
+            TRACTION_KEYWORDS,
+            negated_patterns=NEGATED_TRACTION_PATTERNS,
+        )
     ]
 
 
-def _contains_negated_traction(text: str) -> bool:
-    return any(pattern.search(text) is not None for pattern in NEGATED_TRACTION_PATTERNS)
+def _positive_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
+    return [
+        record
+        for record in evidence
+        if _text_contains_positive_keyword(
+            record.text,
+            FUNDABILITY_KEYWORDS,
+            negated_patterns=NEGATED_FUNDING_PATTERNS,
+        )
+    ]
+
+
+def _text_contains_positive_keyword(
+    text: str,
+    keywords: tuple[str, ...],
+    *,
+    negated_patterns: tuple[re.Pattern[str], ...],
+) -> bool:
+    return any(
+        _contains_positive_keyword(
+            text,
+            keyword,
+            negated_patterns=negated_patterns,
+        )
+        for keyword in keywords
+    )
+
+
+def _contains_positive_keyword(
+    text: str,
+    keyword: str,
+    *,
+    negated_patterns: tuple[re.Pattern[str], ...],
+) -> bool:
+    pattern = _keyword_pattern(keyword)
+    negated_spans = _negated_spans(text, negated_patterns)
+    return any(
+        not _span_overlaps(match.span(), negated_spans)
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE)
+    )
+
+
+def _negated_spans(
+    text: str,
+    negated_patterns: tuple[re.Pattern[str], ...],
+) -> list[tuple[int, int]]:
+    return [
+        match.span()
+        for pattern in negated_patterns
+        for match in pattern.finditer(text)
+    ]
+
+
+def _span_overlaps(
+    span: tuple[int, int],
+    spans: list[tuple[int, int]],
+) -> bool:
+    start, end = span
+    return any(start < negated_end and negated_start < end for negated_start, negated_end in spans)
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:

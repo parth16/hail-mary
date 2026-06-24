@@ -29,7 +29,14 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import PMFLevel, Recommendation, ScoredDeal, ScoreFactor
+from hailmary.schemas.scoring import (
+    ConfidenceLevel,
+    FundabilityRisk,
+    PMFLevel,
+    Recommendation,
+    ScoredDeal,
+    ScoreFactor,
+)
 from hailmary.scoring import render_markdown_memo, score_evidence_store, score_latest_ingestion
 
 runner = CliRunner()
@@ -40,11 +47,12 @@ def _evidence(
     text: str,
     *,
     deal_id: str = "deal_test",
+    document_id: str = "doc_test",
 ) -> EvidenceRecord:
     return EvidenceRecord(
         id=record_id,
         deal_id=deal_id,
-        document_id="doc_test",
+        document_id=document_id,
         document_path=Path("memo.txt"),
         evidence_kind=EvidenceKind.PAGE_TEXT,
         source_kind=SourceKind.LOCAL_FILE,
@@ -292,6 +300,52 @@ def test_score_evidence_store_ignores_negated_traction_phrases() -> None:
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
 
 
+def test_score_evidence_store_keeps_mixed_current_traction_evidence() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "Pre-revenue last year; now $500K ARR with paid customers.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.DEVELOPING
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_terms"
+    ]
+
+
+def test_score_evidence_store_ignores_negated_funding_language() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers."),
+        _evidence("ev_funding", "There is no lead investor and no institutional follow-on yet."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.fundability_risk == FundabilityRisk.MEDIUM
+    assert _score_factor(scored, "Next-round fundability").evidence_ids == []
+
+
 def test_score_evidence_store_cites_early_pmf_evidence() -> None:
     evidence = [
         _evidence(
@@ -314,6 +368,54 @@ def test_score_evidence_store_cites_early_pmf_evidence() -> None:
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
         "ev_terms"
     ]
+
+
+def test_score_evidence_store_does_not_mark_single_source_high_confidence() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_single", company_name="Single Source"),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.confidence == ConfidenceLevel.MEDIUM
+
+
+def test_score_evidence_store_can_mark_multiple_sources_high_confidence() -> None:
+    store = _strong_store(deal_id="deal_multi", company_name="Multi Source")
+    store = store.model_copy(
+        update={
+            "evidence": [
+                evidence.model_copy(update={"document_id": f"doc_{index}"})
+                for index, evidence in enumerate(store.evidence)
+            ]
+        }
+    )
+
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    assert scored.confidence == ConfidenceLevel.HIGH
+
+
+def test_score_evidence_store_requires_verified_pricing_terms_to_invest() -> None:
+    evidence = [
+        _evidence("ev_terms", "Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.recommendation == Recommendation.PASS
+    assert any(
+        gate.name == "Missing key investment terms"
+        for gate in scored.triggered_kill_gates
+    )
 
 
 def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
@@ -351,6 +453,30 @@ def test_score_latest_ingestion_tracks_remaining_capital(tmp_path: Path) -> None
         gate.name == "No available check size"
         for gate in result.scored_deals[1].triggered_kill_gates
     )
+
+
+def test_score_latest_ingestion_allocates_scarce_capital_by_score(
+    tmp_path: Path,
+) -> None:
+    lower_score_store = _store_without_funding_signal(
+        deal_id="deal_lower",
+        company_name="A Lower Score",
+    )
+    higher_score_store = _strong_store(
+        deal_id="deal_higher",
+        company_name="B Higher Score",
+    )
+    _write_ingestion_summary(tmp_path, [lower_score_store, higher_score_store])
+
+    result = score_latest_ingestion(
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=2_500)
+    )
+
+    scored_by_company = {deal.company_name: deal for deal in result.scored_deals}
+    assert scored_by_company["B Higher Score"].recommendation == Recommendation.INVEST
+    assert scored_by_company["B Higher Score"].check_size == 2_500
+    assert scored_by_company["A Lower Score"].recommendation == Recommendation.PASS
+    assert scored_by_company["A Lower Score"].check_size == 0
 
 
 def test_score_latest_ingestion_writes_private_markdown_memos(tmp_path: Path) -> None:
@@ -392,6 +518,27 @@ def test_score_latest_ingestion_rebases_relative_evidence_store_paths(
     subdir.mkdir()
     monkeypatch.chdir(subdir)
     result = score_latest_ingestion(config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert result.deal_count == 1
+    assert result.scored_deals[0].memo_path is not None
+
+
+def test_score_latest_ingestion_resolves_nested_relative_data_dir_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "NestedPathCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M.",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    config = AppConfig(data_dir=Path("local/data"))
+    ingest_folder(root, config=config)
+
+    result = score_latest_ingestion(config=config)
 
     assert result.deal_count == 1
     assert result.scored_deals[0].memo_path is not None
@@ -478,6 +625,37 @@ def _strong_store(*, deal_id: str, company_name: str) -> EvidenceStore:
         _evidence(
             "ev_funding",
             "Lead investor committed and seed round is active.",
+            deal_id=deal_id,
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms", deal_id=deal_id),
+        _claim("discount", "20%", "ev_terms", deal_id=deal_id),
+        _claim("round size", "$1M", "ev_terms", deal_id=deal_id),
+    ]
+    return _store(
+        evidence=evidence,
+        claims=claims,
+        deal_id=deal_id,
+        company_name=company_name,
+    )
+
+
+def _store_without_funding_signal(*, deal_id: str, company_name: str) -> EvidenceStore:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M.",
+            deal_id=deal_id,
+        ),
+        _evidence(
+            "ev_traction",
+            "ARR revenue growth with paid customers and retention.",
+            deal_id=deal_id,
+        ),
+        _evidence(
+            "ev_other",
+            "No lead investor is committed yet.",
             deal_id=deal_id,
         ),
     ]

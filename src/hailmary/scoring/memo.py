@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.documents import IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceStore, VerificationStatus
-from hailmary.schemas.scoring import MemoRunSummary, ScoredDeal
+from hailmary.schemas.scoring import MemoRunSummary, Recommendation, ScoredDeal
 from hailmary.scoring.scorer import score_evidence_store
 from hailmary.utils.slug import slugify
 
@@ -33,8 +33,7 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir)
 
-    scored_deals: list[ScoredDeal] = []
-    remaining_capital = config.capital_budget
+    scoring_inputs: list[tuple[EvidenceStore, ScoredDeal, Path]] = []
     for deal in summary.deals:
         if deal.evidence_store_path is None:
             raise ScoringError(
@@ -52,13 +51,36 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
                 f"{evidence_store_path}. Run `hailmary ingest-folder` again."
             )
         store = _load_evidence_store(evidence_store_path, company_name=deal.company_name)
+        ranking_scored_deal = score_evidence_store(
+            store,
+            config=config,
+            capital_remaining=max(config.capital_budget, config.max_check),
+        )
+        memo_path = report_dir / f"{slugify(deal.company_name)}-{deal.id}-memo.md"
+        scoring_inputs.append((store, ranking_scored_deal, memo_path))
+
+    remaining_capital = config.capital_budget
+    scored_by_index: dict[int, ScoredDeal] = {}
+    ranked_inputs = sorted(
+        enumerate(scoring_inputs),
+        key=lambda item: (
+            item[1][1].recommendation == Recommendation.INVEST,
+            item[1][1].total_score,
+        ),
+        reverse=True,
+    )
+    for index, (store, _, _) in ranked_inputs:
         scored_deal = score_evidence_store(
             store,
             config=config,
             capital_remaining=remaining_capital,
         )
         remaining_capital = scored_deal.capital_remaining_after or 0
-        memo_path = report_dir / f"{slugify(deal.company_name)}-{deal.id}-memo.md"
+        scored_by_index[index] = scored_deal
+
+    scored_deals: list[ScoredDeal] = []
+    for index, (store, _, memo_path) in enumerate(scoring_inputs):
+        scored_deal = scored_by_index[index]
         _write_private_text(
             memo_path,
             render_markdown_memo(scored_deal, store),
@@ -195,19 +217,33 @@ def _resolve_saved_path(path: Path, *, data_dir: Path, summary_path: Path) -> Pa
     absolute_data_dir = _absolute_path(data_dir).resolve(strict=False)
     absolute_summary_path = _absolute_path(summary_path).resolve(strict=False)
     candidate_roots = [
-        absolute_data_dir.parent,
+        Path.cwd().resolve(strict=False),
+        *absolute_data_dir.parents,
         absolute_data_dir,
         absolute_summary_path.parent,
     ]
     candidates = [root / path for root in candidate_roots]
     for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
+        resolved_candidate = candidate.resolve(strict=False)
+        if _is_relative_to(resolved_candidate, absolute_data_dir) and candidate.exists():
+            return resolved_candidate
+    for candidate in candidates:
+        resolved_candidate = candidate.resolve(strict=False)
+        if _is_relative_to(resolved_candidate, absolute_data_dir):
+            return resolved_candidate
+    return (absolute_data_dir / path.name).resolve(strict=False)
 
 
 def _absolute_path(path: Path) -> Path:
     return path if path.is_absolute() else Path.cwd() / path
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
 
 
 def _verified_claims(store: EvidenceStore) -> list[ClaimRecord]:
