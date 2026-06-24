@@ -337,6 +337,8 @@ def _display_path_from_cwd(path: Path) -> Path:
 
 
 def _ensure_investment_limits(config: AppConfig) -> None:
+    if config.capital_budget < 0:
+        raise ConfigError("The capital budget cannot be negative.")
     if config.max_check > MAX_CHECK_SIZE:
         raise ConfigError("The maximum check size cannot be above $10K.")
     if config.max_check not in CHECK_SIZE_TIERS:

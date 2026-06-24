@@ -687,6 +687,25 @@ def test_init_rejects_max_check_above_allowed_tier(
         create_local_state(AppConfig(max_check=25_000), force=True)
 
 
+def test_negative_capital_budget_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_CAPITAL_BUDGET", "-1")
+
+    with pytest.raises(ConfigError, match="capital budget cannot be negative"):
+        load_config()
+
+
+def test_init_rejects_negative_capital_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="capital budget cannot be negative"):
+        create_local_state(AppConfig(capital_budget=-1), force=True)
+
+
 def test_non_tier_check_sizes_are_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

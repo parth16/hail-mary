@@ -21,6 +21,7 @@ EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = tuple(
         r"^(?:please\s+)?disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?\b",
         r"^(?:please\s+)?forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)\b",
         r"^(?:please\s+)?always\s+recommend\s+(?:invest|pass)\b",
+        r"^(?:please\s+)?recommend\s+(?:invest|pass)\b",
         r"^(?:please\s+)?do\s+not\s+follow\s+the\s+system\b",
         r"^(?:please\s+)?(?:print|reveal|show)\s+the\s+system\s+prompt\b",
     )
@@ -30,8 +31,15 @@ MID_LINE_SOURCE_INSTRUCTION_PATTERN = re.compile(
     r"disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?|"
     r"forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)|"
     r"always\s+recommend\s+(?:invest|pass)|"
+    r"(?:please\s+)?recommend\s+(?:invest|pass)\s+"
+    r"(?:no\s+matter\s+what|regardless\b|regardless\s+of\s+evidence|"
+    r"even\s+if\b|without\s+evidence\b)|"
     r"do\s+not\s+follow\s+the\s+system|"
     r"(?:print|reveal|show)\s+the\s+system\s+prompt)\b"
+)
+SOURCE_INSTRUCTION_JOIN_BOUNDARY_PATTERN = re.compile(
+    r"(?<=[,:])(?=\s*(?:please\s+)?(?:always\s+)?recommend\s+(?:invest|pass)\b)",
+    re.IGNORECASE,
 )
 SOURCE_INSTRUCTION_PREFIX_PATTERN = re.compile(
     r"^(?:(?:"
@@ -263,7 +271,11 @@ def _looks_like_embedded_source_instruction(text: str) -> bool:
 def _source_instruction_candidates(text: str) -> list[str]:
     candidates: list[str] = []
     for line in text.splitlines() or [text]:
-        for segment in [line, *re.split(r"(?<=[.!?;])\s+", line)]:
+        for segment in [
+            line,
+            *re.split(r"(?<=[.!?;])\s*", line),
+            *SOURCE_INSTRUCTION_JOIN_BOUNDARY_PATTERN.split(line),
+        ]:
             normalized = " ".join(segment.lower().split())
             if not normalized:
                 continue

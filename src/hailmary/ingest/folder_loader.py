@@ -245,6 +245,7 @@ def _build_document(
         f"doc_{sha256[:12]}_{path_digest}" if sha256 else f"doc_unreadable_{path_digest}"
     )
     confidentiality_text = f"{relative_path.as_posix()} {extraction.combined_raw_text}"
+    source_created_at, timestamp_note = _file_modified_at_or_note(path)
 
     return SourceDocument(
         id=document_id,
@@ -256,7 +257,7 @@ def _build_document(
         file_type=classify_file_type(path),
         title=title,
         company_name=deal_name,
-        created_at=None,
+        created_at=source_created_at,
         ingested_at=ingested_at,
         retrieved_at=None,
         page_count=extraction.page_count,
@@ -266,7 +267,7 @@ def _build_document(
         extraction_quality=extraction.extraction_quality,
         ocr_recommended=extraction.ocr_recommended,
         vision_recommended=extraction.vision_recommended,
-        notes=_join_notes(extraction.notes, hash_note),
+        notes=_join_notes(extraction.notes, hash_note, timestamp_note),
     )
 
 
@@ -466,6 +467,13 @@ def _sha256_or_note(path: Path) -> tuple[str | None, str | None]:
         return _sha256(path), None
     except OSError as exc:
         return None, f"Could not calculate the file fingerprint: {exc}"
+
+
+def _file_modified_at_or_note(path: Path) -> tuple[datetime | None, str | None]:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC), None
+    except OSError as exc:
+        return None, f"Could not read the file modified time: {exc}"
 
 
 def _join_notes(*notes: str | None) -> str | None:

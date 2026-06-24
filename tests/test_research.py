@@ -130,6 +130,9 @@ def test_prepare_research_plan_rejects_website_for_multiple_companies(
         "https://",
         "https://example .com",
         "https://[broken",
+        "https://example.com:bad/path",
+        "https://example.com:99999/path",
+        "https://user:token@example.com/path",
         "mailto:founder@example.com",
     ],
 )
@@ -1310,6 +1313,22 @@ def test_import_research_results_requires_results_key(tmp_path: Path) -> None:
     bad_results_path.write_text("{}", encoding="utf-8")
 
     with pytest.raises(ResearchImportError, match="results"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_rejects_top_level_array(tmp_path: Path) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-array.json"
+    bad_results_path.write_text(
+        json.dumps([_research_result()]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match="JSON object with a `results` list"):
         import_research_results(
             config=config,
             results_path=bad_results_path,

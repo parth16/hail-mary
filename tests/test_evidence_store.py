@@ -355,3 +355,19 @@ def test_evidence_store_marks_old_sources_stale(tmp_path: Path) -> None:
 
     assert store.evidence[0].source_freshness == SourceFreshness.STALE
     assert store.claims[0].quality.recency == SourceFreshness.STALE
+
+
+def test_ingested_local_files_use_file_timestamp_for_freshness(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "FreshCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    document = deal.documents[0]
+    assert document.source.created_at is not None
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    assert saved_store["evidence"][0]["source_freshness"] == SourceFreshness.CURRENT
