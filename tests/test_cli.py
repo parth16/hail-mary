@@ -24,6 +24,9 @@ def test_init_creates_local_state(tmp_path: Path, monkeypatch: MonkeyPatch) -> N
     result = runner.invoke(app, ["init", "--data-dir", str(data_dir)])
 
     assert result.exit_code == 0, result.output
+    assert "Init complete" in result.output
+    assert "Status" in result.output
+    assert "Location" in result.output
     assert "Created Hail Mary local folders" in result.output
     assert (data_dir / "raw").is_dir()
     assert (data_dir / "processed").is_dir()
@@ -41,6 +44,9 @@ def test_ingest_folder_command_writes_summary(tmp_path: Path, monkeypatch: Monke
     result = runner.invoke(app, ["ingest-folder", str(source.parent), "--data-dir", str(data_dir)])
 
     assert result.exit_code == 0, result.output
+    assert "Scan complete" in result.output
+    assert "Metric" in result.output
+    assert "Value" in result.output
     assert "Found 1 deal and 1 document" in result.output
     assert "source-linked evidence" in result.output
 
@@ -79,6 +85,7 @@ def test_ingest_folder_warns_when_documents_need_image_text_reading(
     result = runner.invoke(app, ["ingest-folder", str(source.parent)])
 
     assert result.exit_code == 0, result.output
+    assert "Review needed" in result.output
     normalized_output = " ".join(result.output.split())
     assert "may need image-based text reading (OCR)" in normalized_output
     assert "before Hail Mary can use all of their content" in normalized_output

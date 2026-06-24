@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group, RenderableType
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
 
 from hailmary.config import (
     AppConfig,
@@ -22,12 +28,50 @@ from hailmary.ingest.folder_loader import (
 app = typer.Typer(
     help="Evaluate private startup deals from local diligence documents.",
     no_args_is_help=True,
+    rich_markup_mode="rich",
 )
-console = Console()
+console = Console(highlight=False)
+
+
+def _plain(message: str, *, style: str | None = None) -> Text:
+    if style is None:
+        return Text(message)
+    return Text(message, style=style)
+
+
+def _print_panel(
+    title: str,
+    renderables: Sequence[RenderableType],
+    *,
+    border_style: str,
+) -> None:
+    console.print(
+        Panel(
+            Group(*renderables),
+            title=title,
+            border_style=border_style,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+
+
+def _print_error(message: str) -> None:
+    _print_panel(
+        "Error",
+        [_plain(f"Error: {message}", style="bold red")],
+        border_style="red",
+    )
+
+
+def _print_section(title: str, lines: Sequence[Text], *, style: str) -> None:
+    console.print(Rule(title, style=style))
+    for line in lines:
+        console.print(line)
 
 
 def _exit_with_config_error(exc: ConfigError) -> NoReturn:
-    console.print(f"Error: {exc}")
+    _print_error(str(exc))
     raise typer.Exit(1) from None
 
 
@@ -63,11 +107,23 @@ def init(
     except ConfigError as exc:
         _exit_with_config_error(exc)
 
-    console.print(f"Created Hail Mary local folders in {result.data_dir}.")
+    table = Table(
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Status", style="bold green")
+    table.add_column("Location")
+    table.add_row(
+        _plain("Created Hail Mary local folders"),
+        _plain(str(result.data_dir)),
+    )
     if result.config_created:
-        console.print(f"Created local config at {result.config_path}.")
+        table.add_row(_plain("Created local config"), _plain(str(result.config_path)))
     else:
-        console.print(f"Kept existing local config at {result.config_path}.")
+        table.add_row(_plain("Kept existing local config"), _plain(str(result.config_path)))
+    _print_panel("Init complete", [table], border_style="green")
 
 
 @app.command("ingest-folder")
@@ -94,18 +150,32 @@ def ingest_folder(
     try:
         summary = ingest_folder_path(folder, config=config)
     except (FileNotFoundError, NotADirectoryError) as exc:
-        raise typer.BadParameter(str(exc), param_hint="folder") from None
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
     except IngestionError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     deal_word = "deal" if len(summary.deals) == 1 else "deals"
     doc_word = "document" if summary.document_count == 1 else "documents"
-    console.print(
-        f"Scanned {summary.root_path}. Found {len(summary.deals)} {deal_word} "
-        f"and {summary.document_count} {doc_word}."
+    summary_lines: list[Text] = [
+        _plain(
+            f"Found {len(summary.deals)} {deal_word} and {summary.document_count} "
+            f"{doc_word}. Scanned {summary.root_path}."
+        ),
+        _plain(f"Saved the scan summary to {summary.summary_path}."),
+    ]
+
+    metrics = Table(
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
     )
-    console.print(f"Saved the scan summary to {summary.summary_path}.")
+    metrics.add_column("Metric", style="bold cyan")
+    metrics.add_column("Value", justify="right")
+    metrics.add_row(_plain("Deals"), _plain(str(len(summary.deals))))
+    metrics.add_row(_plain("Documents"), _plain(str(summary.document_count)))
 
     evidence_count = sum(deal.evidence_count for deal in summary.deals)
     claim_count = sum(deal.claim_count for deal in summary.deals)
@@ -116,22 +186,35 @@ def ingest_folder(
     if evidence_count:
         evidence_word = "record" if evidence_count == 1 else "records"
         claim_word = "claim" if claim_count == 1 else "claims"
-        console.print(
-            f"Built {evidence_count} source-linked evidence {evidence_word} "
-            f"and {claim_count} deal-term {claim_word}."
+        summary_lines.append(
+            _plain(
+                f"Built {evidence_count} source-linked evidence {evidence_word} "
+                f"and {claim_count} deal-term {claim_word}."
+            )
         )
+        metrics.add_row(_plain("Evidence records"), _plain(str(evidence_count)))
+        metrics.add_row(_plain("Deal-term claims"), _plain(str(claim_count)))
+
+    _print_section("Scan complete", summary_lines, style="green")
+    console.print(metrics)
+
+    warning_lines: list[Text] = []
     if deals_without_evidence:
         deal_names = ", ".join(deal.company_name for deal in deals_without_evidence)
         deal_word = "deal" if len(deals_without_evidence) == 1 else "deals"
-        console.print(
-            f"No usable evidence text was built for {deal_word}: {deal_names}. "
-            "Hail Mary stored the files it could read, but cannot use their text yet."
+        warning_lines.append(
+            _plain(
+                f"No usable evidence text was built for {deal_word}: {deal_names}. "
+                "Hail Mary stored the files it could read, but cannot use their text yet."
+            )
         )
     if conflict_count:
         conflict_word = "conflict" if conflict_count == 1 else "conflicts"
-        console.print(
-            f"Found {conflict_count} deal-term {conflict_word}. "
-            "Review the cited evidence before relying on those terms."
+        warning_lines.append(
+            _plain(
+                f"Found {conflict_count} deal-term {conflict_word}. "
+                "Review the cited evidence before relying on those terms."
+            )
         )
 
     image_text_documents = sum(
@@ -142,19 +225,28 @@ def ingest_folder(
     )
     if image_text_documents:
         document_word = "document" if image_text_documents == 1 else "documents"
-        console.print(
-            f"{image_text_documents} {document_word} may need image-based text reading "
-            "(OCR) before Hail Mary can use all of their content."
+        warning_lines.append(
+            _plain(
+                f"{image_text_documents} {document_word} may need image-based text reading "
+                "(OCR) before Hail Mary can use all of their content."
+            )
         )
 
     if summary.skipped_files:
-        console.print(
-            f"Skipped {len(summary.skipped_files)} unsupported or ignored files. "
-            "These were not treated as diligence documents."
+        warning_lines.append(
+            _plain(
+                f"Skipped {len(summary.skipped_files)} unsupported or ignored files. "
+                "These were not treated as diligence documents."
+            )
         )
     if summary.unreadable_paths:
         path_word = "path" if len(summary.unreadable_paths) == 1 else "paths"
-        console.print(
-            f"Could not read {len(summary.unreadable_paths)} {path_word}. "
-            "Hail Mary did not scan those locations, so diligence documents may be missing."
+        warning_lines.append(
+            _plain(
+                f"Could not read {len(summary.unreadable_paths)} {path_word}. "
+                "Hail Mary did not scan those locations, so diligence documents may be missing."
+            )
         )
+
+    if warning_lines:
+        _print_section("Review needed", warning_lines, style="yellow")
