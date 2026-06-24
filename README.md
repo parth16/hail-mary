@@ -32,6 +32,18 @@ The implementation prompt is in `hail-mary-codex-prompt.md`. It defines:
 - GitHub branch and PR workflow
 - optional future data-provider adapters
 
+## Current Commands
+
+This first build includes:
+
+```bash
+uv sync
+uv run hailmary init
+uv run hailmary ingest-folder ./pitch-decks
+```
+
+`init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts basic text when supported, and saves a JSON summary under `data/processed/`.
+
 ## GitHub Workflow
 
 The first safe build may be pushed directly to `main`.
@@ -43,6 +55,8 @@ After the first push:
 - self-review changes before pushing
 - include validation commands, test results, privacy notes, and known limitations in PR bodies
 - never stage raw investment docs or generated confidential output
+
+After publishing a PR, monitor Codex review activity every minute. An eyes reaction means Codex has started reviewing. If Codex leaves actionable comments, address them, run the relevant tests, push the fixes, and keep monitoring. Stop the loop only when Codex gives a thumbs-up reaction or the operator explicitly stops the process.
 
 ## Product Standards
 
