@@ -46,6 +46,7 @@ uv run hailmary validate-agent-output output.json packet.json
 uv run hailmary run-evals
 uv run hailmary list-research-providers
 uv run hailmary prepare-research-plan --company "ExampleCo"
+uv run hailmary prepare-research-results-template
 uv run hailmary import-research-results research-results.json --dry-run
 uv run hailmary import-research-results research-results.json
 ```
@@ -57,6 +58,8 @@ uv run hailmary import-research-results research-results.json
 `run-evals` runs local synthetic correctness checks. The built-in evals cover text extraction and ingestion, citation span validation, conflicting deal terms, prompt-injection safeguards, missing evidence, score calibration, and Markdown memo snapshot checks. They do not use real deal documents.
 
 `list-research-providers` shows free public, authenticated, and optional paid sources that Hail Mary can plan around. `prepare-research-plan` writes a private JSON checklist under `data/research-plans/` from either the latest ingestion summary or manually supplied `--company` values. It does not contact websites, APIs, paid databases, or Meridian. Any external fact imported later must record the provider, timestamp, exact URL or API source, confidence, and licensing notes.
+
+`prepare-research-results-template` turns a private research plan into a fillable JSON file under `data/research-results-templates/`. It copies company names, provider IDs, source kinds, licensing notes, and ingested deal IDs when available, but leaves fact fields and citation URLs blank so the file cannot be mistaken for validated evidence.
 
 `import-research-results` reads a local JSON file of manually collected external research and appends validated records to the ignored evidence stores under `data/processed/`. Use `--dry-run` first to validate the file and preview new or duplicate records without writing anything. The command does not fetch websites or call APIs. Each imported result must name the deal by `deal_id` or exact `company_name`, include provider details, `retrieved_at`, either `source_url` or `source_api`, confidence, licensing notes, and the evidence text to cite later. A minimal file looks like:
 

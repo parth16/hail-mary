@@ -50,6 +50,29 @@ SUPPORTED_DOCUMENT_TYPES = {
     DocumentType.PLATFORM_DEAL_PAGE,
     DocumentType.MEMO,
 }
+RESEARCH_RESULT_FIELDS = {
+    "deal_id",
+    "company_name",
+    "provider_id",
+    "provider_name",
+    "title",
+    "text",
+    "retrieved_at",
+    "source_url",
+    "source_api",
+    "confidence",
+    "licensing_notes",
+    "source_kind",
+    "document_type",
+}
+TEMPLATE_FACT_FIELDS = {
+    "title",
+    "text",
+    "retrieved_at",
+    "source_url",
+    "source_api",
+    "confidence",
+}
 
 
 @dataclass(frozen=True)
@@ -204,37 +227,75 @@ def _load_results_file(path: Path) -> ResearchResultsFile:
             "The research results file must be a JSON object with a `results` list."
         )
     try:
-        return ResearchResultsFile.model_validate(raw_payload)
+        return _validate_results_file_payload(raw_payload)
     except ValidationError as exc:
         detail = _first_validation_detail(exc)
         raise ResearchImportError(f"The research results file is incomplete: {detail}") from exc
 
 
+def _validate_results_file_payload(raw_payload: dict[str, object]) -> ResearchResultsFile:
+    raw_results = raw_payload.get("results")
+    if not isinstance(raw_results, list):
+        return ResearchResultsFile.model_validate(raw_payload)
+
+    extra_top_level_fields = set(raw_payload) - {"results"}
+    if extra_top_level_fields:
+        return ResearchResultsFile.model_validate(raw_payload)
+
+    results: list[ResearchResultInput] = []
+    for index, raw_result in enumerate(raw_results, start=1):
+        if _is_blank_template_result(raw_result):
+            continue
+        try:
+            result = ResearchResultInput.model_validate(raw_result)
+        except ValidationError as exc:
+            detail = _first_validation_detail(exc)
+            raise ResearchImportError(
+                f"The research results file is incomplete: row {index}: {detail}"
+            ) from exc
+        result._original_row_number = index
+        results.append(result)
+    return ResearchResultsFile.model_validate({"results": results})
+
+
+def _is_blank_template_result(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if set(result) != RESEARCH_RESULT_FIELDS:
+        return False
+    return all(_is_blank_template_value(result.get(field)) for field in TEMPLATE_FACT_FIELDS)
+
+
+def _is_blank_template_value(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def _validate_results(results: list[ResearchResultInput], *, imported_at: datetime) -> None:
     for index, result in enumerate(results, start=1):
+        display_index = _result_index(result, fallback=index)
         if result.source_kind not in SUPPORTED_SOURCE_KINDS:
             raise ResearchImportError(
-                f"Research result {index} uses source kind {result.source_kind}. "
+                f"Research result {display_index} uses source kind {result.source_kind}. "
                 "Use web, meridian, or manual_note."
             )
         if result.document_type not in SUPPORTED_DOCUMENT_TYPES:
             raise ResearchImportError(
-                f"Research result {index} uses document type {result.document_type}. "
+                f"Research result {display_index} uses document type {result.document_type}. "
                 "Use web_page, platform_deal_page, or memo."
             )
         if result.source_url is not None:
             _validate_url_reference(
                 result.source_url,
-                index=index,
+                index=display_index,
                 field_name="source_url",
             )
         if result.source_api is not None:
-            _validate_source_api(result.source_api, index=index)
-        _validate_known_provider_source_kind(result, index=index)
+            _validate_source_api(result.source_api, index=display_index)
+        _validate_known_provider_source_kind(result, index=display_index)
         retrieved_at = _as_utc(result.retrieved_at)
         if retrieved_at > imported_at:
             raise ResearchImportError(
-                f"Research result {index} has a retrieved_at timestamp in the future."
+                f"Research result {display_index} has a retrieved_at timestamp in the future."
             )
         _provider_name(result)
 
@@ -320,9 +381,10 @@ def _match_results_to_deals(
 
     matches: list[_MatchedResearchResult] = []
     for index, result in enumerate(results, start=1):
+        display_index = _result_index(result, fallback=index)
         deal = _match_result_to_deal(
             result,
-            index=index,
+            index=display_index,
             deal_by_id=deal_by_id,
             deals_by_name=deals_by_name,
         )
@@ -383,6 +445,10 @@ def _match_result_to_deal(
 
 def _raise_missing_deal_reference(index: int) -> IngestedDeal:
     raise ResearchImportError(f"Research result {index} needs a deal_id or company_name.")
+
+
+def _result_index(result: ResearchResultInput, *, fallback: int) -> int:
+    return result._original_row_number or fallback
 
 
 def _load_required_evidence_stores(

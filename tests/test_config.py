@@ -51,6 +51,18 @@ def test_local_state_uses_owner_only_permissions(
     assert stat.S_IMODE((tmp_path / ".hailmary" / "config.yaml").stat().st_mode) == 0o600
 
 
+def test_local_state_accepts_research_results_templates_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "local-data"
+    (data_dir / "research-results-templates").mkdir(parents=True)
+
+    create_local_state(AppConfig(data_dir=data_dir), force=True)
+
+    assert (data_dir / "research-results-templates").is_dir()
+
+
 def test_local_state_rejects_data_dir_inside_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -606,12 +618,22 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
         Path("local-data/raw"),
         Path("local-data/agent-packets"),
         Path("local-data/research-plans"),
+        Path("local-data/research-results-templates"),
     ]:
         with pytest.raises(ConfigError, match="Meridian browser profile directory cannot"):
             create_local_state(
                 AppConfig(data_dir=Path("local-data"), meridian_profile_dir=profile_dir),
                 force=True,
             )
+
+    with pytest.raises(ConfigError, match="research-results-templates"):
+        create_local_state(
+            AppConfig(
+                data_dir=Path("local-data"),
+                meridian_profile_dir=Path("local-data/research-results-templates"),
+            ),
+            force=True,
+        )
 
 
 def test_init_rejects_meridian_profile_config_path_overlap(

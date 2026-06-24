@@ -17,9 +17,11 @@ from hailmary.research import (
     ResearchPlanError,
     ResearchProviderCategory,
     ResearchTaskStatus,
+    ResearchTemplateError,
     builtin_research_providers,
     import_research_results,
     prepare_research_plan,
+    prepare_research_results_template,
 )
 from hailmary.research.schemas import ResearchResultInput
 from hailmary.schemas.agents import AgentRole
@@ -275,6 +277,332 @@ def test_prepare_research_plan_command_has_plain_english_error(
     assert result.exit_code != 0
     assert "Use --website only when the plan has exactly one company" in result.output
     assert "Traceback" not in result.output
+
+
+def test_prepare_research_results_template_writes_private_fillable_file(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com",
+        created_at=BUILT_AT,
+    )
+
+    result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert result.plan_path == plan_result.output_path.resolve(strict=False)
+    assert result.result_count == plan_result.task_count
+    assert result.output_path.parent == tmp_path / "data" / "research-results-templates"
+    assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
+    assert stat.S_IMODE(result.output_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert list(saved) == ["results"]
+    assert len(saved["results"]) == plan_result.task_count
+
+    website_result = next(
+        item for item in saved["results"] if item["provider_id"] == "company_website"
+    )
+    assert website_result == {
+        "deal_id": "",
+        "company_name": "Acme AI",
+        "provider_id": "company_website",
+        "provider_name": "Company website",
+        "title": "",
+        "text": "",
+        "retrieved_at": "",
+        "source_url": "",
+        "source_api": "",
+        "confidence": "",
+        "licensing_notes": (
+            "Use public pages for diligence notes. Save the exact URL and access time "
+            "before turning anything into evidence."
+        ),
+        "source_kind": "web",
+        "document_type": "web_page",
+    }
+
+
+def test_prepare_research_results_template_keeps_ingested_deal_ids(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(data_dir=tmp_path / "data")
+    summary = ingest_folder(root, config=config)
+    plan_result = prepare_research_plan(config=config, created_at=BUILT_AT)
+
+    result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert {item["deal_id"] for item in saved["results"]} == {summary.deals[0].id}
+
+
+def test_prepare_research_results_template_marks_meridian_as_platform_source(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+
+    result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    meridian_result = next(
+        item for item in saved["results"] if item["provider_id"] == "meridian"
+    )
+    assert meridian_result["source_kind"] == "meridian"
+    assert meridian_result["document_type"] == "platform_deal_page"
+    assert meridian_result["source_url"] == ""
+
+
+def test_prepare_research_results_template_uses_latest_plan_when_omitted(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    prepare_research_plan(
+        config=config,
+        company_names=["OlderCo"],
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    latest_plan = prepare_research_plan(
+        config=config,
+        company_names=["NewerCo"],
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    result = prepare_research_results_template(
+        config=config,
+        created_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert result.plan_path == latest_plan.output_path.resolve(strict=False)
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert {item["company_name"] for item in saved["results"]} == {"NewerCo"}
+
+
+def test_prepare_research_results_template_uses_suffixed_plan_for_same_second(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    prepare_research_plan(
+        config=config,
+        company_names=["OlderCo"],
+        created_at=created_at,
+    )
+    latest_plan = prepare_research_plan(
+        config=config,
+        company_names=["NewerCo"],
+        created_at=created_at,
+    )
+
+    result = prepare_research_results_template(
+        config=config,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert latest_plan.output_path.name.endswith("-2.json")
+    assert result.plan_path == latest_plan.output_path.resolve(strict=False)
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert {item["company_name"] for item in saved["results"]} == {"NewerCo"}
+
+
+def test_prepare_research_results_template_rejects_symlink_plan(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+    )
+    symlink_path = tmp_path / "research-plan-link.json"
+    symlink_path.symlink_to(plan_result.output_path)
+
+    with pytest.raises(ResearchTemplateError, match="cannot be a symlink"):
+        prepare_research_results_template(
+            config=config,
+            plan_path=symlink_path,
+            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_prepare_research_results_template_command_writes_template(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = AppConfig(data_dir=tmp_path / "data")
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-research-results-template",
+            str(plan_result.output_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Prepared a fillable external research results template" in result.output
+    assert "No websites, APIs, paid databases, or Meridian pages were contacted" in result.output
+    assert "import-research-results" in result.output
+    assert "--dry-run" in result.output
+    assert f"--data-dir {tmp_path / 'data'}" in result.output.replace("\n", "")
+    templates = list((tmp_path / "data" / "research-results-templates").glob("*.json"))
+    assert len(templates) == 1
+    assert templates[0].name in result.output.replace("\n", "")
+
+
+def test_prepare_research_results_template_command_has_plain_english_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-research-results-template",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "No research plans were found" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_import_research_results_skips_untouched_template_rows(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    plan_result = prepare_research_plan(config=config, created_at=BUILT_AT)
+    template_result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    template_payload["results"][0].update(
+        {
+            "title": "Exact public source excerpt",
+            "text": (
+                "Acme AI reports revenue growth from customers. "
+                "Minimum investment $2,500."
+            ),
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "source_url": "https://example.com/exact-acme-source",
+            "confidence": "high: exact source",
+        }
+    )
+    template_result.output_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=template_result.output_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+        dry_run=True,
+    )
+
+    assert result.imported_count == 1
+    assert result.skipped_duplicate_count == 0
+    assert result.deal_count == 1
+
+
+def test_import_research_results_reports_original_template_row_number(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    plan_result = prepare_research_plan(config=config, created_at=BUILT_AT)
+    template_result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    template_payload["results"][1].update(
+        {
+            "title": "Bad source URL excerpt",
+            "text": "Acme AI reports revenue growth from customers.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "source_url": "https://example .com/bad",
+            "confidence": "high: exact source",
+        }
+    )
+    template_result.output_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match=r"Research result 2 .*source_url"):
+        import_research_results(
+            config=config,
+            results_path=template_result.output_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
+def test_import_research_results_does_not_skip_incomplete_handwritten_rows(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "incomplete-handwritten-results.json"
+    bad_results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Acme AI",
+                        "provider_id": "sec_form_d",
+                        "licensing_notes": "Public government source.",
+                    },
+                    _research_result(),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match=r"row 1: .*title"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
 
 
 def test_import_research_results_appends_source_linked_external_evidence(

@@ -5,7 +5,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from hailmary.schemas.documents import DocumentType, SourceKind
 
@@ -64,6 +71,7 @@ class ResearchDealInput(BaseModel):
     deal_id: str
     company_name: str
     website_url: str | None = None
+    from_ingestion: bool = False
 
 
 class ResearchTask(BaseModel):
@@ -115,6 +123,8 @@ class ResearchPlanRunSummary(BaseModel):
 
 class ResearchResultInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    _original_row_number: int | None = PrivateAttr(default=None)
 
     deal_id: str | None = None
     company_name: str | None = None
@@ -261,3 +271,10 @@ class ResearchImportRunSummary(BaseModel):
             for deal in self.deals
             if deal.imported_count
         ]
+
+
+class ResearchResultsTemplateRunSummary(BaseModel):
+    output_path: Path
+    plan_path: Path
+    created_at: datetime
+    result_count: int
