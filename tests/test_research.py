@@ -303,9 +303,10 @@ def test_import_research_results_appends_source_linked_external_evidence(
         scored_deal,
         role=AgentRole.PRODUCT_MARKET_FIT,
     )
-    packet_evidence = next(evidence for evidence in packet.evidence if evidence.provider_id)
-    assert packet_evidence.provider_name == "SEC EDGAR Form D search"
-    assert packet_evidence.source_url == "https://www.sec.gov/example/acme-ai"
+    packet_payload = packet.model_dump(mode="json")
+    assert "SEC EDGAR Form D search" not in json.dumps(packet_payload)
+    assert "high: exact company match" not in json.dumps(packet_payload)
+    assert "Public government source." not in json.dumps(packet_payload)
 
     summary = json.loads((tmp_path / "data" / "processed" / "ingestion_summary.json").read_text())
     assert summary["deals"][0]["evidence_count"] == saved_store.evidence_count
@@ -333,6 +334,38 @@ def test_import_research_results_skips_duplicate_records(tmp_path: Path) -> None
         deal.evidence_store_path.read_text(encoding="utf-8")
     )
     assert len([evidence for evidence in saved_store.evidence if evidence.provider_id]) == 1
+
+
+def test_import_research_results_keeps_one_document_id_per_external_source(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(
+        tmp_path,
+        extra_results=[
+            _research_result(
+                title="Acme AI Form D snippet two",
+                text="Acme AI has customers and a minimum investment $2,500.",
+            )
+        ],
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 2
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    imported_evidence = [
+        evidence for evidence in saved_store.evidence if evidence.provider_id == "sec_form_d"
+    ]
+    assert len(imported_evidence) == 2
+    assert len({evidence.id for evidence in imported_evidence}) == 2
+    assert len({evidence.document_id for evidence in imported_evidence}) == 1
 
 
 def test_import_research_results_fails_before_writing_for_unknown_deal(

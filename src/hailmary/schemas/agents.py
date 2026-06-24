@@ -52,13 +52,6 @@ class AgentEvidenceItem(BaseModel):
     page_number: int | None = None
     table_index: int | None = None
     truncated: bool = False
-    provider_id: str | None = None
-    provider_name: str | None = None
-    source_url: str | None = None
-    source_api: str | None = None
-    retrieved_at: datetime | None = None
-    external_confidence: str | None = None
-    licensing_notes: str | None = None
 
 
 class AgentClaimItem(BaseModel):

@@ -451,13 +451,6 @@ def _evidence_item(
         page_number=evidence.page_number,
         table_index=evidence.table_index,
         truncated=truncated,
-        provider_id=evidence.provider_id,
-        provider_name=evidence.provider_name,
-        source_url=evidence.source_url,
-        source_api=evidence.source_api,
-        retrieved_at=evidence.retrieved_at,
-        external_confidence=evidence.external_confidence,
-        licensing_notes=evidence.licensing_notes,
     )
 
 

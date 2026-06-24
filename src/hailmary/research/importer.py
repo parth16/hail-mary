@@ -425,7 +425,7 @@ def _evidence_record_for_result(
     return EvidenceRecord(
         id=f"ev_external_{slugify(result.provider_id)}_{digest[:16]}",
         deal_id=deal.id,
-        document_id=f"doc_external_{slugify(result.provider_id)}_{digest[:12]}",
+        document_id=_external_document_id(result, deal_id=deal.id),
         document_path=Path("external-research")
         / slugify(result.provider_id)
         / f"{slugify(result.title)}-{digest[:8]}.txt",
@@ -460,6 +460,20 @@ def _result_digest(result: ResearchResultInput, *, deal_id: str) -> str:
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _external_document_id(result: ResearchResultInput, *, deal_id: str) -> str:
+    source_reference = result.source_url or result.source_api or ""
+    payload = "\0".join(
+        [
+            deal_id,
+            result.provider_id,
+            result.source_kind.value,
+            source_reference,
+        ]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"doc_external_{slugify(result.provider_id)}_{digest[:12]}"
 
 
 def _provider_name(result: ResearchResultInput) -> str:
