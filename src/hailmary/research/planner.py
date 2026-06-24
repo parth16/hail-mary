@@ -278,6 +278,8 @@ def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
     if path.is_symlink():
         raise ResearchPlanError(f"Research plan folder {path} is a symlink.")
     try:
+        root_path.mkdir(parents=True, exist_ok=True)
+        root_path.chmod(0o700)
         path.mkdir(parents=True, exist_ok=True)
         path.chmod(0o700)
     except OSError as exc:

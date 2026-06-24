@@ -59,6 +59,7 @@ def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> Non
     assert result.task_count == 8
     assert result.output_path.exists()
     assert result.output_path.parent == tmp_path / "data" / "research-plans"
+    assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
     assert stat.S_IMODE(result.output_path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
     assert any(task.provider_id == "sec_form_d" for task in result.plan.tasks)

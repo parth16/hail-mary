@@ -17,13 +17,19 @@ from hailmary.schemas.scoring import Recommendation
 EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
-        r"(?:^|[.!?:;]\s+)(?:please\s+)?ignore\s+(?:all\s+|every\s+|previous\s+|the\s+)?instructions?\b",
-        r"(?:^|[.!?:;]\s+)(?:please\s+)?disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?\b",
-        r"(?:^|[.!?:;]\s+)(?:please\s+)?forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)\b",
-        r"(?:^|[.!?:;]\s+)(?:please\s+)?always\s+recommend\s+(?:invest|pass)\b",
-        r"(?:^|[.!?:;]\s+)(?:please\s+)?do\s+not\s+follow\s+the\s+system\b",
-        r"(?:^|[.!?:;]\s+)(?:please\s+)?(?:print|reveal|show)\s+the\s+system\s+prompt\b",
+        r"^(?:please\s+)?ignore\s+(?:all\s+|every\s+|previous\s+|the\s+)?instructions?\b",
+        r"^(?:please\s+)?disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?\b",
+        r"^(?:please\s+)?forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)\b",
+        r"^(?:please\s+)?always\s+recommend\s+(?:invest|pass)\b",
+        r"^(?:please\s+)?do\s+not\s+follow\s+the\s+system\b",
+        r"^(?:please\s+)?(?:print|reveal|show)\s+the\s+system\s+prompt\b",
     )
+)
+SOURCE_INSTRUCTION_PREFIX_PATTERN = re.compile(
+    r"^(?:(?:note|important|instruction|instructions|prompt|system|system note)\s*[-:]\s*)+"
+)
+SOURCE_LIST_PREFIX_PATTERN = re.compile(
+    r"""^[\s>"'`]*(?:(?:[-*+>]+|\d+[\.)])\s*)+"""
 )
 
 
@@ -235,5 +241,29 @@ def _validate_evidence_reference(
 
 
 def _looks_like_embedded_source_instruction(text: str) -> bool:
-    normalized = " ".join(text.lower().split())
-    return any(pattern.search(normalized) for pattern in EMBEDDED_SOURCE_INSTRUCTION_PATTERNS)
+    return any(
+        pattern.search(candidate)
+        for candidate in _source_instruction_candidates(text)
+        for pattern in EMBEDDED_SOURCE_INSTRUCTION_PATTERNS
+    )
+
+
+def _source_instruction_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for line in text.splitlines() or [text]:
+        for segment in re.split(r"(?<=[.!?:;])\s+", line):
+            normalized = " ".join(segment.lower().split())
+            if not normalized:
+                continue
+            candidates.append(_strip_source_instruction_prefix(normalized))
+    return candidates
+
+
+def _strip_source_instruction_prefix(text: str) -> str:
+    stripped = SOURCE_LIST_PREFIX_PATTERN.sub("", text).strip()
+    previous = None
+    while stripped != previous:
+        previous = stripped
+        stripped = SOURCE_INSTRUCTION_PREFIX_PATTERN.sub("", stripped).strip()
+        stripped = SOURCE_LIST_PREFIX_PATTERN.sub("", stripped).strip()
+    return stripped
