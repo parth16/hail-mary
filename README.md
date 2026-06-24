@@ -46,6 +46,7 @@ uv run hailmary validate-agent-output output.json packet.json
 uv run hailmary run-evals
 uv run hailmary list-research-providers
 uv run hailmary prepare-research-plan --company "ExampleCo"
+uv run hailmary import-research-results research-results.json
 ```
 
 `init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `score-deals` reads the local evidence stores and writes deterministic Markdown memos under `data/reports/`.
@@ -55,6 +56,31 @@ uv run hailmary prepare-research-plan --company "ExampleCo"
 `run-evals` runs local synthetic correctness checks. The built-in evals cover text extraction and ingestion, citation span validation, conflicting deal terms, prompt-injection safeguards, missing evidence, score calibration, and Markdown memo snapshot checks. They do not use real deal documents.
 
 `list-research-providers` shows free public, authenticated, and optional paid sources that Hail Mary can plan around. `prepare-research-plan` writes a private JSON checklist under `data/research-plans/` from either the latest ingestion summary or manually supplied `--company` values. It does not contact websites, APIs, paid databases, or Meridian. Any external fact imported later must record the provider, timestamp, exact URL or API source, confidence, and licensing notes.
+
+`import-research-results` reads a local JSON file of manually collected external research and appends validated records to the ignored evidence stores under `data/processed/`. It does not fetch websites or call APIs. Each imported result must name the deal by `deal_id` or exact `company_name`, include provider details, `retrieved_at`, either `source_url` or `source_api`, confidence, licensing notes, and the evidence text to cite later. A minimal file looks like:
+
+```json
+{
+  "results": [
+    {
+      "company_name": "ExampleCo",
+      "provider_id": "sec_form_d",
+      "provider_name": "SEC EDGAR Form D search",
+      "title": "ExampleCo Form D",
+      "text": "ExampleCo filed a Form D for a $1,000,000 offering.",
+      "retrieved_at": "2026-01-01T12:00:00Z",
+      "source_url": "https://www.sec.gov/example",
+      "confidence": "high: exact company match",
+      "licensing_notes": "Public government source."
+    }
+  ]
+}
+```
+
+For built-in provider IDs, Hail Mary uses the provider's source kind automatically. If
+you provide `source_kind`, it must match the built-in provider. `source_api` may be a
+plain provider source label or an `http://` or `https://` endpoint, but endpoint URLs
+cannot include an inline username or password.
 
 ## GitHub Workflow
 

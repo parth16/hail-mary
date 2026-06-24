@@ -28,11 +28,13 @@ from hailmary.ingest.folder_loader import (
     ingest_folder as ingest_folder_path,
 )
 from hailmary.research import (
+    ResearchImportError,
     ResearchPlanError,
     ResearchProvider,
     ResearchProviderCategory,
     ResearchTaskStatus,
     builtin_research_providers,
+    import_research_results,
     prepare_research_plan,
 )
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
@@ -465,6 +467,57 @@ def prepare_research_plan_command(
         console.print(f"{manual_count} {task_word} need your manual action before use.")
     if result.plan.local_only:
         console.print("Local-only mode is on, so this plan is a checklist only.")
+
+
+@app.command("import-research-results")
+def import_research_results_command(
+    results_file: Annotated[
+        Path,
+        typer.Argument(
+            help="Local JSON file with manually collected external research results.",
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read generated evidence and write updates.",
+        ),
+    ] = None,
+) -> None:
+    """Import source-linked external research evidence from a local JSON file."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = import_research_results(config=config, results_path=results_file)
+    except ResearchImportError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    record_word = "record" if result.imported_count == 1 else "records"
+    deal_word = "deal" if result.deal_count == 1 else "deals"
+    console.print(
+        f"Imported {result.imported_count} external research evidence {record_word} "
+        f"into {result.deal_count} {deal_word}."
+    )
+    if result.skipped_duplicate_count:
+        duplicate_word = "record" if result.skipped_duplicate_count == 1 else "records"
+        console.print(
+            f"Skipped {result.skipped_duplicate_count} duplicate {duplicate_word}."
+        )
+    if result.updated_store_paths:
+        store_word = "store" if len(result.updated_store_paths) == 1 else "stores"
+        console.print(f"Updated {len(result.updated_store_paths)} evidence {store_word}.")
+        for deal in result.deals:
+            if deal.imported_count:
+                deal_record_word = "record" if deal.imported_count == 1 else "records"
+                console.print(
+                    f"- {deal.company_name}: added {deal.imported_count} "
+                    f"{deal_record_word}."
+                )
+    else:
+        console.print("No new evidence records were added.")
+    console.print("No websites or APIs were contacted.")
 
 
 def _parse_eval_categories(raw_categories: list[str]) -> list[EvalCategory]:
