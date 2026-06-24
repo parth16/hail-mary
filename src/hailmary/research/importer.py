@@ -261,7 +261,7 @@ def _validate_results_file_payload(raw_payload: dict[str, object]) -> ResearchRe
 def _is_blank_template_result(result: object) -> bool:
     if not isinstance(result, dict):
         return False
-    if not set(result).issubset(RESEARCH_RESULT_FIELDS):
+    if set(result) != RESEARCH_RESULT_FIELDS:
         return False
     return all(_is_blank_template_value(result.get(field)) for field in TEMPLATE_FACT_FIELDS)
 

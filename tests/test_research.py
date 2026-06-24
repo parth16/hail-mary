@@ -475,6 +475,7 @@ def test_prepare_research_results_template_command_writes_template(
     assert "No websites, APIs, paid databases, or Meridian pages were contacted" in result.output
     assert "import-research-results" in result.output
     assert "--dry-run" in result.output
+    assert f"--data-dir {tmp_path / 'data'}" in result.output.replace("\n", "")
     templates = list((tmp_path / "data" / "research-results-templates").glob("*.json"))
     assert len(templates) == 1
     assert templates[0].name in result.output.replace("\n", "")
@@ -569,6 +570,36 @@ def test_import_research_results_reports_original_template_row_number(
         import_research_results(
             config=config,
             results_path=template_result.output_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
+def test_import_research_results_does_not_skip_incomplete_handwritten_rows(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "incomplete-handwritten-results.json"
+    bad_results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Acme AI",
+                        "provider_id": "sec_form_d",
+                        "licensing_notes": "Public government source.",
+                    },
+                    _research_result(),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match=r"row 1: .*title"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
             imported_at=datetime(2026, 1, 3, tzinfo=UTC),
             dry_run=True,
         )
