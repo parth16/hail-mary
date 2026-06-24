@@ -42,6 +42,7 @@ def test_local_state_uses_owner_only_permissions(
     create_local_state(AppConfig(data_dir=Path("local-data")), force=True)
 
     assert stat.S_IMODE((tmp_path / "local-data").stat().st_mode) == 0o700
+    assert (tmp_path / "local-data" / "research-plans").is_dir()
     assert (tmp_path / "local-data" / "browser-profiles" / "meridian").is_dir()
     assert (
         tmp_path / "local-data" / "browser-profiles" / "meridian" / MERIDIAN_PROFILE_MARKER
@@ -604,6 +605,7 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
         Path("local-data"),
         Path("local-data/raw"),
         Path("local-data/agent-packets"),
+        Path("local-data/research-plans"),
     ]:
         with pytest.raises(ConfigError, match="Meridian browser profile directory cannot"):
             create_local_state(

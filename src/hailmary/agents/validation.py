@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from hailmary.schemas.agents import (
     AgentEvidenceItem,
     AgentEvidenceReference,
@@ -12,18 +14,16 @@ from hailmary.schemas.agents import (
 )
 from hailmary.schemas.scoring import Recommendation
 
-EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = (
-    "ignore every instruction",
-    "ignore previous instructions",
-    "ignore the instructions",
-    "always recommend invest",
-    "always recommend pass",
-    "disregard previous instructions",
-    "do not follow the system",
-    "forget the above",
-    "print the system prompt",
-    "reveal the system prompt",
-    "show the system prompt",
+EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"(?:^|[.!?:;]\s+)(?:please\s+)?ignore\s+(?:all\s+|every\s+|previous\s+|the\s+)?instructions?\b",
+        r"(?:^|[.!?:;]\s+)(?:please\s+)?disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?\b",
+        r"(?:^|[.!?:;]\s+)(?:please\s+)?forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)\b",
+        r"(?:^|[.!?:;]\s+)(?:please\s+)?always\s+recommend\s+(?:invest|pass)\b",
+        r"(?:^|[.!?:;]\s+)(?:please\s+)?do\s+not\s+follow\s+the\s+system\b",
+        r"(?:^|[.!?:;]\s+)(?:please\s+)?(?:print|reveal|show)\s+the\s+system\s+prompt\b",
+    )
 )
 
 
@@ -169,7 +169,6 @@ def validate_agent_output(
                 evidence_by_id=evidence_by_id,
                 location=f"recommendation.evidence[{reference_index}]",
                 issues=issues,
-                require_prompt_injection_safe_unquoted_reference=True,
             )
 
     return AgentValidationResult(issues=issues)
@@ -181,7 +180,6 @@ def _validate_evidence_reference(
     evidence_by_id: dict[str, AgentEvidenceItem],
     location: str,
     issues: list[AgentValidationIssue],
-    require_prompt_injection_safe_unquoted_reference: bool = False,
 ) -> None:
     evidence = evidence_by_id.get(reference.evidence_id)
     if evidence is None:
@@ -194,6 +192,15 @@ def _validate_evidence_reference(
         return
 
     quote = reference.quote
+    if quote is not None and not quote.strip():
+        issues.append(
+            AgentValidationIssue(
+                location=location,
+                message="The quoted text is empty. Add a precise quote or omit the quote.",
+            )
+        )
+        quote = None
+
     if quote is not None and quote not in evidence.text:
         issues.append(
             AgentValidationIssue(
@@ -213,7 +220,6 @@ def _validate_evidence_reference(
         )
     if (
         quote is None
-        and require_prompt_injection_safe_unquoted_reference
         and _looks_like_embedded_source_instruction(evidence.text)
     ):
         issues.append(
@@ -230,4 +236,4 @@ def _validate_evidence_reference(
 
 def _looks_like_embedded_source_instruction(text: str) -> bool:
     normalized = " ".join(text.lower().split())
-    return any(pattern in normalized for pattern in EMBEDDED_SOURCE_INSTRUCTION_PATTERNS)
+    return any(pattern.search(normalized) for pattern in EMBEDDED_SOURCE_INSTRUCTION_PATTERNS)
