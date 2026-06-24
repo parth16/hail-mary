@@ -4,6 +4,7 @@ import hashlib
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
@@ -114,8 +115,13 @@ def _clean_optional_url(url: str | None, *, field_name: str) -> str | None:
     cleaned = url.strip()
     if not cleaned:
         return None
-    if not cleaned.startswith(("https://", "http://")):
+    parsed = urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"}:
         raise ResearchPlanError(f"The {field_name} must start with http:// or https://.")
+    if not parsed.netloc:
+        raise ResearchPlanError(f"The {field_name} must include a website host.")
+    if any(character.isspace() for character in cleaned):
+        raise ResearchPlanError(f"The {field_name} cannot contain spaces.")
     return cleaned
 
 

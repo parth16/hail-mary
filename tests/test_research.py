@@ -100,6 +100,27 @@ def test_prepare_research_plan_rejects_website_for_multiple_companies(
         )
 
 
+@pytest.mark.parametrize(
+    "website_url",
+    [
+        "https://",
+        "https://example .com",
+        "mailto:founder@example.com",
+    ],
+)
+def test_prepare_research_plan_rejects_malformed_website_url(
+    tmp_path: Path,
+    website_url: str,
+) -> None:
+    with pytest.raises(ResearchPlanError):
+        prepare_research_plan(
+            config=AppConfig(data_dir=tmp_path / "data"),
+            company_names=["Acme AI"],
+            website_url=website_url,
+            created_at=BUILT_AT,
+        )
+
+
 def test_prepare_research_plan_includes_paid_as_manual_tasks(tmp_path: Path) -> None:
     result = prepare_research_plan(
         config=AppConfig(data_dir=tmp_path / "data"),

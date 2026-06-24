@@ -26,7 +26,10 @@ EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = tuple(
     )
 )
 SOURCE_INSTRUCTION_PREFIX_PATTERN = re.compile(
-    r"^(?:(?:note|important|instruction|instructions|prompt|system|system note)\s*[-:]\s*)+"
+    r"^(?:(?:"
+    r"assistant|chat|developer|important|instruction|instructions|model|note|"
+    r"operator|prompt|speaker|system|system note|system prompt|user"
+    r")\s*[-:]\s*)+"
 )
 SOURCE_LIST_PREFIX_PATTERN = re.compile(
     r"""^[\s>"'`#]*(?:(?:[-*+>]+|\d+[\.)]|#+)\s*)*"""
