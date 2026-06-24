@@ -46,6 +46,7 @@ uv run hailmary validate-agent-output output.json packet.json
 uv run hailmary run-evals
 uv run hailmary list-research-providers
 uv run hailmary prepare-research-plan --company "ExampleCo"
+uv run hailmary import-research-results research-results.json --dry-run
 uv run hailmary import-research-results research-results.json
 ```
 
@@ -57,7 +58,7 @@ uv run hailmary import-research-results research-results.json
 
 `list-research-providers` shows free public, authenticated, and optional paid sources that Hail Mary can plan around. `prepare-research-plan` writes a private JSON checklist under `data/research-plans/` from either the latest ingestion summary or manually supplied `--company` values. It does not contact websites, APIs, paid databases, or Meridian. Any external fact imported later must record the provider, timestamp, exact URL or API source, confidence, and licensing notes.
 
-`import-research-results` reads a local JSON file of manually collected external research and appends validated records to the ignored evidence stores under `data/processed/`. It does not fetch websites or call APIs. Each imported result must name the deal by `deal_id` or exact `company_name`, include provider details, `retrieved_at`, either `source_url` or `source_api`, confidence, licensing notes, and the evidence text to cite later. A minimal file looks like:
+`import-research-results` reads a local JSON file of manually collected external research and appends validated records to the ignored evidence stores under `data/processed/`. Use `--dry-run` first to validate the file and preview new or duplicate records without writing anything. The command does not fetch websites or call APIs. Each imported result must name the deal by `deal_id` or exact `company_name`, include provider details, `retrieved_at`, either `source_url` or `source_api`, confidence, licensing notes, and the evidence text to cite later. A minimal file looks like:
 
 ```json
 {

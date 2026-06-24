@@ -484,27 +484,55 @@ def import_research_results_command(
             help="Where Hail Mary should read generated evidence and write updates.",
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Validate the file and show what would change without writing evidence.",
+        ),
+    ] = False,
 ) -> None:
     """Import source-linked external research evidence from a local JSON file."""
 
     config = _config_from_options(data_dir)
     try:
-        result = import_research_results(config=config, results_path=results_file)
+        result = import_research_results(
+            config=config,
+            results_path=results_file,
+            dry_run=dry_run,
+        )
     except ResearchImportError as exc:
         console.print(f"Error: {exc}")
         raise typer.Exit(1) from None
 
     record_word = "record" if result.imported_count == 1 else "records"
     deal_word = "deal" if result.deal_count == 1 else "deals"
-    console.print(
-        f"Imported {result.imported_count} external research evidence {record_word} "
-        f"into {result.deal_count} {deal_word}."
-    )
+    if result.dry_run:
+        console.print(
+            f"Dry run: {result.imported_count} external research evidence {record_word} "
+            f"would be imported into {result.deal_count} {deal_word}."
+        )
+    else:
+        console.print(
+            f"Imported {result.imported_count} external research evidence {record_word} "
+            f"into {result.deal_count} {deal_word}."
+        )
     if result.skipped_duplicate_count:
         duplicate_word = "record" if result.skipped_duplicate_count == 1 else "records"
         console.print(
             f"Skipped {result.skipped_duplicate_count} duplicate {duplicate_word}."
         )
+    if result.dry_run:
+        for deal in result.deals:
+            if deal.imported_count:
+                deal_record_word = "record" if deal.imported_count == 1 else "records"
+                console.print(
+                    f"- {deal.company_name}: would add {deal.imported_count} "
+                    f"{deal_record_word}."
+                )
+        console.print("No evidence stores were changed.")
+        console.print("No websites or APIs were contacted.")
+        return
     if result.updated_store_paths:
         store_word = "store" if len(result.updated_store_paths) == 1 else "stores"
         console.print(f"Updated {len(result.updated_store_paths)} evidence {store_word}.")

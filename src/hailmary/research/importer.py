@@ -64,6 +64,7 @@ def import_research_results(
     config: AppConfig,
     results_path: Path,
     imported_at: datetime | None = None,
+    dry_run: bool = False,
 ) -> ResearchImportRunSummary:
     try:
         config = validate_local_state(config)
@@ -112,42 +113,44 @@ def import_research_results(
         existing_ids_by_deal_id[deal_id].add(match.evidence.id)
         imported_counts[deal_id] = imported_counts.get(deal_id, 0) + 1
 
-    updated_stores: dict[str, EvidenceStore] = {}
-    for deal_id, imported_count in imported_counts.items():
-        updated_store = stores[deal_id].model_copy(
-            update={
-                "evidence": evidence_by_deal_id[deal_id],
-                "notes": _add_import_note(
-                    stores[deal_id].notes,
-                    input_path=input_path,
-                    imported_at=imported_at,
-                    imported_count=imported_count,
-                ),
-            }
-        )
-        updated_stores[deal_id] = refresh_deal_term_claims(updated_store)
+    if not dry_run:
+        updated_stores: dict[str, EvidenceStore] = {}
+        for deal_id, imported_count in imported_counts.items():
+            updated_store = stores[deal_id].model_copy(
+                update={
+                    "evidence": evidence_by_deal_id[deal_id],
+                    "notes": _add_import_note(
+                        stores[deal_id].notes,
+                        input_path=input_path,
+                        imported_at=imported_at,
+                        imported_count=imported_count,
+                    ),
+                }
+            )
+            updated_stores[deal_id] = refresh_deal_term_claims(updated_store)
 
-    for path in [*store_paths.values(), summary_path]:
-        _preflight_private_output_path(path, private_root=config.data_dir)
+        for path in [*store_paths.values(), summary_path]:
+            _preflight_private_output_path(path, private_root=config.data_dir)
 
-    for deal_id, store in updated_stores.items():
-        _write_private_json(
-            store_paths[deal_id],
-            store.model_dump_json(indent=2),
-            description=f"evidence store for {store.company_name}",
-        )
+        for deal_id, store in updated_stores.items():
+            _write_private_json(
+                store_paths[deal_id],
+                store.model_dump_json(indent=2),
+                description=f"evidence store for {store.company_name}",
+            )
 
-    if updated_stores:
-        summary = _summary_with_updated_counts(summary, updated_stores)
-        _write_private_json(
-            summary_path,
-            summary.model_dump_json(indent=2),
-            description="ingestion summary",
-        )
+        if updated_stores:
+            summary = _summary_with_updated_counts(summary, updated_stores)
+            _write_private_json(
+                summary_path,
+                summary.model_dump_json(indent=2),
+                description="ingestion summary",
+            )
 
     return ResearchImportRunSummary(
         input_path=input_path,
         imported_at=imported_at,
+        dry_run=dry_run,
         deals=_import_deal_summaries(
             matches,
             store_paths=store_paths,

@@ -326,6 +326,30 @@ def test_import_research_results_appends_source_linked_external_evidence(
     assert summary["deals"][0]["claim_count"] == saved_store.claim_count
 
 
+def test_import_research_results_dry_run_does_not_write_private_outputs(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    assert deal.evidence_store_path is not None
+    summary_path = tmp_path / "data" / "processed" / "ingestion_summary.json"
+    before_store = deal.evidence_store_path.read_text(encoding="utf-8")
+    before_summary = summary_path.read_text(encoding="utf-8")
+
+    result = import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+
+    assert result.dry_run is True
+    assert result.imported_count == 1
+    assert result.skipped_duplicate_count == 0
+    assert result.updated_store_paths == []
+    assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
+    assert summary_path.read_text(encoding="utf-8") == before_summary
+
+
 def test_import_research_results_skips_duplicate_records(tmp_path: Path) -> None:
     config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
     import_research_results(
@@ -347,6 +371,32 @@ def test_import_research_results_skips_duplicate_records(tmp_path: Path) -> None
         deal.evidence_store_path.read_text(encoding="utf-8")
     )
     assert len([evidence for evidence in saved_store.evidence if evidence.provider_id]) == 1
+
+
+def test_import_research_results_dry_run_reports_duplicates_without_writing(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    assert deal.evidence_store_path is not None
+    before_store = deal.evidence_store_path.read_text(encoding="utf-8")
+
+    result = import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+        dry_run=True,
+    )
+
+    assert result.dry_run is True
+    assert result.imported_count == 0
+    assert result.skipped_duplicate_count == 1
+    assert result.updated_store_paths == []
+    assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
 def test_import_research_results_skips_duplicate_with_different_title(
@@ -683,6 +733,34 @@ def test_import_research_results_command_has_plain_english_success(
     assert result.exit_code == 0, result.output
     assert "Imported 1 external research evidence record into 1 deal" in result.output
     assert "No websites or APIs were contacted" in result.output
+
+
+def test_import_research_results_command_dry_run_has_plain_english_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    assert deal.evidence_store_path is not None
+    before_store = deal.evidence_store_path.read_text(encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "import-research-results",
+            str(results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Dry run: 1 external research evidence record would be imported" in result.output
+    assert "- Acme AI: would add 1 record." in result.output
+    assert "No evidence stores were changed." in result.output
+    assert "No websites or APIs were contacted." in result.output
+    assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
 def test_import_research_results_command_has_plain_english_error(
