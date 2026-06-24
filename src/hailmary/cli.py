@@ -107,6 +107,33 @@ def ingest_folder(
     )
     console.print(f"Saved the scan summary to {summary.summary_path}.")
 
+    evidence_count = sum(deal.evidence_count for deal in summary.deals)
+    claim_count = sum(deal.claim_count for deal in summary.deals)
+    conflict_count = sum(deal.conflict_count for deal in summary.deals)
+    deals_without_evidence = [
+        deal for deal in summary.deals if deal.documents and deal.evidence_count == 0
+    ]
+    if evidence_count:
+        evidence_word = "record" if evidence_count == 1 else "records"
+        claim_word = "claim" if claim_count == 1 else "claims"
+        console.print(
+            f"Built {evidence_count} source-linked evidence {evidence_word} "
+            f"and {claim_count} deal-term {claim_word}."
+        )
+    if deals_without_evidence:
+        deal_names = ", ".join(deal.company_name for deal in deals_without_evidence)
+        deal_word = "deal" if len(deals_without_evidence) == 1 else "deals"
+        console.print(
+            f"No usable evidence text was built for {deal_word}: {deal_names}. "
+            "Hail Mary stored the files it could read, but cannot use their text yet."
+        )
+    if conflict_count:
+        conflict_word = "conflict" if conflict_count == 1 else "conflicts"
+        console.print(
+            f"Found {conflict_count} deal-term {conflict_word}. "
+            "Review the cited evidence before relying on those terms."
+        )
+
     image_text_documents = sum(
         1
         for deal in summary.deals

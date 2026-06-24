@@ -60,10 +60,14 @@ def test_ingest_folder_groups_documents_and_writes_outputs(tmp_path: Path) -> No
 
     output_paths = [doc.output_path for doc in summary.deals[0].documents]
     assert all(path.exists() for path in output_paths)
+    assert summary.deals[0].evidence_store_path is not None
+    assert summary.deals[0].evidence_store_path.exists()
+    assert summary.deals[0].evidence_count >= 1
 
     saved_summary = json.loads(summary.summary_path.read_text(encoding="utf-8"))
     assert saved_summary["deals"][0]["id"] == _deal_id("ExampleCo")
     assert saved_summary["deals"][0]["documents"][0]["source"]["company_name"] == "ExampleCo"
+    assert saved_summary["deals"][0]["evidence_store_path"]
 
 
 def test_invalid_pdf_is_recorded_without_crashing(tmp_path: Path) -> None:

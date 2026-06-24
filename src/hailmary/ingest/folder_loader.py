@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from hailmary.config import AppConfig
+from hailmary.evidence import build_evidence_store
 from hailmary.ingest.document_classifier import (
     SUPPORTED_SUFFIXES,
     classify_document,
@@ -20,6 +21,7 @@ from hailmary.schemas.documents import (
     SourceDocument,
     SourceKind,
 )
+from hailmary.schemas.evidence import EvidenceStore
 from hailmary.utils.slug import slugify
 
 
@@ -103,6 +105,13 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
                 documents=[],
             )
         deals_by_id[deal_id].documents.append(processed_document)
+
+    for deal in deals_by_id.values():
+        evidence_store = build_evidence_store(deal, created_at=run_started_at)
+        deal.evidence_store_path = _write_evidence_store(config, deal.id, evidence_store)
+        deal.evidence_count = evidence_store.evidence_count
+        deal.claim_count = evidence_store.claim_count
+        deal.conflict_count = evidence_store.conflict_count
 
     summary = IngestionSummary(
         root_path=root_path,
@@ -281,6 +290,22 @@ def _write_document(
         output_path,
         payload.model_dump_json(indent=2),
         description="document output",
+    )
+    return output_path
+
+
+def _write_evidence_store(
+    config: AppConfig,
+    deal_id: str,
+    evidence_store: EvidenceStore,
+) -> Path:
+    output_dir = config.data_dir / "processed" / "deals" / deal_id
+    _ensure_private_directory(output_dir, private_root=config.data_dir)
+    output_path = output_dir / "evidence_store.json"
+    _write_private_text(
+        output_path,
+        evidence_store.model_dump_json(indent=2),
+        description="evidence store",
     )
     return output_path
 

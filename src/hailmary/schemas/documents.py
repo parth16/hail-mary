@@ -103,6 +103,10 @@ class IngestedDeal(BaseModel):
     id: str
     company_name: str
     documents: list[IngestedDocument] = Field(default_factory=list)
+    evidence_store_path: Path | None = None
+    evidence_count: int = 0
+    claim_count: int = 0
+    conflict_count: int = 0
 
 
 class IngestionSummary(BaseModel):

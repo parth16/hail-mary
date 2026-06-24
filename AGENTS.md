@@ -33,3 +33,4 @@ Rules for all future Codex runs:
 ## Review memory
 
 - After each PR, append concise code review learnings here. Keep entries general and reusable; do not include confidential deal material, extracted source text, secrets, or generated reports.
+- PR #3: Sparse spreadsheet extraction must preserve far-right values without materializing huge blank gaps, skip empty formatting-only cells, and track source column position separately from compacted output rows. OCR warnings should distinguish one-off short divider pages from repeated low-text pages or empty pages. HTML table extraction should account for nested tables and row or column spans so evidence rows stay aligned with their headers.
