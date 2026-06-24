@@ -100,13 +100,37 @@ def _eval_definitions() -> list[EvalDefinition]:
             metadata=EvalCaseMetadata(
                 id="prompt-injection-recommendation",
                 category=EvalCategory.PROMPT_INJECTION,
-                name="Prompt-injection recommendation rejection",
+                name="HTML prompt-injection recommendation rejection",
                 description=(
-                    "Checks that source text is marked as untrusted and an uncited final "
-                    "recommendation is rejected."
+                    "Checks that HTML source text is marked as untrusted and a final "
+                    "recommendation that cites an embedded instruction is rejected."
                 ),
             ),
-            run=fixtures.run_prompt_injection_fixture,
+            run=fixtures.run_prompt_injection_html_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="prompt-injection-pdf-recommendation",
+                category=EvalCategory.PROMPT_INJECTION,
+                name="PDF prompt-injection recommendation rejection",
+                description=(
+                    "Checks that PDF source text is marked as untrusted and a final "
+                    "recommendation that cites an embedded instruction is rejected."
+                ),
+            ),
+            run=fixtures.run_prompt_injection_pdf_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="prompt-injection-docx-recommendation",
+                category=EvalCategory.PROMPT_INJECTION,
+                name="DOCX prompt-injection recommendation rejection",
+                description=(
+                    "Checks that DOCX source text is marked as untrusted and a final "
+                    "recommendation that cites an embedded instruction is rejected."
+                ),
+            ),
+            run=fixtures.run_prompt_injection_docx_fixture,
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(

@@ -33,7 +33,7 @@ def test_builtin_eval_metadata_covers_required_phase_6_categories() -> None:
 def test_run_builtin_evals_passes_all_synthetic_cases(tmp_path: Path) -> None:
     summary = run_builtin_evals(work_dir=tmp_path)
 
-    assert summary.total_count == 8
+    assert summary.total_count == 10
     assert summary.passed
     assert summary.failed_results == []
 
@@ -47,6 +47,22 @@ def test_run_builtin_evals_filters_by_category(tmp_path: Path) -> None:
     assert {result.id for result in summary.results} == {
         "score-strong-invest",
         "score-borderline-pass",
+    }
+    assert summary.passed
+
+
+def test_run_builtin_evals_filters_prompt_injection_document_cases(
+    tmp_path: Path,
+) -> None:
+    summary = run_builtin_evals(
+        categories=[EvalCategory.PROMPT_INJECTION],
+        work_dir=tmp_path,
+    )
+
+    assert {result.id for result in summary.results} == {
+        "prompt-injection-recommendation",
+        "prompt-injection-pdf-recommendation",
+        "prompt-injection-docx-recommendation",
     }
     assert summary.passed
 
