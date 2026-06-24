@@ -269,6 +269,29 @@ def test_score_evidence_store_matches_traction_keywords_as_words() -> None:
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
 
 
+def test_score_evidence_store_ignores_negated_traction_phrases() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "The company is pre-revenue with no customers yet.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
 def test_score_evidence_store_cites_early_pmf_evidence() -> None:
     evidence = [
         _evidence(
@@ -395,6 +418,48 @@ def test_score_deals_bad_ingestion_summary_has_plain_english_error(
 
     assert result.exit_code != 0
     assert "The ingestion summary could not be read" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_score_deals_non_utf8_summary_has_plain_english_error(
+    tmp_path: Path,
+) -> None:
+    processed_dir = tmp_path / "data" / "processed"
+    processed_dir.mkdir(parents=True)
+    (processed_dir / "ingestion_summary.json").write_bytes(b"\xff\xfe\x00")
+
+    result = runner.invoke(app, ["score-deals", "--data-dir", str(tmp_path / "data")])
+
+    assert result.exit_code != 0
+    assert "ingestion summary is not plain text" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_score_deals_rejects_current_folder_as_data_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["score-deals", "--data-dir", "."])
+
+    assert result.exit_code != 0
+    assert "data directory cannot be the current folder" in result.output
+    assert not (tmp_path / "reports").exists()
+
+
+def test_score_latest_ingestion_non_utf8_evidence_store_has_plain_english_error(
+    tmp_path: Path,
+) -> None:
+    store = _strong_store(deal_id="deal_one", company_name="Deal One")
+    _write_ingestion_summary(tmp_path, [store])
+    store_path = tmp_path / "data" / "processed" / f"{store.deal_id}.json"
+    store_path.write_bytes(b"\xff\xfe\x00")
+
+    result = runner.invoke(app, ["score-deals", "--data-dir", str(tmp_path / "data")])
+
+    assert result.exit_code != 0
+    assert "evidence store for Deal One is not plain text" in result.output
     assert "Traceback" not in result.output
 
 

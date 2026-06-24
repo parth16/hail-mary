@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from hailmary.config import AppConfig
+from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.documents import IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceStore, VerificationStatus
 from hailmary.schemas.scoring import MemoRunSummary, ScoredDeal
@@ -18,6 +18,11 @@ class ScoringError(RuntimeError):
 
 
 def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
+    try:
+        config = validate_local_state(config)
+    except ConfigError as exc:
+        raise ScoringError(str(exc)) from exc
+
     summary_path = config.data_dir / "processed" / "ingestion_summary.json"
     if not summary_path.exists():
         raise ScoringError(
@@ -144,6 +149,11 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
 def _load_ingestion_summary(summary_path: Path) -> IngestionSummary:
     try:
         raw_summary = summary_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ScoringError(
+            "The ingestion summary is not plain text. "
+            "Run `hailmary ingest-folder` again before scoring."
+        ) from exc
     except OSError as exc:
         raise ScoringError(
             f"Could not read the ingestion summary at {summary_path}: {exc}"
@@ -160,6 +170,11 @@ def _load_ingestion_summary(summary_path: Path) -> IngestionSummary:
 def _load_evidence_store(path: Path, *, company_name: str) -> EvidenceStore:
     try:
         raw_store = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ScoringError(
+            f"The evidence store for {company_name} is not plain text. "
+            "Run `hailmary ingest-folder` again before scoring."
+        ) from exc
     except OSError as exc:
         raise ScoringError(
             f"Could not read the evidence store for {company_name} at {path}: {exc}"

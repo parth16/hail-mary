@@ -36,6 +36,13 @@ EARLY_PMF_KEYWORDS = ("pilot", "beta", "loi", "waitlist", "design partner")
 FUNDABILITY_KEYWORDS = ("lead investor", "institutional", "series a", "seed", "follow-on")
 INVEST_MINIMUM_SCORE = 75
 HARD_MAX_CHECK = max(CHECK_SIZE_TIERS)
+NEGATED_TRACTION_PATTERNS = (
+    re.compile(r"\bpre[-\s]?revenue\b", re.IGNORECASE),
+    re.compile(r"\bno\s+(?:paid\s+)?customers?\b", re.IGNORECASE),
+    re.compile(r"\bno\s+revenue\b", re.IGNORECASE),
+    re.compile(r"\bwithout\s+(?:customers?|revenue|usage|retention)\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+(?:yet\s+)?(?:generating\s+)?revenue\b", re.IGNORECASE),
+)
 
 
 def score_evidence_store(
@@ -251,7 +258,7 @@ def _pmf_factor(store: EvidenceStore, pmf_level: PMFLevel) -> ScoreFactor:
         PMFLevel.DEVELOPING: 18,
     }
     if pmf_level == PMFLevel.DEVELOPING:
-        matched_evidence = _evidence_matching_keywords(store.evidence, TRACTION_KEYWORDS)
+        matched_evidence = _positive_traction_evidence(store.evidence)
     elif pmf_level == PMFLevel.EARLY:
         matched_evidence = _evidence_matching_keywords(store.evidence, EARLY_PMF_KEYWORDS)
     else:
@@ -318,7 +325,7 @@ def _evidence_quality_factor(store: EvidenceStore) -> ScoreFactor:
 
 def _pmf_level(evidence: list[EvidenceRecord]) -> PMFLevel:
     text_index = _text_index(evidence)
-    if _text_contains_any_keyword(text_index, TRACTION_KEYWORDS):
+    if _positive_traction_evidence(evidence):
         return PMFLevel.DEVELOPING
     if _text_contains_any_keyword(text_index, EARLY_PMF_KEYWORDS):
         return PMFLevel.EARLY
@@ -333,7 +340,7 @@ def _fundability_risk(
     if not store.evidence:
         return FundabilityRisk.UNKNOWN
     has_terms = bool(verified_claims)
-    has_traction = _text_contains_any_keyword(text_index, TRACTION_KEYWORDS)
+    has_traction = bool(_positive_traction_evidence(store.evidence))
     has_funding_signal = _text_contains_any_keyword(text_index, FUNDABILITY_KEYWORDS)
     if has_terms and has_traction and has_funding_signal:
         return FundabilityRisk.LOW
@@ -524,6 +531,19 @@ def _one_line_reason(
 
 def _text_contains_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     return any(_contains_keyword(text, keyword) for keyword in keywords)
+
+
+def _positive_traction_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
+    return [
+        record
+        for record in evidence
+        if _text_contains_any_keyword(record.text, TRACTION_KEYWORDS)
+        and not _contains_negated_traction(record.text)
+    ]
+
+
+def _contains_negated_traction(text: str) -> bool:
+    return any(pattern.search(text) is not None for pattern in NEGATED_TRACTION_PATTERNS)
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:
