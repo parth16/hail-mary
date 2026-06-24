@@ -216,6 +216,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config.data_dir / "processed",
         config.data_dir / "reports",
         config.data_dir / "agent-packets",
+        config.data_dir / "research-plans",
         config.data_dir / "browser-profiles",
         config.meridian_profile_dir,
         config.config_dir,
@@ -427,7 +428,14 @@ def _ensure_dedicated_data_dir(path: Path) -> None:
     if not path.exists() or not path.is_dir():
         return
 
-    allowed_entries = {"raw", "processed", "reports", "agent-packets", "browser-profiles"}
+    allowed_entries = {
+        "raw",
+        "processed",
+        "reports",
+        "agent-packets",
+        "research-plans",
+        "browser-profiles",
+    }
     try:
         unknown_entries = {child.name for child in path.iterdir()} - allowed_entries
     except OSError as exc:
@@ -448,6 +456,7 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         data_dir / "processed",
         data_dir / "reports",
         data_dir / "agent-packets",
+        data_dir / "research-plans",
     }
     allowed_profile_root = data_dir / "browser-profiles"
 
@@ -465,7 +474,7 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         if profile_dir == reserved_path:
             raise ConfigError(
                 "The Meridian browser profile directory cannot be the data, raw, "
-                "processed, reports, or agent-packets folder. Choose a separate "
+                "processed, reports, agent-packets, or research-plans folder. Choose a separate "
                 "generated-data folder."
             )
         try:

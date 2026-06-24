@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -25,6 +26,14 @@ from hailmary.ingest.folder_loader import (
 )
 from hailmary.ingest.folder_loader import (
     ingest_folder as ingest_folder_path,
+)
+from hailmary.research import (
+    ResearchPlanError,
+    ResearchProvider,
+    ResearchProviderCategory,
+    ResearchTaskStatus,
+    builtin_research_providers,
+    prepare_research_plan,
 )
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 
@@ -317,6 +326,147 @@ def run_evals_command(
         raise typer.Exit(1) from None
 
 
+@app.command("list-research-providers")
+def list_research_providers_command(
+    include_paid: Annotated[
+        bool,
+        typer.Option(
+            "--include-paid",
+            help="Also list optional paid data sources. These need a paid account or license.",
+        ),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print provider metadata as JSON.",
+        ),
+    ] = False,
+) -> None:
+    """List external research sources Hail Mary can plan for."""
+
+    providers = builtin_research_providers(include_paid=include_paid)
+    if json_output:
+        payload = [provider.model_dump(mode="json") for provider in providers]
+        console.out(json.dumps(payload, indent=2))
+        return
+
+    free_providers = _providers_by_category(
+        providers,
+        ResearchProviderCategory.FREE_PUBLIC,
+    )
+    portal_providers = _providers_by_category(
+        providers,
+        ResearchProviderCategory.AUTHENTICATED_PORTAL,
+    )
+    paid_providers = _providers_by_category(
+        providers,
+        ResearchProviderCategory.PAID_OPTIONAL,
+    )
+    console.print("Free and public sources:")
+    for provider in free_providers:
+        console.print(f"- {provider.name}: {provider.description}")
+    console.print("Authenticated sources:")
+    for provider in portal_providers:
+        console.print(f"- {provider.name}: {provider.operator_note}")
+    if paid_providers:
+        console.print("Optional paid sources:")
+        for provider in paid_providers:
+            console.print(f"- {provider.name}: {provider.description}")
+    else:
+        console.print("Optional paid sources are hidden. Use --include-paid to list them.")
+
+
+@app.command("prepare-research-plan")
+def prepare_research_plan_command(
+    company: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--company",
+            help=(
+                "Company to plan research for. Use more than once for multiple companies. "
+                "If omitted, Hail Mary uses the latest ingestion summary."
+            ),
+        ),
+    ] = None,
+    website: Annotated[
+        str | None,
+        typer.Option(
+            "--website",
+            help="Official company website. Use only when planning for one company.",
+        ),
+    ] = None,
+    meridian_url: Annotated[
+        str | None,
+        typer.Option(
+            "--meridian-url",
+            help=(
+                "Authenticated Meridian deal URL. Hail Mary records it as a manual task "
+                "and does not open it."
+            ),
+        ),
+    ] = None,
+    include_paid: Annotated[
+        bool,
+        typer.Option(
+            "--include-paid",
+            help="Include optional paid sources as manual tasks. No paid source is contacted.",
+        ),
+    ] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read generated evidence and write the plan.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print the research plan as JSON.",
+        ),
+    ] = False,
+) -> None:
+    """Prepare a private external research checklist without contacting any source."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = prepare_research_plan(
+            config=config,
+            company_names=company or [],
+            website_url=website,
+            meridian_url=meridian_url,
+            include_paid=include_paid,
+        )
+    except ResearchPlanError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    if json_output:
+        console.out(result.plan.model_dump_json(indent=2))
+        return
+
+    deal_word = "deal" if result.deal_count == 1 else "deals"
+    task_word = "task" if result.task_count == 1 else "tasks"
+    console.print(
+        f"Prepared an external research plan for {result.deal_count} {deal_word} "
+        f"with {result.task_count} {task_word}."
+    )
+    console.print(f"Saved the private JSON plan to {result.output_path}.")
+    console.print("No websites, APIs, paid databases, or Meridian pages were contacted.")
+
+    manual_count = sum(
+        1
+        for task in result.plan.tasks
+        if task.status == ResearchTaskStatus.NEEDS_OPERATOR
+    )
+    if manual_count:
+        console.print(f"{manual_count} {task_word} need your manual action before use.")
+    if result.plan.local_only:
+        console.print("Local-only mode is on, so this plan is a checklist only.")
+
+
 def _parse_eval_categories(raw_categories: list[str]) -> list[EvalCategory]:
     categories: list[EvalCategory] = []
     valid_values = ", ".join(category.value for category in EvalCategory)
@@ -337,6 +487,13 @@ def _operator_eval_details(details: dict[str, str]) -> list[tuple[str, str]]:
         for name, value in details.items()
         if name != "description" and value
     ]
+
+
+def _providers_by_category(
+    providers: list[ResearchProvider],
+    category: ResearchProviderCategory,
+) -> list[ResearchProvider]:
+    return [provider for provider in providers if provider.category == category]
 
 
 def _format_check_size(check_size: int) -> str:

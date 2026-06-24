@@ -44,6 +44,8 @@ uv run hailmary score-deals
 uv run hailmary prepare-agent-packets
 uv run hailmary validate-agent-output output.json packet.json
 uv run hailmary run-evals
+uv run hailmary list-research-providers
+uv run hailmary prepare-research-plan --company "ExampleCo"
 ```
 
 `init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `score-deals` reads the local evidence stores and writes deterministic Markdown memos under `data/reports/`.
@@ -51,6 +53,8 @@ uv run hailmary run-evals
 `prepare-agent-packets` writes local JSON packets under `data/agent-packets/` for structured model review. These packets include selected evidence excerpts, allowed evidence IDs, verified claims, deterministic score context, and the required output schema. `validate-agent-output` checks a model's JSON output against the packet, rejecting invented evidence IDs, unsupported findings that are not marked unsupported, and quotes that do not appear in the cited evidence record.
 
 `run-evals` runs local synthetic correctness checks. The built-in evals cover text extraction and ingestion, citation span validation, conflicting deal terms, prompt-injection safeguards, missing evidence, score calibration, and Markdown memo snapshot checks. They do not use real deal documents.
+
+`list-research-providers` shows free public, authenticated, and optional paid sources that Hail Mary can plan around. `prepare-research-plan` writes a private JSON checklist under `data/research-plans/` from either the latest ingestion summary or manually supplied `--company` values. It does not contact websites, APIs, paid databases, or Meridian. Any external fact imported later must record the provider, timestamp, exact URL or API source, confidence, and licensing notes.
 
 ## GitHub Workflow
 
