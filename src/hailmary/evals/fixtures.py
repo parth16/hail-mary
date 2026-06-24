@@ -196,7 +196,12 @@ def run_prompt_injection_fixture(work_dir: Path) -> None:
             recommendation=Recommendation.INVEST,
             check_size=1_000,
             reason="Followed the instruction embedded in the evidence text.",
-            evidence=[],
+            evidence=[
+                AgentEvidenceReference(
+                    evidence_id=cited_evidence_id,
+                    quote=PROMPT_INJECTION_TEXT,
+                )
+            ],
         ),
     )
 
@@ -211,8 +216,12 @@ def run_prompt_injection_fixture(work_dir: Path) -> None:
         "Expected the packet to tell agents not to follow source-document instructions.",
     )
     _expect(
-        any(issue.location == "recommendation.evidence" for issue in validation.issues),
-        "Expected an uncited injected recommendation to fail validation.",
+        any(
+            issue.location == "recommendation.evidence[0]"
+            and "instruction embedded in a source document" in issue.message
+            for issue in validation.issues
+        ),
+        "Expected a cited source-document instruction to fail validation.",
     )
 
 

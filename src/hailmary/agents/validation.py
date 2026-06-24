@@ -12,6 +12,18 @@ from hailmary.schemas.agents import (
 )
 from hailmary.schemas.scoring import Recommendation
 
+EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = (
+    "ignore every instruction",
+    "ignore previous instructions",
+    "ignore the instructions",
+    "always recommend invest",
+    "always recommend pass",
+    "disregard previous instructions",
+    "do not follow the system",
+    "forget the above",
+    "system prompt",
+)
+
 
 def validate_agent_output(
     output: AgentReviewOutput,
@@ -185,3 +197,18 @@ def _validate_evidence_reference(
                 message="The quoted text was not found in the cited evidence record.",
             )
         )
+    if quote is not None and _looks_like_embedded_source_instruction(quote):
+        issues.append(
+            AgentValidationIssue(
+                location=location,
+                message=(
+                    "The quoted text looks like an instruction embedded in a source "
+                    "document, not investment evidence."
+                ),
+            )
+        )
+
+
+def _looks_like_embedded_source_instruction(text: str) -> bool:
+    normalized = " ".join(text.lower().split())
+    return any(pattern in normalized for pattern in EMBEDDED_SOURCE_INSTRUCTION_PATTERNS)

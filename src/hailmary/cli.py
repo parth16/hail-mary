@@ -310,6 +310,8 @@ def run_evals_command(
         )
         for result in summary.failed_results:
             console.print(f"- {result.id}: {result.message}")
+            for detail_name, detail_value in _operator_eval_details(result.details):
+                console.print(f"  {detail_name}: {detail_value}")
 
     if not summary.passed:
         raise typer.Exit(1) from None
@@ -327,6 +329,14 @@ def _parse_eval_categories(raw_categories: list[str]) -> list[EvalCategory]:
                 f"{valid_values}."
             ) from exc
     return categories
+
+
+def _operator_eval_details(details: dict[str, str]) -> list[tuple[str, str]]:
+    return [
+        (name.replace("_", " "), value)
+        for name, value in details.items()
+        if name != "description" and value
+    ]
 
 
 def _format_check_size(check_size: int) -> str:

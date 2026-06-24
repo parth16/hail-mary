@@ -157,6 +157,11 @@ def test_run_evals_command_reports_failures(
                     name="Synthetic failure",
                     passed=False,
                     message="The expected behavior did not happen.",
+                    details={
+                        "description": "Hidden in normal output.",
+                        "expected": "PASS",
+                        "actual": "INVEST",
+                    },
                 )
             ]
         )
@@ -168,4 +173,7 @@ def test_run_evals_command_reports_failures(
     assert result.exit_code != 0
     assert "Ran 1 synthetic eval. 0 passed, 1 failed." in result.output
     assert "- synthetic-failure: The expected behavior did not happen." in result.output
+    assert "expected: PASS" in result.output
+    assert "actual: INVEST" in result.output
+    assert "Hidden in normal output" not in result.output
     assert "Traceback" not in result.output
