@@ -261,3 +261,10 @@ class ResearchImportRunSummary(BaseModel):
             for deal in self.deals
             if deal.imported_count
         ]
+
+
+class ResearchResultsTemplateRunSummary(BaseModel):
+    output_path: Path
+    plan_path: Path
+    created_at: datetime
+    result_count: int

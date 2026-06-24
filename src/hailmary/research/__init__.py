@@ -15,8 +15,13 @@ from hailmary.research.schemas import (
     ResearchProviderCategory,
     ResearchResultInput,
     ResearchResultsFile,
+    ResearchResultsTemplateRunSummary,
     ResearchTask,
     ResearchTaskStatus,
+)
+from hailmary.research.templates import (
+    ResearchTemplateError,
+    prepare_research_results_template,
 )
 
 __all__ = [
@@ -32,10 +37,13 @@ __all__ = [
     "ResearchProviderCategory",
     "ResearchResultInput",
     "ResearchResultsFile",
+    "ResearchResultsTemplateRunSummary",
     "ResearchTask",
     "ResearchTaskStatus",
+    "ResearchTemplateError",
     "builtin_provider_adapters",
     "builtin_research_providers",
     "import_research_results",
     "prepare_research_plan",
+    "prepare_research_results_template",
 ]

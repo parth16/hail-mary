@@ -33,9 +33,11 @@ from hailmary.research import (
     ResearchProvider,
     ResearchProviderCategory,
     ResearchTaskStatus,
+    ResearchTemplateError,
     builtin_research_providers,
     import_research_results,
     prepare_research_plan,
+    prepare_research_results_template,
 )
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 
@@ -467,6 +469,49 @@ def prepare_research_plan_command(
         console.print(f"{manual_count} {task_word} need your manual action before use.")
     if result.plan.local_only:
         console.print("Local-only mode is on, so this plan is a checklist only.")
+
+
+@app.command("prepare-research-results-template")
+def prepare_research_results_template_command(
+    research_plan: Annotated[
+        Path | None,
+        typer.Argument(
+            help=(
+                "Research plan JSON to turn into a fillable results file. If omitted, "
+                "Hail Mary uses the latest private research plan."
+            ),
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read plans and write the template.",
+        ),
+    ] = None,
+) -> None:
+    """Prepare a private fillable JSON template for external research results."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = prepare_research_results_template(
+            config=config,
+            plan_path=research_plan,
+        )
+    except ResearchTemplateError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    result_word = "result" if result.result_count == 1 else "results"
+    console.print(
+        f"Prepared a fillable external research results template with "
+        f"{result.result_count} {result_word}."
+    )
+    console.print(f"Saved the private JSON template to {result.output_path}.")
+    console.print("No websites, APIs, paid databases, or Meridian pages were contacted.")
+    console.print(
+        "Fill in source-backed facts, then run `hailmary import-research-results --dry-run`."
+    )
 
 
 @app.command("import-research-results")
