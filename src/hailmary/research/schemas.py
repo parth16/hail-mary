@@ -9,6 +9,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from hailmary.schemas.documents import DocumentType, SourceKind
 
+BUILTIN_RESEARCH_PROVIDER_SOURCE_KINDS: dict[str, SourceKind] = {
+    "company_website": SourceKind.WEB,
+    "sec_form_d": SourceKind.WEB,
+    "sam_gov": SourceKind.WEB,
+    "usaspending": SourceKind.WEB,
+    "sbir": SourceKind.WEB,
+    "uspto": SourceKind.WEB,
+    "github": SourceKind.WEB,
+    "public_web": SourceKind.WEB,
+    "meridian": SourceKind.MERIDIAN,
+    "crunchbase": SourceKind.WEB,
+    "people_data_labs": SourceKind.WEB,
+    "newsapi": SourceKind.WEB,
+    "similarweb": SourceKind.WEB,
+    "sensor_tower": SourceKind.WEB,
+    "pitchbook": SourceKind.WEB,
+    "cb_insights": SourceKind.WEB,
+}
+
 
 class ResearchProviderCategory(StrEnum):
     FREE_PUBLIC = "free_public"
@@ -110,6 +129,45 @@ class ResearchResultInput(BaseModel):
     licensing_notes: str
     source_kind: SourceKind = SourceKind.WEB
     document_type: DocumentType = DocumentType.WEB_PAGE
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_known_provider_source_kind(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        provider_id = data.get("provider_id")
+        if not isinstance(provider_id, str):
+            return data
+        provider_id = provider_id.strip()
+        known_source_kind = BUILTIN_RESEARCH_PROVIDER_SOURCE_KINDS.get(provider_id)
+        if known_source_kind is None:
+            return data
+
+        raw_source_kind = data.get("source_kind")
+        if raw_source_kind is None or (
+            isinstance(raw_source_kind, str) and not raw_source_kind.strip()
+        ):
+            updated_data = dict(data)
+            updated_data["source_kind"] = known_source_kind
+            return updated_data
+
+        try:
+            source_kind = (
+                raw_source_kind
+                if isinstance(raw_source_kind, SourceKind)
+                else SourceKind(str(raw_source_kind).strip())
+            )
+        except ValueError:
+            return data
+        if source_kind != known_source_kind:
+            raise ValueError(
+                f"provider_id {provider_id} must use source_kind "
+                f"{known_source_kind.value}."
+            )
+
+        updated_data = dict(data)
+        updated_data["source_kind"] = source_kind
+        return updated_data
 
     @field_validator(
         "deal_id",

@@ -77,6 +77,11 @@ uv run hailmary import-research-results research-results.json
 }
 ```
 
+For built-in provider IDs, Hail Mary uses the provider's source kind automatically. If
+you provide `source_kind`, it must match the built-in provider. `source_api` may be a
+plain provider source label or an `http://` or `https://` endpoint, but endpoint URLs
+cannot include an inline username or password.
+
 ## GitHub Workflow
 
 The first safe build may be pushed directly to `main`.

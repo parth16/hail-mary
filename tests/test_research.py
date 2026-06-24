@@ -21,8 +21,9 @@ from hailmary.research import (
     import_research_results,
     prepare_research_plan,
 )
+from hailmary.research.schemas import ResearchResultInput
 from hailmary.schemas.agents import AgentRole
-from hailmary.schemas.documents import IngestedDeal
+from hailmary.schemas.documents import DocumentType, IngestedDeal, SourceKind
 from hailmary.schemas.evidence import EvidenceStore
 from hailmary.scoring.memo import render_markdown_memo
 from hailmary.scoring.scorer import score_evidence_store
@@ -54,6 +55,18 @@ def test_builtin_research_providers_include_paid_when_requested() -> None:
         "pitchbook",
     }
     assert all(provider.default_enabled is False for provider in paid_providers)
+
+
+def test_research_result_source_kind_defaults_match_builtin_registry() -> None:
+    providers = builtin_research_providers(include_paid=True, include_meridian=True)
+    base_payload = _research_result()
+
+    for provider in providers:
+        payload = {**base_payload, "provider_id": provider.id}
+
+        result = ResearchResultInput.model_validate(payload)
+
+        assert result.source_kind == provider.source_kind
 
 
 def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> None:
@@ -402,6 +415,40 @@ def test_import_research_results_keeps_one_document_id_per_external_source(
     assert len({evidence.document_id for evidence in imported_evidence}) == 1
 
 
+def test_import_research_results_defaults_meridian_to_meridian_source_kind(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(
+        tmp_path,
+        extra_results=[
+            _research_result(
+                provider_id="meridian",
+                provider_name=None,
+                title="Meridian deal page excerpt",
+                source_url=None,
+                source_api="Meridian portal export",
+                licensing_notes="Authenticated source.",
+            )
+        ],
+    )
+
+    import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence = next(
+        evidence for evidence in saved_store.evidence if evidence.provider_id == "meridian"
+    )
+    assert meridian_evidence.source_kind == SourceKind.MERIDIAN
+    assert meridian_evidence.document_type == DocumentType.PLATFORM_DEAL_PAGE
+
+
 def test_import_research_results_escapes_external_metadata_in_memos(
     tmp_path: Path,
 ) -> None:
@@ -505,6 +552,65 @@ def test_import_research_results_rejects_unsafe_source_urls(
     )
 
     with pytest.raises(ResearchImportError, match=message):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize(
+    ("source_api", "message"),
+    [
+        ("https://api.example.com:bad/result", "source_api has an invalid port"),
+        (
+            "https://user:token@api.example.com/result",
+            "source_api cannot include a username or password",
+        ),
+    ],
+)
+def test_import_research_results_rejects_unsafe_url_like_source_apis(
+    tmp_path: Path,
+    source_api: str,
+    message: str,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-bad-source-api.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                source_url=None,
+                source_api=source_api,
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match=message):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_rejects_builtin_provider_source_kind_mismatch(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-bad-source-kind.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                source_url="https://portal.angellist.com/m/example/invest",
+                source_kind="web",
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match="source_kind meridian"):
         import_research_results(
             config=config,
             results_path=bad_results_path,

@@ -220,7 +220,14 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
                 "Use web_page, platform_deal_page, or memo."
             )
         if result.source_url is not None:
-            _validate_source_url(result.source_url, index=index)
+            _validate_url_reference(
+                result.source_url,
+                index=index,
+                field_name="source_url",
+            )
+        if result.source_api is not None:
+            _validate_source_api(result.source_api, index=index)
+        _validate_known_provider_source_kind(result, index=index)
         retrieved_at = _as_utc(result.retrieved_at)
         if retrieved_at > imported_at:
             raise ResearchImportError(
@@ -229,39 +236,67 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
         _provider_name(result)
 
 
-def _validate_source_url(source_url: str, *, index: int) -> None:
+def _validate_url_reference(source_url: str, *, index: int, field_name: str) -> None:
     try:
         parsed = urlparse(source_url)
     except ValueError as exc:
         raise ResearchImportError(
-            f"Research result {index} has a source_url that is not a valid URL."
+            f"Research result {index} has a {field_name} that is not a valid URL."
         ) from exc
     if parsed.scheme not in {"http", "https"}:
         raise ResearchImportError(
-            f"Research result {index} source_url must start with http:// or https://."
+            f"Research result {index} {field_name} must start with http:// or https://."
         )
     try:
         host = parsed.hostname
     except ValueError as exc:
         raise ResearchImportError(
-            f"Research result {index} has a source_url that is not a valid URL."
+            f"Research result {index} has a {field_name} that is not a valid URL."
         ) from exc
     if not parsed.netloc or host is None:
         raise ResearchImportError(
-            f"Research result {index} source_url must include a website host."
+            f"Research result {index} {field_name} must include a website host."
         )
     try:
         _port = parsed.port
     except ValueError as exc:
         raise ResearchImportError(
-            f"Research result {index} source_url has an invalid port."
+            f"Research result {index} {field_name} has an invalid port."
         ) from exc
     if parsed.username is not None or parsed.password is not None:
         raise ResearchImportError(
-            f"Research result {index} source_url cannot include a username or password."
+            f"Research result {index} {field_name} cannot include a username or password."
         )
     if any(character.isspace() for character in source_url):
-        raise ResearchImportError(f"Research result {index} source_url cannot contain spaces.")
+        raise ResearchImportError(
+            f"Research result {index} {field_name} cannot contain spaces."
+        )
+
+
+def _validate_source_api(source_api: str, *, index: int) -> None:
+    if _source_api_looks_like_url(source_api):
+        _validate_url_reference(source_api, index=index, field_name="source_api")
+
+
+def _source_api_looks_like_url(source_api: str) -> bool:
+    return (
+        source_api.startswith(("http://", "https://", "//"))
+        or "://" in source_api
+    )
+
+
+def _validate_known_provider_source_kind(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    provider = _known_providers().get(result.provider_id)
+    if provider is None or result.source_kind == provider.source_kind:
+        return
+    raise ResearchImportError(
+        f"Research result {index} uses provider_id {result.provider_id}, so "
+        f"source_kind must be {provider.source_kind.value}."
+    )
 
 
 def _match_results_to_deals(
