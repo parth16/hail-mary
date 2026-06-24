@@ -12,6 +12,12 @@ Rules for all future Codex runs:
 - Do not bypass authenticated access controls, CAPTCHA, 2FA, paywalls, or platform restrictions.
 - Do not upload confidential documents to third-party services except the explicitly configured LLM provider.
 - Use synthetic fixtures for committed tests. Do not commit real deal documents.
+- All code-writing Codex Desktop sessions must start in Worktree mode from latest main.
+- Before editing files, Codex must verify:
+  - this checkout is a git worktree, not the primary local checkout
+  - the base branch is current with `origin/main`
+  - the active branch is `codex/<short-description>`
+- If any check fails, Codex must stop before writing code.
 - After the initial main push, use `codex/<short-description>` branches and open ready-for-review PRs. Do not share draft PRs with the operator.
 - After publishing a PR, poll for Codex review activity every minute. Watch for the eyes reaction as the review-start signal, actionable Codex comments or reviews, and a thumbs-up reaction as the good-to-go signal.
 - If Codex leaves actionable comments, fix them, run relevant tests, push the update, and continue the review loop until Codex gives a thumbs up, the operator explicitly stops the loop, or five Codex auto review iterations have completed.
