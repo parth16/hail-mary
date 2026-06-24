@@ -172,8 +172,8 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
     return config
 
 
-def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
-    """Create local folders used for generated output."""
+def validate_local_state(config: AppConfig) -> AppConfig:
+    """Validate generated-output paths without creating local folders."""
 
     config = _expand_config_paths(config)
     _ensure_investment_limits(config)
@@ -189,11 +189,19 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
     _ensure_folder_path(config.data_dir)
     _ensure_folder_path(config.meridian_profile_dir)
     _ensure_folder_path(config.config_dir)
+    _ensure_config_file_path(config.config_path)
     _ensure_repo_local_path_ignored(config.data_dir, purpose="data directory")
     _ensure_repo_local_path_ignored(config.config_dir, purpose="local config directory")
     _ensure_repo_local_path_ignored(
         config.meridian_profile_dir, purpose="Meridian browser profile directory"
     )
+    return config
+
+
+def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
+    """Create local folders used for generated output."""
+
+    config = validate_local_state(config)
 
     folders = [
         config.data_dir,
@@ -213,7 +221,6 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
             raise ConfigError(f"Could not create folder at {folder}: {exc}") from exc
 
     _write_meridian_profile_marker(config.meridian_profile_dir)
-    _ensure_config_file_path(config.config_path)
     config_created = force or not config.config_path.exists()
     if config_created:
         try:
