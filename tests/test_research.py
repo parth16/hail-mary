@@ -606,6 +606,30 @@ def test_import_research_results_does_not_skip_incomplete_handwritten_rows(
         )
 
 
+def test_import_research_results_rejects_operator_supplied_template_skip_count(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "spoofed-skip-count-results.json"
+    bad_results_path.write_text(
+        json.dumps(
+            {
+                "skipped_blank_template_row_count": 99,
+                "results": [_research_result()],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match="skipped_blank_template_row_count"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
 def test_import_research_results_appends_source_linked_external_evidence(
     tmp_path: Path,
 ) -> None:

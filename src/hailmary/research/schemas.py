@@ -226,8 +226,9 @@ class ResearchResultInput(BaseModel):
 class ResearchResultsFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    _skipped_blank_template_row_count: int = PrivateAttr(default=0)
+
     results: list[ResearchResultInput]
-    skipped_blank_template_row_count: int = 0
 
     @field_validator("results")
     @classmethod

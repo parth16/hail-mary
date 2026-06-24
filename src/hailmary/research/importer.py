@@ -174,7 +174,7 @@ def import_research_results(
         input_path=input_path,
         imported_at=imported_at,
         dry_run=dry_run,
-        skipped_blank_template_row_count=results_file.skipped_blank_template_row_count,
+        skipped_blank_template_row_count=results_file._skipped_blank_template_row_count,
         deals=_import_deal_summaries(
             matches,
             store_paths=store_paths,
@@ -258,12 +258,9 @@ def _validate_results_file_payload(raw_payload: dict[str, object]) -> ResearchRe
             ) from exc
         result._original_row_number = index
         results.append(result)
-    return ResearchResultsFile.model_validate(
-        {
-            "results": results,
-            "skipped_blank_template_row_count": skipped_blank_template_row_count,
-        }
-    )
+    results_file = ResearchResultsFile.model_validate({"results": results})
+    results_file._skipped_blank_template_row_count = skipped_blank_template_row_count
+    return results_file
 
 
 def _is_blank_template_result(result: object) -> bool:
