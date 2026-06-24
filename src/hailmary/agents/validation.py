@@ -29,7 +29,7 @@ SOURCE_INSTRUCTION_PREFIX_PATTERN = re.compile(
     r"^(?:(?:note|important|instruction|instructions|prompt|system|system note)\s*[-:]\s*)+"
 )
 SOURCE_LIST_PREFIX_PATTERN = re.compile(
-    r"""^[\s>"'`]*(?:(?:[-*+>]+|\d+[\.)])\s*)+"""
+    r"""^[\s>"'`#]*(?:(?:[-*+>]+|\d+[\.)]|#+)\s*)*"""
 )
 
 
@@ -232,7 +232,7 @@ def _validate_evidence_reference(
             AgentValidationIssue(
                 location=location,
                 message=(
-                    "This recommendation cites an evidence record that contains an "
+                    "This citation uses an evidence record that contains an "
                     "instruction embedded in a source document. Add a precise quote "
                     "from the investment evidence instead."
                 ),
