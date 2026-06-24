@@ -2,7 +2,7 @@
 
 Hail Mary is a local-first personal diligence project for evaluating private startup investment opportunities from pitch decks, platform deal pages, legal documents, memos, spreadsheets, and optional web research.
 
-The current repository state is the build prompt and workflow scaffold. The implementation should proceed in phases from repository hygiene and local ingestion toward evidence validation, deterministic scoring, report generation, and finally optional LLM agents and external data adapters.
+The current repository state is a local-first diligence scaffold with ingestion, evidence validation, deterministic scoring, memo generation, and structured packet preparation for later model review. The implementation should continue in phases toward richer local analysis and optional external data adapters.
 
 ## Privacy First
 
@@ -34,16 +34,20 @@ The implementation prompt is in `hail-mary-codex-prompt.md`. It defines:
 
 ## Current Commands
 
-This first build includes:
+The current build includes:
 
 ```bash
 uv sync
 uv run hailmary init
 uv run hailmary ingest-folder ./pitch-decks
 uv run hailmary score-deals
+uv run hailmary prepare-agent-packets
+uv run hailmary validate-agent-output output.json packet.json
 ```
 
 `init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `score-deals` reads the local evidence stores and writes deterministic Markdown memos under `data/reports/`.
+
+`prepare-agent-packets` writes local JSON packets under `data/agent-packets/` for structured model review. These packets include selected evidence excerpts, allowed evidence IDs, verified claims, deterministic score context, and the required output schema. `validate-agent-output` checks a model's JSON output against the packet, rejecting invented evidence IDs, unsupported findings that are not marked unsupported, and quotes that do not appear in the cited evidence record.
 
 ## GitHub Workflow
 
@@ -58,7 +62,7 @@ After the first push:
 - when GitHub Codex automatic reviews are enabled, rely on the automatic review trigger; comment `@codex review` only if the trigger does not run and an immediate manual review is needed
 - never stage raw investment docs or generated confidential output
 
-After publishing a PR, monitor Codex review activity every minute. An eyes reaction means Codex has started reviewing. If Codex leaves actionable comments, address them, run the relevant tests, push the fixes, and keep monitoring. Stop the loop only when Codex gives a thumbs-up reaction or the operator explicitly stops the process.
+After publishing a PR, monitor Codex review activity every minute. An eyes reaction means Codex has started reviewing. If Codex leaves actionable comments, address them, run the relevant tests, push the fixes, and keep monitoring. Cap automatic review loops at five. After the fifth loop, run another loop only for P1 feedback; otherwise merge and move ahead.
 
 ## Product Standards
 
@@ -76,6 +80,7 @@ The first implementation phases should focus on:
 4. deterministic PDF/DOCX extraction
 5. evidence store and citation validation
 6. deterministic scoring and Markdown memos
+7. structured local packets for later model review
 
 No paid data source is required for the MVP. External data should be added later through optional provider adapters.
 

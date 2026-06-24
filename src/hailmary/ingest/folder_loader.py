@@ -333,6 +333,7 @@ def _is_generated_output_path(
         config.data_dir,
         config.data_dir / "processed",
         config.data_dir / "reports",
+        config.data_dir / "agent-packets",
         config.data_dir / "browser-profiles",
         config.meridian_profile_dir,
     ]
