@@ -166,6 +166,28 @@ def test_pdf_empty_page_is_marked_for_ocr_and_vision(
     assert result.pages[0].source_span_end == 0
 
 
+def test_pdf_short_text_page_does_not_recommend_ocr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class CoverPage:
+        def extract_text(self) -> str:
+            return "Acme Investor Deck"
+
+    class Reader:
+        pages = [CoverPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert not result.ocr_recommended
+    assert not result.vision_recommended
+    assert not result.pages[0].needs_ocr
+
+
 def test_pdf_text_page_records_source_span(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -193,6 +215,34 @@ def test_pdf_text_page_records_source_span(
     assert result.pages[0].source_span_start == 0
     assert result.pages[0].source_span_end == len(Reader.pages[0].text)
     assert result.pages[1].source_span_start == len(Reader.pages[0].text) + 2
+
+
+def test_pdf_source_spans_ignore_empty_pages_before_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class TextPage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        pages = [
+            TextPage(""),
+            TextPage("Readable traction text follows the empty cover page."),
+        ]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert result.combined_raw_text == Reader.pages[1].text
+    assert result.pages[1].source_span_start == 0
+    assert result.pages[1].source_span_end == len(Reader.pages[1].text)
 
 
 def test_docx_table_extraction_records_structured_rows(tmp_path: Path) -> None:
@@ -234,6 +284,37 @@ def test_html_table_extraction_records_structured_rows(tmp_path: Path) -> None:
     assert result.table_count == 1
     assert result.tables[0].rows == [["Customer", "Status"], ["Acme Bank", "Pilot"]]
     assert "Customer | Status" in result.tables[0].clean_text
+
+
+def test_html_nested_tables_are_captured_separately(tmp_path: Path) -> None:
+    html_path = tmp_path / "deal.html"
+    html_path.write_text(
+        """
+        <html><body>
+          <table>
+            <tbody>
+              <tr><th>Metric</th><th>Detail</th></tr>
+              <tr>
+                <td>ARR</td>
+                <td>
+                  <table>
+                    <tr><th>Nested</th><th>Value</th></tr>
+                    <tr><td>Expansion</td><td>Strong</td></tr>
+                  </table>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+
+    result = extract_document(html_path)
+
+    assert result.table_count == 2
+    assert result.tables[0].rows == [["Metric", "Detail"], ["ARR"]]
+    assert result.tables[1].rows == [["Nested", "Value"], ["Expansion", "Strong"]]
 
 
 def test_csv_extraction_records_table_text(tmp_path: Path) -> None:
@@ -293,6 +374,35 @@ def test_xlsx_extraction_records_table_text(tmp_path: Path) -> None:
     assert "Revenue | 100" in result.combined_text
     assert result.table_count == 1
     assert result.tables[0].rows == [["Revenue", "100"]]
+
+
+def test_xlsx_extraction_preserves_sparse_blank_cells(tmp_path: Path) -> None:
+    xlsx_path = tmp_path / "model.xlsx"
+    with zipfile.ZipFile(xlsx_path, "w") as workbook:
+        workbook.writestr(
+            "xl/sharedStrings.xml",
+            """
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <si><t>Metric</t></si>
+              <si><t>Value</t></si>
+            </sst>
+            """,
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c></row>
+              </sheetData>
+            </worksheet>
+            """,
+        )
+
+    result = extract_document(xlsx_path)
+
+    assert result.tables[0].rows == [["Metric", "", "Value"]]
+    assert result.tables[0].column_count == 3
 
 
 def test_xlsx_negative_shared_string_index_is_left_raw(tmp_path: Path) -> None:

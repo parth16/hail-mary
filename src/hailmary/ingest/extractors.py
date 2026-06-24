@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -94,7 +95,7 @@ def _make_page(
 ) -> ExtractedPage:
     cleaning = clean_extracted_text_with_metadata(raw_text)
     word_count = len(cleaning.clean_text.split())
-    page_needs_ocr = word_count < 10 if needs_ocr is None else needs_ocr
+    page_needs_ocr = not cleaning.clean_text.strip() if needs_ocr is None else needs_ocr
     page_needs_vision = page_needs_ocr if vision_recommended is None else vision_recommended
     source_span_end = (
         source_span_start + len(raw_text) if source_span_start is not None else None
@@ -174,7 +175,8 @@ def _extract_pdf(path: Path) -> ExtractionResult:
                 notes=notes,
             )
         )
-        source_offset += len(raw_text) + 2
+        if raw_text:
+            source_offset += len(raw_text) + 2
 
     return _result_from_pages(
         pages,
@@ -395,11 +397,8 @@ def _html_tables(soup: BeautifulSoup) -> list[ExtractedTable]:
     tables: list[ExtractedTable] = []
     for table_index, table in enumerate(soup.find_all("table"), start=1):
         rows: list[list[str]] = []
-        for row in table.find_all("tr"):
-            cells = [
-                " ".join(cell.get_text(" ").split())
-                for cell in row.find_all(["th", "td"])
-            ]
+        for row in _html_direct_table_rows(table):
+            cells = [_html_cell_text(cell) for cell in row.find_all(["th", "td"], recursive=False)]
             while cells and not cells[-1]:
                 cells.pop()
             if any(cells):
@@ -407,6 +406,26 @@ def _html_tables(soup: BeautifulSoup) -> list[ExtractedTable]:
         if rows:
             tables.append(_make_table(rows, table_index=table_index))
     return tables
+
+
+def _html_direct_table_rows(table: Any) -> list[Any]:
+    rows: list[Any] = []
+    for child in table.find_all(["thead", "tbody", "tfoot", "tr"], recursive=False):
+        if child.name == "tr":
+            rows.append(child)
+            continue
+        rows.extend(child.find_all("tr", recursive=False))
+    return rows
+
+
+def _html_cell_text(cell: Any) -> str:
+    copied_cell_soup = BeautifulSoup(str(cell), "html.parser")
+    copied_cell = copied_cell_soup.find(["th", "td"])
+    if copied_cell is None:
+        return ""
+    for nested_table in copied_cell.find_all("table"):
+        nested_table.decompose()
+    return " ".join(copied_cell.get_text(" ").split())
 
 
 def _extract_csv(path: Path) -> ExtractionResult:
@@ -499,15 +518,34 @@ def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[s
     for row in root.iter():
         if _xml_local_name(row.tag) != "row":
             continue
-        values = [
-            _xlsx_cell_value(cell, shared_strings)
-            for cell in row
-            if _xml_local_name(cell.tag) == "c"
-        ]
-        stripped_values = [value for value in values if value]
-        if stripped_values:
-            rows.append(stripped_values)
+        values: list[str] = []
+        for cell in row:
+            if _xml_local_name(cell.tag) != "c":
+                continue
+            cell_index = _xlsx_cell_index(cell)
+            if cell_index is not None:
+                while len(values) < cell_index:
+                    values.append("")
+            values.append(_xlsx_cell_value(cell, shared_strings))
+        while values and not values[-1]:
+            values.pop()
+        if any(values):
+            rows.append(values)
     return rows
+
+
+def _xlsx_cell_index(cell: ElementTree.Element) -> int | None:
+    cell_reference = cell.attrib.get("r")
+    if not cell_reference:
+        return None
+    match = re.match(r"([A-Za-z]+)", cell_reference)
+    if not match:
+        return None
+
+    index = 0
+    for character in match.group(1).upper():
+        index = index * 26 + (ord(character) - ord("A") + 1)
+    return index - 1
 
 
 def _xlsx_cell_value(cell: ElementTree.Element, shared_strings: list[str]) -> str:
