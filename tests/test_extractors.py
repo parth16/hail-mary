@@ -210,6 +210,34 @@ def test_pdf_low_text_page_recommends_ocr(
     assert result.pages[0].needs_ocr
 
 
+def test_pdf_low_text_divider_with_readable_page_does_not_warn_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class TextPage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        pages = [
+            TextPage("1"),
+            TextPage("Readable traction text with customer growth and revenue context."),
+        ]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert result.pages[0].needs_ocr
+    assert not result.ocr_recommended
+    assert not result.vision_recommended
+
+
 def test_pdf_text_page_records_source_span(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

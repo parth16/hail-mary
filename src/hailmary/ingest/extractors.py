@@ -24,6 +24,7 @@ from hailmary.schemas.documents import (
 from hailmary.utils.text_cleaning import clean_extracted_text_with_metadata
 
 MAX_XLSX_COLUMN_INDEX = 16_383
+MAX_XLSX_COLUMN_LETTERS = 3
 INVALID_XLSX_CELL_INDEX = -1
 
 
@@ -134,15 +135,31 @@ def _result_from_pages(
     tables: list[ExtractedTable] | None = None,
     notes: str | None = None,
 ) -> ExtractionResult:
+    ocr_recommended = _document_ocr_recommended(pages)
     return ExtractionResult(
         pages=pages,
         tables=tables or [],
         page_count=page_count,
         extraction_quality=_quality_from_pages(pages),
-        ocr_recommended=any(page.needs_ocr for page in pages),
-        vision_recommended=any(page.vision_recommended for page in pages),
+        ocr_recommended=ocr_recommended,
+        vision_recommended=ocr_recommended
+        or any(page.vision_recommended and page.notes for page in pages),
         notes=notes,
     )
+
+
+def _document_ocr_recommended(pages: list[ExtractedPage]) -> bool:
+    if not pages:
+        return False
+
+    ocr_pages = [page for page in pages if page.needs_ocr]
+    if not ocr_pages:
+        return False
+    if any(page.notes or not page.raw_text.strip() for page in ocr_pages):
+        return True
+
+    readable_pages = [page for page in pages if page.word_count > 2]
+    return not readable_pages
 
 
 def _extract_pdf(path: Path) -> ExtractionResult:
@@ -546,8 +563,9 @@ def _xlsx_sheet_rows(sheet_xml: bytes, shared_strings: list[str]) -> list[list[s
             if cell_index == INVALID_XLSX_CELL_INDEX:
                 continue
             if cell_index is not None:
-                while len(values) < cell_index:
-                    values.append("")
+                if cell_index > MAX_XLSX_COLUMN_INDEX:
+                    continue
+                values.extend([""] * max(cell_index - len(values), 0))
             values.append(_xlsx_cell_value(cell, shared_strings))
         while values and not values[-1]:
             values.pop()
@@ -564,8 +582,12 @@ def _xlsx_cell_index(cell: ElementTree.Element) -> int | None:
     if not match:
         return INVALID_XLSX_CELL_INDEX
 
+    column_name = match.group(1).upper()
+    if len(column_name) > MAX_XLSX_COLUMN_LETTERS:
+        return INVALID_XLSX_CELL_INDEX
+
     index = 0
-    for character in match.group(1).upper():
+    for character in column_name:
         index = index * 26 + (ord(character) - ord("A") + 1)
     zero_based_index = index - 1
     if zero_based_index > MAX_XLSX_COLUMN_INDEX:
