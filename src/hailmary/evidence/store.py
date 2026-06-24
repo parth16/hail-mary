@@ -154,18 +154,19 @@ def _document_evidence_records(
     records: list[EvidenceRecord] = []
     source = document.source
     source_freshness = _source_freshness(source, now=built_at)
-    table_texts = {
+    table_texts = [
         table.clean_text.strip()
         for table in document.tables
         if table.clean_text.strip()
-    }
+    ]
 
     for page in document.pages:
         text = page.clean_text.strip()
         if not text:
             continue
-        if text in table_texts:
+        if _is_table_backed_page_text(text, table_texts):
             continue
+        span_start, span_end = _safe_clean_page_span(page_raw_text=page.raw_text, text=text)
         records.append(
             EvidenceRecord(
                 id=_evidence_id(
@@ -183,6 +184,8 @@ def _document_evidence_records(
                 file_type=source.file_type,
                 text=text,
                 page_number=page.page_number,
+                source_span_start=span_start,
+                source_span_end=span_end,
                 source_freshness=source_freshness,
             )
         )
@@ -216,6 +219,26 @@ def _document_evidence_records(
         )
 
     return records
+
+
+def _is_table_backed_page_text(page_text: str, table_texts: list[str]) -> bool:
+    if not table_texts:
+        return False
+    remaining_text = page_text
+    for table_text in table_texts:
+        remaining_text = remaining_text.replace(table_text, "", 1)
+    return not remaining_text.strip()
+
+
+def _safe_clean_page_span(
+    *,
+    page_raw_text: str,
+    text: str,
+) -> tuple[int | None, int | None]:
+    if text != page_raw_text.strip():
+        return None, None
+    start = len(page_raw_text) - len(page_raw_text.lstrip())
+    return start, start + len(text)
 
 
 def _source_freshness(source: SourceDocument, *, now: datetime) -> SourceFreshness:

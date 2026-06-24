@@ -9,7 +9,12 @@ from hailmary.evidence import build_evidence_store, verify_citation
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.schemas.documents import (
     DocumentType,
+    ExtractedPage,
+    ExtractionQuality,
     FileType,
+    IngestedDeal,
+    IngestedDocument,
+    SourceDocument,
     SourceKind,
 )
 from hailmary.schemas.evidence import (
@@ -126,6 +131,97 @@ def test_table_evidence_is_not_duplicated_as_page_evidence(tmp_path: Path) -> No
     ]
     assert deal.evidence_count == 1
     assert deal.claim_count == 1
+
+
+def test_multi_table_page_text_is_not_duplicated_as_page_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "MultiTableCo"
+    company.mkdir(parents=True)
+    (company / "terms.csv").write_text(
+        "Valuation cap,$8M\nDiscount,20%\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    assert [evidence["evidence_kind"] for evidence in saved_store["evidence"]] == [
+        EvidenceKind.TABLE_TEXT
+    ]
+    assert deal.evidence_count == 1
+    assert deal.claim_count == 2
+
+
+def test_page_evidence_keeps_safe_clean_text_source_span() -> None:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    source = SourceDocument(
+        id="doc_test",
+        deal_id="deal_test",
+        path=Path("memo.txt"),
+        source_kind=SourceKind.LOCAL_FILE,
+        document_type=DocumentType.MEMO,
+        file_type=FileType.TXT,
+        title="memo",
+        ingested_at=created_at,
+        sha256="abc",
+        extraction_quality=ExtractionQuality.HIGH,
+    )
+    document = IngestedDocument(
+        source=source,
+        pages=[
+            ExtractedPage(
+                page_number=None,
+                raw_text="  Valuation cap $8M.  ",
+                clean_text="Valuation cap $8M.",
+                word_count=3,
+            )
+        ],
+        tables=[],
+        output_path=Path("out.json"),
+    )
+    deal = IngestedDeal(id="deal_test", company_name="SpanCo", documents=[document])
+
+    store = build_evidence_store(deal, created_at=created_at)
+
+    assert store.evidence[0].source_span_start == 2
+    assert store.evidence[0].source_span_end == 20
+
+
+def test_page_evidence_drops_span_when_clean_text_changes_raw_text() -> None:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    source = SourceDocument(
+        id="doc_test",
+        deal_id="deal_test",
+        path=Path("memo.txt"),
+        source_kind=SourceKind.LOCAL_FILE,
+        document_type=DocumentType.MEMO,
+        file_type=FileType.TXT,
+        title="memo",
+        ingested_at=created_at,
+        sha256="abc",
+        extraction_quality=ExtractionQuality.MEDIUM,
+    )
+    document = IngestedDocument(
+        source=source,
+        pages=[
+            ExtractedPage(
+                page_number=None,
+                raw_text="Valuation   cap $8M.",
+                clean_text="Valuation cap $8M.",
+                word_count=3,
+            )
+        ],
+        tables=[],
+        output_path=Path("out.json"),
+    )
+    deal = IngestedDeal(id="deal_test", company_name="SpanCo", documents=[document])
+
+    store = build_evidence_store(deal, created_at=created_at)
+
+    assert store.evidence[0].source_span_start is None
+    assert store.evidence[0].source_span_end is None
 
 
 def test_verify_citation_checks_evidence_id_span_and_quote() -> None:
