@@ -378,6 +378,61 @@ def test_score_evidence_store_ignores_coordinated_negated_traction() -> None:
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
 
 
+def test_score_evidence_store_ignores_qualified_negated_traction() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_negative_traction",
+            "The company has no meaningful revenue or customers yet.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert scored.recommendation == Recommendation.PASS
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+@pytest.mark.parametrize(
+    "traction_text",
+    [
+        "No churn among paid customers.",
+        "No retention issues among enterprise customers.",
+    ],
+)
+def test_score_evidence_store_keeps_benign_no_phrases_as_positive_traction(
+    traction_text: str,
+) -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", traction_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.DEVELOPING
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_traction"
+    ]
+
+
 def test_score_evidence_store_keeps_mixed_current_traction_evidence() -> None:
     evidence = [
         _evidence(
@@ -424,6 +479,60 @@ def test_score_evidence_store_ignores_negated_funding_language() -> None:
     assert _score_factor(scored, "Next-round fundability").evidence_ids == []
 
 
+def test_score_evidence_store_ignores_qualified_negated_funding_language() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers."),
+        _evidence("ev_funding", "There is no committed lead investor yet."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.fundability_risk == FundabilityRisk.MEDIUM
+    assert _score_factor(scored, "Next-round fundability").evidence_ids == []
+
+
+@pytest.mark.parametrize(
+    "funding_text",
+    [
+        "No concerns from the lead investor.",
+        "No lead investor concerns.",
+        "No lead investor issues.",
+    ],
+)
+def test_score_evidence_store_keeps_benign_lead_investor_concern_phrases(
+    funding_text: str,
+) -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers."),
+        _evidence("ev_funding", funding_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.fundability_risk == FundabilityRisk.LOW
+    assert _score_factor(scored, "Next-round fundability").evidence_ids == [
+        "ev_funding"
+    ]
+
+
 def test_score_evidence_store_cites_early_pmf_evidence() -> None:
     evidence = [
         _evidence(
@@ -454,6 +563,29 @@ def test_score_evidence_store_ignores_negated_early_pmf_language() -> None:
             "ev_terms",
             "Valuation cap $8M. Discount 20%. Round size $1M. "
             "There are no pilots, no usage, and no retention yet.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+def test_score_evidence_store_ignores_qualified_negated_early_pmf_language() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "The company has no signed pilot yet.",
         )
     ]
     claims = [
@@ -707,6 +839,30 @@ def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
     assert "not legal, tax, financial, or investment advice" in markdown
 
 
+def test_render_markdown_memo_escapes_untrusted_document_paths() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M.").model_copy(
+            update={
+                "document_path": Path(
+                    "docs/[fake](example)\n"
+                    "# Fake Heading\n"
+                    "- ev_fake: injected.md"
+                )
+            }
+        )
+    ]
+    claim = _claim("valuation cap", "$8M", "ev_terms")
+    store = _store(evidence=evidence, claims=[claim])
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert "\\[fake\\]\\(example\\)" in markdown
+    assert "\\# Fake Heading" in markdown
+    assert "\n# Fake Heading" not in markdown
+    assert "\n- ev_fake:" not in markdown
+
+
 def test_render_markdown_memo_includes_cited_evidence_beyond_first_25() -> None:
     evidence = [
         _evidence(f"ev_{index}", f"Background evidence {index}.")
@@ -841,6 +997,31 @@ def test_score_latest_ingestion_allocates_scarce_capital_by_score(
     assert scored_by_company["B Higher Score"].check_size == 2_500
     assert scored_by_company["A Lower Score"].recommendation == Recommendation.PASS
     assert scored_by_company["A Lower Score"].check_size == 0
+
+
+def test_score_latest_ingestion_does_not_penalize_fresh_local_files(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Fresh Local"
+    company.mkdir(parents=True)
+    (company / "terms.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M.",
+        encoding="utf-8",
+    )
+    (company / "traction.txt").write_text(
+        "ARR revenue growth with paid customers and retention.",
+        encoding="utf-8",
+    )
+    config = AppConfig(data_dir=tmp_path / "data")
+    ingest_folder(root, config=config)
+
+    result = score_latest_ingestion(config=config)
+
+    scored = result.scored_deals[0]
+    assert scored.total_score == 75
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.check_size == 2_500
 
 
 def test_score_latest_ingestion_writes_private_markdown_memos(tmp_path: Path) -> None:

@@ -221,9 +221,7 @@ def _load_results_file(path: Path) -> ResearchResultsFile:
         raise ResearchImportError(
             f"The research results file is not valid JSON: {exc.msg}."
         ) from exc
-    if isinstance(raw_payload, list):
-        raw_payload = {"results": raw_payload}
-    elif not isinstance(raw_payload, dict):
+    if not isinstance(raw_payload, dict):
         raise ResearchImportError(
             "The research results file must be a JSON object with a `results` list."
         )

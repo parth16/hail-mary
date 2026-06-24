@@ -127,6 +127,14 @@ def _clean_optional_url(url: str | None, *, field_name: str) -> str | None:
         raise ResearchPlanError(f"The {field_name} is not a valid URL.") from exc
     if not parsed.netloc or host is None:
         raise ResearchPlanError(f"The {field_name} must include a website host.")
+    try:
+        _port = parsed.port
+    except ValueError as exc:
+        raise ResearchPlanError(f"The {field_name} has an invalid port.") from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise ResearchPlanError(
+            f"The {field_name} cannot include a username or password."
+        )
     if any(character.isspace() for character in cleaned):
         raise ResearchPlanError(f"The {field_name} cannot contain spaces.")
     return cleaned

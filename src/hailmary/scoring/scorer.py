@@ -38,33 +38,28 @@ EARLY_PMF_KEYWORDS = ("pilot", "beta", "loi", "waitlist", "design partner")
 FUNDABILITY_KEYWORDS = ("lead investor", "institutional", "series a", "seed", "follow-on")
 INVEST_MINIMUM_SCORE = 75
 HARD_MAX_CHECK = max(CHECK_SIZE_TIERS)
+TRACTION_NEGATED_SIGNAL = (
+    r"(?:customers?|revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)"
+)
+TRACTION_NEGATED_QUALIFIERS = (
+    r"(?:(?:meaningful|material|measurable|real|recurring|commercial|signed|"
+    r"active|current|clear|validated|paying|paid|confirmed|contracted|"
+    r"production|live)\s+){0,3}"
+)
+BENIGN_NEGATED_TRACTION_NOUNS = r"(?:issues?|concerns?|problems?|churn|complaints?)"
 NEGATED_TRACTION_PATTERNS = (
     re.compile(r"\bpre[-\s]?revenue\b", re.IGNORECASE),
     re.compile(
-        r"\bno\s+(?:paid\s+)?customers?\s+or\s+"
-        r"(?:revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
+        rf"\bno\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
+        rf"(?:(?:(?:\s*,\s*(?:(?:or|and)\s+)?)|\s+(?:or|and)\s+)"
+        rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b))*",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\bno\s+(?:revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)"
-        r"\s+or\s+(?:paid\s+)?customers?\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\bno\s+(?:usage|retention|growth|pilots?|beta|lois?|waitlist)"
-        r"(?:(?:(?:\s*,\s*(?:(?:or|and)\s+)?)|\s+(?:or|and)\s+)"
-        r"(?:usage|retention|growth|pilots?|beta|lois?|waitlist))*\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\bno\s+(?:paid\s+)?customers?\b", re.IGNORECASE),
-    re.compile(r"\bno\s+revenue\b", re.IGNORECASE),
-    re.compile(
-        r"\bno\s+(?:usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\bwithout\s+"
-        r"(?:customers?|revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
+        rf"\bwithout\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)",
         re.IGNORECASE,
     ),
     re.compile(r"\bnot\s+(?:yet\s+)?(?:generating\s+)?revenue\b", re.IGNORECASE),
@@ -74,9 +69,20 @@ NEGATED_TRACTION_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 NEGATED_FUNDING_PATTERNS = (
-    re.compile(r"\bno\s+lead\s+investor\b", re.IGNORECASE),
-    re.compile(r"\bwithout\s+(?:a\s+)?lead\s+investor\b", re.IGNORECASE),
+    re.compile(
+        r"\bno\s+(?:(?:committed|identified|confirmed|named|signed|"
+        r"secured|current|active)\s+)?lead\s+investor\b"
+        rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bwithout\s+(?:a\s+)?(?:(?:committed|identified|confirmed|named|"
+        r"signed|secured|current|active)\s+)?lead\s+investor\b"
+        rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bno\s+institutional(?:\s+(?:investors?|follow[-\s]?on))?\b", re.IGNORECASE),
     re.compile(r"\bwithout\s+institutional(?:\s+investors?)?\b", re.IGNORECASE),
     re.compile(r"\bno\s+(?:seed|follow[-\s]?on)(?:\s+\w+){0,3}\b", re.IGNORECASE),

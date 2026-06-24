@@ -310,8 +310,9 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
     )
     external_details = _external_source_details(evidence)
     detail_text = f"; {external_details}" if external_details else ""
+    document_path = _memo_metadata_value(str(evidence.document_path))
     return (
-        f"- {evidence.id}: {evidence.document_path} "
+        f"- {evidence.id}: {document_path} "
         f"({locator}, {evidence.evidence_kind}{detail_text})."
     )
 
