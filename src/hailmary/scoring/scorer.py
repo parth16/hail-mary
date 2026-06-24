@@ -52,7 +52,7 @@ NEGATED_TRACTION_PATTERNS = (
     ),
     re.compile(
         r"\bno\s+(?:usage|retention|growth|pilots?|beta|lois?|waitlist)"
-        r"(?:\s+(?:or|and)\s+"
+        r"(?:(?:(?:\s*,\s*(?:(?:or|and)\s+)?)|\s+(?:or|and)\s+)"
         r"(?:usage|retention|growth|pilots?|beta|lois?|waitlist))*\b",
         re.IGNORECASE,
     ),

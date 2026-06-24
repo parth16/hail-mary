@@ -494,6 +494,29 @@ def test_score_evidence_store_ignores_coordinated_negated_pmf_language() -> None
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
 
 
+def test_score_evidence_store_ignores_comma_separated_negated_pmf_language() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "The company has no usage, retention, or growth yet.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
 def test_score_evidence_store_excludes_negated_early_pmf_from_citations() -> None:
     evidence = [
         _evidence(

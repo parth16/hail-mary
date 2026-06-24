@@ -142,14 +142,11 @@ def validate_agent_output(
                     message="An INVEST recommendation cannot use a $0 check size.",
                 )
             )
-        if (
-            output.recommendation.recommendation == Recommendation.INVEST
-            and not output.recommendation.evidence
-        ):
+        if not output.recommendation.evidence:
             issues.append(
                 AgentValidationIssue(
                     location="recommendation.evidence",
-                    message="An INVEST recommendation needs at least one cited evidence ID.",
+                    message="A recommendation needs at least one cited evidence ID.",
                 )
             )
         for reference_index, reference in enumerate(output.recommendation.evidence):

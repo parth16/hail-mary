@@ -303,9 +303,11 @@ def load_agent_input_packet(path: Path) -> AgentInputPacket:
     try:
         return AgentInputPacket.model_validate_json(raw_packet)
     except ValidationError as exc:
+        detail = _validation_error_detail(exc)
         raise AgentPacketError(
             f"The agent packet at {path} could not be read. "
-            "Prepare the packet again before validating model output."
+            "Prepare the packet again before validating model output. "
+            f"First problem: {detail}"
         ) from exc
 
 
@@ -314,10 +316,23 @@ def load_agent_review_output(path: Path) -> AgentReviewOutput:
     try:
         return AgentReviewOutput.model_validate_json(raw_output)
     except ValidationError as exc:
+        detail = _validation_error_detail(exc)
         raise AgentPacketError(
             f"The agent output at {path} could not be read as structured JSON. "
-            "Ask the model to return only JSON that matches AgentReviewOutput."
+            "Ask the model to return only JSON that matches AgentReviewOutput. "
+            f"First problem: {detail}"
         ) from exc
+
+
+def _validation_error_detail(exc: ValidationError) -> str:
+    errors = exc.errors()
+    if not errors:
+        return "document: Invalid structured JSON."
+    first_error = errors[0]
+    location = first_error.get("loc", ())
+    location_text = ".".join(str(part) for part in location) or "document"
+    message = str(first_error.get("msg", "Invalid structured JSON."))
+    return f"{location_text}: {message}."
 
 
 def _select_evidence_records(

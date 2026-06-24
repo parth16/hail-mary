@@ -13,6 +13,7 @@ from hailmary.agents.packets import (
     AgentPacketError,
     build_agent_input_packet,
     load_agent_input_packet,
+    load_agent_review_output,
     prepare_agent_packets,
 )
 from hailmary.agents.validation import validate_agent_output
@@ -490,7 +491,17 @@ def test_validate_agent_output_counts_recommendation_as_substantive_output() -> 
     assert result.valid
 
 
-def test_validate_agent_output_requires_evidence_for_invest_recommendation() -> None:
+@pytest.mark.parametrize(
+    ("recommendation", "check_size"),
+    [
+        (Recommendation.INVEST, 1_000),
+        (Recommendation.PASS, 0),
+    ],
+)
+def test_validate_agent_output_requires_evidence_for_recommendation(
+    recommendation: Recommendation,
+    check_size: int,
+) -> None:
     packet = _agent_packet()
     output = AgentReviewOutput(
         deal_id=packet.deal_id,
@@ -498,9 +509,9 @@ def test_validate_agent_output_requires_evidence_for_invest_recommendation() -> 
         agent_role=packet.agent_role,
         summary=_supported_summary("The recommendation omits cited evidence."),
         recommendation=AgentRecommendationRationale(
-            recommendation=Recommendation.INVEST,
-            check_size=1_000,
-            reason="The model recommends investing without evidence.",
+            recommendation=recommendation,
+            check_size=check_size,
+            reason="The model recommends a decision without evidence.",
             evidence=[],
         ),
     )
@@ -614,6 +625,27 @@ def test_prepare_agent_packets_missing_summary_has_plain_english_error(
 ) -> None:
     with pytest.raises(AgentPacketError, match="Run `hailmary ingest-folder`"):
         prepare_agent_packets(config=AppConfig(data_dir=tmp_path / "data"))
+
+
+def test_load_agent_review_output_preserves_validation_detail(tmp_path: Path) -> None:
+    output_path = tmp_path / "bad-output.json"
+    output_path.write_text(
+        """{
+  "deal_id": "deal_test",
+  "company_name": "AgentCo",
+  "agent_role": "overall",
+  "summary": "This should be a list of structured summary points."
+}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AgentPacketError) as exc_info:
+        load_agent_review_output(output_path)
+
+    message = str(exc_info.value)
+    assert "First problem" in message
+    assert "summary" in message
 
 
 def test_prepare_agent_packets_command_has_plain_english_output(
