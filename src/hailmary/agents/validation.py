@@ -29,7 +29,7 @@ SOURCE_INSTRUCTION_PREFIX_PATTERN = re.compile(
     r"^(?:(?:"
     r"assistant|chat|developer|important|instruction|instructions|model|note|"
     r"operator|prompt|speaker|system|system note|system prompt|user"
-    r")\s*[-:]\s*)+"
+    r")\s*(?:[-:\u2010-\u2015\u2212])\s*)+"
 )
 SOURCE_LIST_PREFIX_PATTERN = re.compile(
     r"""^[\s>"'`#]*(?:(?:[-*+>]+|\d+[\.)]|#+)\s*)*"""
@@ -254,7 +254,7 @@ def _looks_like_embedded_source_instruction(text: str) -> bool:
 def _source_instruction_candidates(text: str) -> list[str]:
     candidates: list[str] = []
     for line in text.splitlines() or [text]:
-        for segment in re.split(r"(?<=[.!?:;])\s+", line):
+        for segment in [line, *re.split(r"(?<=[.!?;])\s+", line)]:
             normalized = " ".join(segment.lower().split())
             if not normalized:
                 continue

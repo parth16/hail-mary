@@ -105,6 +105,7 @@ def test_prepare_research_plan_rejects_website_for_multiple_companies(
     [
         "https://",
         "https://example .com",
+        "https://[broken",
         "mailto:founder@example.com",
     ],
 )

@@ -115,10 +115,17 @@ def _clean_optional_url(url: str | None, *, field_name: str) -> str | None:
     cleaned = url.strip()
     if not cleaned:
         return None
-    parsed = urlparse(cleaned)
+    try:
+        parsed = urlparse(cleaned)
+    except ValueError as exc:
+        raise ResearchPlanError(f"The {field_name} is not a valid URL.") from exc
     if parsed.scheme not in {"http", "https"}:
         raise ResearchPlanError(f"The {field_name} must start with http:// or https://.")
-    if not parsed.netloc:
+    try:
+        host = parsed.hostname
+    except ValueError as exc:
+        raise ResearchPlanError(f"The {field_name} is not a valid URL.") from exc
+    if not parsed.netloc or host is None:
         raise ResearchPlanError(f"The {field_name} must include a website host.")
     if any(character.isspace() for character in cleaned):
         raise ResearchPlanError(f"The {field_name} cannot contain spaces.")
