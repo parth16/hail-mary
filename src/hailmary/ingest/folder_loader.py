@@ -92,6 +92,7 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
         processed_document = IngestedDocument(
             source=document,
             pages=extraction.pages,
+            tables=extraction.tables,
             output_path=_write_document(config, deal_id, document, extraction),
         )
 
@@ -250,9 +251,12 @@ def _build_document(
         ingested_at=ingested_at,
         retrieved_at=None,
         page_count=extraction.page_count,
+        table_count=extraction.table_count,
         sha256=sha256,
         confidentiality_detected=_has_confidentiality_marker(confidentiality_text),
         extraction_quality=extraction.extraction_quality,
+        ocr_recommended=extraction.ocr_recommended,
+        vision_recommended=extraction.vision_recommended,
         notes=_join_notes(extraction.notes, hash_note),
     )
 
@@ -270,6 +274,7 @@ def _write_document(
     payload = IngestedDocument(
         source=document,
         pages=extraction.pages,
+        tables=extraction.tables,
         output_path=output_path,
     )
     _write_private_text(

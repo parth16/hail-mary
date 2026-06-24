@@ -58,9 +58,12 @@ class SourceDocument(BaseModel):
     ingested_at: datetime
     retrieved_at: datetime | None = None
     page_count: int | None = None
+    table_count: int = 0
     sha256: str | None
     confidentiality_detected: bool = False
     extraction_quality: ExtractionQuality
+    ocr_recommended: bool = False
+    vision_recommended: bool = False
     notes: str | None = None
 
 
@@ -70,12 +73,29 @@ class ExtractedPage(BaseModel):
     clean_text: str
     word_count: int = 0
     needs_ocr: bool = False
+    vision_recommended: bool = False
+    source_span_start: int | None = None
+    source_span_end: int | None = None
+    removed_boilerplate_lines: int = 0
+    notes: str | None = None
+
+
+class ExtractedTable(BaseModel):
+    page_number: int | None = None
+    table_index: int
+    rows: list[list[str]] = Field(default_factory=list)
+    clean_text: str
+    row_count: int = 0
+    column_count: int = 0
+    source_span_start: int | None = None
+    source_span_end: int | None = None
     notes: str | None = None
 
 
 class IngestedDocument(BaseModel):
     source: SourceDocument
     pages: list[ExtractedPage] = Field(default_factory=list)
+    tables: list[ExtractedTable] = Field(default_factory=list)
     output_path: Path
 
 

@@ -107,6 +107,19 @@ def ingest_folder(
     )
     console.print(f"Saved the scan summary to {summary.summary_path}.")
 
+    image_text_documents = sum(
+        1
+        for deal in summary.deals
+        for document in deal.documents
+        if document.source.ocr_recommended or document.source.vision_recommended
+    )
+    if image_text_documents:
+        document_word = "document" if image_text_documents == 1 else "documents"
+        console.print(
+            f"{image_text_documents} {document_word} may need image-based text reading "
+            "(OCR) before Hail Mary can use all of their content."
+        )
+
     if summary.skipped_files:
         console.print(
             f"Skipped {len(summary.skipped_files)} unsupported or ignored files. "

@@ -234,6 +234,12 @@ def test_spreadsheets_are_recorded_with_extracted_text(tmp_path: Path) -> None:
     file_types = {doc.source.file_type for doc in summary.deals[0].documents}
     assert file_types == {FileType.CSV, FileType.XLSX}
     assert all(doc.pages for doc in summary.deals[0].documents)
+    assert all(doc.source.table_count == 1 for doc in summary.deals[0].documents)
+    assert all(doc.tables for doc in summary.deals[0].documents)
+
+    saved_document = json.loads(summary.deals[0].documents[0].output_path.read_text())
+    assert saved_document["source"]["table_count"] == 1
+    assert saved_document["tables"]
 
 
 def test_images_are_skipped_until_ocr_exists(tmp_path: Path) -> None:

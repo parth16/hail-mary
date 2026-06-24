@@ -9,6 +9,9 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from hailmary.cli import app
+from hailmary.ingest import folder_loader
+from hailmary.ingest.extractors import ExtractionResult
+from hailmary.schemas.documents import ExtractedPage, ExtractionQuality
 
 runner = CliRunner()
 
@@ -42,6 +45,41 @@ def test_ingest_folder_command_writes_summary(tmp_path: Path, monkeypatch: Monke
     summary_path = data_dir / "processed" / "ingestion_summary.json"
     saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert saved_summary["deals"][0]["company_name"] == "Acme"
+
+
+def test_ingest_folder_warns_when_documents_need_image_text_reading(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "pitch-decks" / "ScanCo"
+    source.mkdir(parents=True)
+    (source / "ScanCo pitch deck.pdf").write_bytes(b"%PDF-1.4")
+
+    def fake_extract_document(path: Path) -> ExtractionResult:
+        assert path.name == "ScanCo pitch deck.pdf"
+        page = ExtractedPage(
+            page_number=1,
+            raw_text="",
+            clean_text="",
+            needs_ocr=True,
+            vision_recommended=True,
+        )
+        return ExtractionResult(
+            pages=[page],
+            page_count=1,
+            extraction_quality=ExtractionQuality.LOW,
+            ocr_recommended=True,
+            vision_recommended=True,
+        )
+
+    monkeypatch.setattr(folder_loader, "extract_document", fake_extract_document)
+
+    result = runner.invoke(app, ["ingest-folder", str(source.parent)])
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "may need image-based text reading (OCR)" in normalized_output
+    assert "before Hail Mary can use all of their content" in normalized_output
 
 
 def test_ingest_folder_unreadable_path_has_plain_english_warning(
