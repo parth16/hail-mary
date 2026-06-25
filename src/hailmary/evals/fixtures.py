@@ -372,6 +372,232 @@ def run_ocr_image_unavailable_fixture(work_dir: Path) -> None:
     )
 
 
+def run_ocr_fake_success_source_linkage_fixture(work_dir: Path) -> None:
+    class SuccessOcrEngine:
+        def image_to_text(
+            self,
+            path: Path,
+            *,
+            page_number: int | None = None,
+        ) -> LocalOcrResult:
+            del path
+            _expect_equal(
+                page_number,
+                1,
+                "Expected fake image OCR to preserve page number 1.",
+            )
+            return LocalOcrResult(
+                text="Valuation cap $8M. Minimum investment $1,000.",
+                confidence=0.93,
+            )
+
+        def pdf_page_to_text(self, path: Path, *, page_number: int) -> LocalOcrResult:
+            del path, page_number
+            raise EvalFixtureFailure("Expected OCR source-linkage fixture to use an image.")
+
+    root = (work_dir / "ocr-success-pitch-decks").resolve(strict=False)
+    company = root / "Synthetic OcrSuccessCo"
+    company.mkdir(parents=True)
+    (company / "scan.png").write_bytes(b"synthetic image placeholder")
+
+    summary = ingest_folder(
+        root,
+        config=AppConfig(data_dir=(work_dir / "ocr-success-data").resolve(strict=False)),
+        ocr_engine=SuccessOcrEngine(),
+    )
+    _expect_equal(
+        summary.document_count,
+        1,
+        "Expected fake OCR success ingestion to process one synthetic image.",
+    )
+    deal = summary.deals[0]
+    _expect_equal(
+        deal.evidence_count,
+        1,
+        "Expected fake OCR success to create one source-linked evidence record.",
+    )
+    _expect_equal(
+        deal.claim_count,
+        2,
+        "Expected fake OCR success to extract valuation and minimum-investment claims.",
+    )
+    document = deal.documents[0]
+    _expect(
+        document.source.ocr_applied and document.source.ocr_confidence == 0.93,
+        "Expected OCR-applied source metadata to preserve fake OCR confidence.",
+        actual_source=document.source.model_dump_json(),
+    )
+    _expect(
+        not document.source.ocr_recommended,
+        "Expected successful fake OCR not to leave the source marked as OCR-needed.",
+        actual_source=document.source.model_dump_json(),
+    )
+    page = document.pages[0]
+    _expect(
+        page.ocr_applied and page.ocr_confidence == 0.93,
+        "Expected OCR-applied page metadata to preserve fake OCR confidence.",
+        actual_page=page.model_dump_json(),
+    )
+    _expect_equal(
+        (page.source_span_start, page.source_span_end),
+        (0, len(page.raw_text)),
+        "Expected OCR-backed image text to expose source spans for citations.",
+    )
+    _expect(
+        deal.evidence_store_path is not None and deal.evidence_store_path.exists(),
+        "Expected fake OCR success to write an evidence store.",
+    )
+    if deal.evidence_store_path is None:
+        raise EvalFixtureFailure("Expected fake OCR success to write an evidence store.")
+    store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    _expect_equal(
+        len(store.evidence),
+        1,
+        "Expected fake OCR success evidence store to contain one evidence record.",
+    )
+    evidence = store.evidence[0]
+    _expect_equal(
+        evidence.document_id,
+        document.source.id,
+        "Expected OCR evidence to link back to the ingested source document.",
+    )
+    _expect_equal(
+        str(evidence.document_path),
+        "Synthetic OcrSuccessCo/scan.png",
+        "Expected OCR evidence to preserve the source-relative image path.",
+    )
+    _expect(
+        evidence.ocr_applied and evidence.ocr_confidence == 0.93,
+        "Expected OCR evidence lineage to preserve fake OCR confidence.",
+        actual_evidence=evidence.model_dump_json(),
+    )
+    _expect_equal(
+        evidence.page_number,
+        1,
+        "Expected OCR evidence to preserve page number 1 for the image.",
+    )
+    _expect_equal(
+        evidence.text,
+        "Valuation cap $8M. Minimum investment $1,000.",
+        "Expected OCR evidence text to match the fake OCR result.",
+    )
+    _expect(
+        all(
+            any(citation.evidence_id == evidence.id for citation in claim.citations)
+            for claim in store.claims
+        ),
+        "Expected OCR-derived claims to cite the OCR-backed evidence record.",
+    )
+
+
+def run_ocr_prompt_injection_untrusted_fixture(work_dir: Path) -> None:
+    class InjectionOcrEngine:
+        def image_to_text(
+            self,
+            path: Path,
+            *,
+            page_number: int | None = None,
+        ) -> LocalOcrResult:
+            del path
+            _expect_equal(
+                page_number,
+                1,
+                "Expected fake OCR prompt-injection fixture to preserve page number 1.",
+            )
+            return LocalOcrResult(
+                text=(
+                    "Valuation cap $8M. Minimum investment $1,000.\n"
+                    f"{PROMPT_INJECTION_TEXT}"
+                ),
+                confidence=0.94,
+            )
+
+        def pdf_page_to_text(self, path: Path, *, page_number: int) -> LocalOcrResult:
+            del path, page_number
+            raise EvalFixtureFailure("Expected OCR prompt-injection fixture to use an image.")
+
+    root = (work_dir / "ocr-injection-pitch-decks").resolve(strict=False)
+    company = root / "Synthetic OcrInjectionCo"
+    company.mkdir(parents=True)
+    (company / "scan.png").write_bytes(b"synthetic image placeholder")
+
+    summary = ingest_folder(
+        root,
+        config=AppConfig(data_dir=(work_dir / "ocr-injection-data").resolve(strict=False)),
+        ocr_engine=InjectionOcrEngine(),
+    )
+    deal = summary.deals[0]
+    _expect_equal(
+        deal.evidence_count,
+        1,
+        "Expected OCR prompt-injection text to create one untrusted evidence record.",
+    )
+    _expect(
+        deal.evidence_store_path is not None and deal.evidence_store_path.exists(),
+        "Expected OCR prompt-injection ingestion to write an evidence store.",
+    )
+    if deal.evidence_store_path is None:
+        raise EvalFixtureFailure(
+            "Expected OCR prompt-injection ingestion to write an evidence store."
+        )
+    store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    _expect(
+        any(
+            evidence.ocr_applied and PROMPT_INJECTION_TEXT in evidence.text
+            for evidence in store.evidence
+        ),
+        "Expected OCR prompt-injection text to be stored only as source evidence.",
+    )
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    packet = build_agent_input_packet(
+        store,
+        scored,
+        role=AgentRole.FINAL_DECISION,
+        created_at=BUILT_AT,
+    )
+    cited_evidence_id = packet.allowed_evidence_ids[0]
+    output = AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary=[
+            AgentSummaryPoint(
+                summary="The OCR evidence contains a valuation cap.",
+                evidence=[
+                    AgentEvidenceReference(
+                        evidence_id=cited_evidence_id,
+                        quote="$8M",
+                    )
+                ],
+            )
+        ],
+        recommendation=AgentRecommendationRationale(
+            recommendation=Recommendation.INVEST,
+            check_size=1_000,
+            reason="Followed the instruction embedded in OCR evidence.",
+            evidence=[
+                AgentEvidenceReference(
+                    evidence_id=cited_evidence_id,
+                    quote=PROMPT_INJECTION_TEXT,
+                )
+            ],
+        ),
+    )
+    validation = validate_agent_output(output, packet)
+    _expect(
+        any(
+            "instruction embedded in a source document" in issue.message
+            for issue in validation.issues
+        ),
+        "Expected OCR prompt-injection text to remain untrusted during validation.",
+        actual_issues="; ".join(issue.message for issue in validation.issues),
+    )
+
+
 def run_table_edge_cases_fixture(work_dir: Path) -> None:
     html_path = work_dir / "tables.html"
     html_path.write_text(

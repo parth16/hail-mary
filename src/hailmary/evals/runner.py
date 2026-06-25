@@ -110,6 +110,30 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="ocr-fake-success-source-linked",
+                category=EvalCategory.OCR,
+                name="Fake OCR success source lineage",
+                description=(
+                    "Checks that fake local OCR creates source-linked evidence with "
+                    "OCR lineage and claim extraction from synthetic image text."
+                ),
+            ),
+            run=fixtures.run_ocr_fake_success_source_linkage_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="ocr-prompt-injection-untrusted",
+                category=EvalCategory.OCR,
+                name="OCR prompt injection remains untrusted",
+                description=(
+                    "Checks that prompt-injection text returned by fake OCR remains "
+                    "untrusted source evidence and cannot support agent recommendations."
+                ),
+            ),
+            run=fixtures.run_ocr_prompt_injection_untrusted_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="citation-span-mismatch",
                 category=EvalCategory.CITATION,
                 name="Citation span mismatch rejection",
