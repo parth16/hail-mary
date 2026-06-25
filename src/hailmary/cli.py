@@ -1314,14 +1314,7 @@ def prepare_meridian_workflow_command(
         _print_error(str(exc))
         raise typer.Exit(1) from None
 
-    data_dir_option = (
-        f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
-    )
-    next_command = (
-        f"`hailmary import-research-results "
-        f"{shlex.quote(str(result.result_template_path))}"
-        f"{data_dir_option} --dry-run`."
-    )
+    next_command = f"`{result.workflow.dry_run_command}`."
     _print_section(
         "Meridian workflow prepared",
         [
@@ -1334,7 +1327,13 @@ def prepare_meridian_workflow_command(
             ),
             _plain(
                 "Use normal authenticated access and paste only short allowed evidence "
-                "snippets into the template, not screenshots or raw page dumps."
+                "snippets into the template, not screenshots, raw page dumps, hidden "
+                "page data, browser profiles, cookies, tokens, signed URLs, or "
+                "unrelated account data."
+            ),
+            _plain(
+                "Review the before-import checklist in the workflow before running "
+                "the dry run."
             ),
             _plain(f"After filling the template, run {next_command}"),
         ],
