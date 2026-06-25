@@ -312,7 +312,7 @@ def _do_not_collect() -> list[str]:
         "session IDs",
         "tokens",
         "signed URLs",
-        "screenshots unless explicitly approved later",
+        "screenshots",
         "raw full-page HTML",
         "hidden page data",
         "browser profiles",

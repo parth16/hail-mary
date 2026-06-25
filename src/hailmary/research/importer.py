@@ -32,6 +32,7 @@ from hailmary.utils.slug import slugify
 
 from .meridian import (
     MERIDIAN_PLACEHOLDER_CONFIDENCE,
+    MERIDIAN_RECOMMENDED_FACTS,
     MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
     MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX,
     MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
@@ -80,6 +81,9 @@ TEMPLATE_REQUIRED_FACT_FIELDS = {
     "text",
     "retrieved_at",
     "confidence",
+}
+MERIDIAN_PLACEHOLDER_TITLES = {
+    f"Meridian: {fact}" for fact in MERIDIAN_RECOMMENDED_FACTS
 }
 
 
@@ -299,6 +303,8 @@ def _is_untouched_meridian_placeholder_result(result: dict[str, object]) -> bool
         return False
     if result.get("document_type") != DocumentType.PLATFORM_DEAL_PAGE.value:
         return False
+    if not _is_meridian_placeholder_title(result.get("title")):
+        return False
     if not _is_blank_template_value(result.get("text")):
         return False
     if not _is_blank_template_value(result.get("retrieved_at")):
@@ -333,6 +339,10 @@ def _is_untouched_meridian_placeholder_result(result: dict[str, object]) -> bool
 
 def _is_meridian_placeholder_confidence(value: object) -> bool:
     return isinstance(value, str) and value.strip() == MERIDIAN_PLACEHOLDER_CONFIDENCE
+
+
+def _is_meridian_placeholder_title(value: object) -> bool:
+    return isinstance(value, str) and value.strip() in MERIDIAN_PLACEHOLDER_TITLES
 
 
 def _generated_meridian_source_url(licensing_notes: str) -> str | None:
@@ -489,6 +499,12 @@ def _validate_completed_meridian_placeholder(
     *,
     index: int,
 ) -> None:
+    generated_source_url = _generated_meridian_source_url(result.licensing_notes)
+    if generated_source_url is not None and result.source_url != generated_source_url:
+        raise ResearchImportError(
+            f"Research result {index} uses a generated Meridian placeholder, so "
+            "source_url must stay as the generated Meridian deal page URL."
+        )
     if result.confidence != MERIDIAN_PLACEHOLDER_CONFIDENCE:
         return
     raise ResearchImportError(

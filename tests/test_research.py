@@ -1420,6 +1420,8 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert any("raw page dump" in step for step in workflow["manual_steps"])
     assert "cookies" in workflow["do_not_collect"]
     assert "auth headers" in workflow["do_not_collect"]
+    assert "screenshots" in workflow["do_not_collect"]
+    assert "screenshots unless explicitly approved later" not in workflow["do_not_collect"]
     assert "raw full-page HTML" in workflow["do_not_collect"]
     assert "valuation cap" in workflow["term_definitions"]
     assert "pre-money valuation" in workflow["term_definitions"]
@@ -2567,15 +2569,78 @@ def test_import_research_results_rejects_source_only_meridian_placeholder_edits(
     template_payload = json.loads(
         workflow.result_template_path.read_text(encoding="utf-8")
     )
-    template_payload["results"][0][
-        "source_url"
-    ] = "https://portal.angellist.com/m/other-example/invest"
+    template_payload["results"][0]["source_url"] = (
+        "https://portal.angellist.com/m/other-example/invest"
+    )
     workflow.result_template_path.write_text(
         json.dumps(template_payload),
         encoding="utf-8",
     )
 
     with pytest.raises(ResearchImportError, match=r"row 1: .*text"):
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
+def test_import_research_results_rejects_title_only_meridian_placeholder_edits(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0]["title"] = "Acme AI reports a $2,500 minimum."
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match=r"row 1: .*text"):
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
+def test_import_research_results_rejects_completed_meridian_placeholder_url_edits(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+            "source_url": "https://portal.angellist.com/m/other-example/invest",
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match="generated Meridian deal page URL"):
         import_research_results(
             config=config,
             results_path=workflow.result_template_path,
