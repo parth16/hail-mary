@@ -335,7 +335,12 @@ def _is_generated_output_path(
         config.data_dir / "processed",
         config.data_dir / "reports",
         config.data_dir / "agent-packets",
+        config.data_dir / "agent-outputs",
+        config.data_dir / "research-plans",
+        config.data_dir / "research-results",
+        config.data_dir / "research-results-templates",
         config.data_dir / "browser-profiles",
+        config.data_dir / "meridian-workflows",
         config.meridian_profile_dir,
     ]
     for generated_root in generated_roots:

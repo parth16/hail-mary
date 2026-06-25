@@ -216,6 +216,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config.data_dir / "processed",
         config.data_dir / "reports",
         config.data_dir / "agent-packets",
+        config.data_dir / "agent-outputs",
         config.data_dir / "research-plans",
         config.data_dir / "research-results",
         config.data_dir / "browser-profiles",
@@ -437,14 +438,20 @@ def _ensure_dedicated_data_dir(path: Path) -> None:
         "processed",
         "reports",
         "agent-packets",
+        "agent-outputs",
         "research-plans",
         "research-results",
         "research-results-templates",
         "browser-profiles",
         "meridian-workflows",
     }
+    harmless_metadata_entries = {".DS_Store"}
     try:
-        unknown_entries = {child.name for child in path.iterdir()} - allowed_entries
+        unknown_entries = (
+            {child.name for child in path.iterdir()}
+            - allowed_entries
+            - harmless_metadata_entries
+        )
     except OSError as exc:
         raise ConfigError(f"Could not inspect data directory at {path}: {exc}") from exc
     if unknown_entries:
@@ -463,6 +470,7 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         data_dir / "processed",
         data_dir / "reports",
         data_dir / "agent-packets",
+        data_dir / "agent-outputs",
         data_dir / "research-plans",
         data_dir / "research-results",
         data_dir / "research-results-templates",
@@ -484,8 +492,8 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         if profile_dir == reserved_path:
             raise ConfigError(
                 "The Meridian browser profile directory cannot be the data, raw, "
-                "processed, reports, agent-packets, research-plans, research-results, "
-                "research-results-templates, or meridian-workflows folder. "
+                "processed, reports, agent-packets, agent-outputs, research-plans, "
+                "research-results, research-results-templates, or meridian-workflows folder. "
                 "Choose a separate generated-data folder."
             )
         try:
@@ -500,8 +508,9 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
             continue
         raise ConfigError(
             "The Meridian browser profile directory cannot be inside a reserved Hail Mary "
-            "data folder such as raw, processed, reports, agent-packets, research-plans, "
-            "research-results, research-results-templates, or meridian-workflows. "
+            "data folder such as raw, processed, reports, agent-packets, agent-outputs, "
+            "research-plans, research-results, research-results-templates, or "
+            "meridian-workflows. "
             "Choose a separate generated-data folder."
         )
 

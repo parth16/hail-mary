@@ -44,6 +44,8 @@ def test_local_state_uses_owner_only_permissions(
     assert stat.S_IMODE((tmp_path / "local-data").stat().st_mode) == 0o700
     assert (tmp_path / "local-data" / "research-plans").is_dir()
     assert (tmp_path / "local-data" / "research-results").is_dir()
+    assert (tmp_path / "local-data" / "agent-outputs").is_dir()
+    assert stat.S_IMODE((tmp_path / "local-data" / "agent-outputs").stat().st_mode) == 0o700
     assert (tmp_path / "local-data" / "meridian-workflows").is_dir()
     assert (tmp_path / "local-data" / "browser-profiles" / "meridian").is_dir()
     assert (
@@ -67,6 +69,20 @@ def test_local_state_accepts_research_results_templates_folder(
     assert (data_dir / "meridian-workflows").is_dir()
     assert (data_dir / "research-results").is_dir()
     assert (data_dir / "research-results-templates").is_dir()
+
+
+def test_local_state_accepts_harmless_ds_store_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "local-data"
+    data_dir.mkdir()
+    (data_dir / ".DS_Store").write_text("Finder metadata", encoding="utf-8")
+
+    create_local_state(AppConfig(data_dir=data_dir), force=True)
+
+    assert (data_dir / ".DS_Store").is_file()
+    assert (data_dir / "agent-outputs").is_dir()
 
 
 def test_local_state_rejects_data_dir_inside_git(
@@ -623,6 +639,7 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
         Path("local-data"),
         Path("local-data/raw"),
         Path("local-data/agent-packets"),
+        Path("local-data/agent-outputs"),
         Path("local-data/research-plans"),
         Path("local-data/research-results"),
         Path("local-data/research-results-templates"),

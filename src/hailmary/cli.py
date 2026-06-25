@@ -28,6 +28,7 @@ from hailmary.config import (
     load_config,
 )
 from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
+from hailmary.evaluation import EvaluationError, evaluate_deal_folder
 from hailmary.ingest.folder_loader import (
     IngestionError,
 )
@@ -351,6 +352,88 @@ def score_deals(
             _plain(f"{scored_deal.total_score}/{scored_deal.max_score}"),
         )
     _print_panel("Scoring complete", [*result_lines, deals], border_style="green")
+
+
+@app.command("evaluate-deal")
+def evaluate_deal(
+    folder: Annotated[
+        Path,
+        typer.Argument(help="One company folder containing local diligence documents."),
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should store private generated files.",
+        ),
+    ] = None,
+    max_concurrency: Annotated[
+        int,
+        typer.Option(
+            "--max-concurrency",
+            help="Maximum number of specialist model reviews to run at once.",
+        ),
+    ] = 3,
+) -> None:
+    """Evaluate one deal end to end and write a final Markdown memo."""
+
+    config = _config_from_options(data_dir)
+    stages = [
+        "local setup and privacy checks",
+        "ingestion",
+        "deterministic scoring",
+        "agent packet preparation",
+        "specialist committee review",
+        "final decision review",
+        "final memo write",
+    ]
+    stage_numbers = {stage: index for index, stage in enumerate(stages, start=1)}
+
+    def print_stage(stage: str) -> None:
+        number = stage_numbers.get(stage)
+        prefix = f"{number}. " if number is not None else ""
+        console.print(_plain(f"{prefix}{stage}", style="bold cyan"))
+
+    try:
+        result = evaluate_deal_folder(
+            folder,
+            config=config,
+            max_concurrency=max_concurrency,
+            stage_callback=print_stage,
+        )
+    except EvaluationError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    summary = _two_column_table("Result", "Value")
+    summary.add_row(
+        _plain("Recommendation"),
+        _plain(str(result.final_recommendation.recommendation)),
+    )
+    summary.add_row(
+        _plain("Check size"),
+        _plain(_format_check_size(result.final_recommendation.check_size)),
+    )
+    summary.add_row(
+        _plain("Score"),
+        _plain(f"{result.deterministic_score.total_score}/{result.deterministic_score.max_score}"),
+    )
+    summary.add_row(_plain("Confidence"), _plain(str(result.deterministic_score.confidence)))
+    summary.add_row(_plain("Final memo"), _plain(str(result.final_memo_path)))
+
+    renderables: list[RenderableType] = [
+        _plain(f"Evaluated {result.company_name}."),
+        summary,
+    ]
+    if result.warnings:
+        warning_table = _two_column_table("Warning", "Detail")
+        for index, warning in enumerate(result.warnings, start=1):
+            warning_table.add_row(_plain(str(index)), _plain(warning))
+        renderables.append(warning_table)
+    else:
+        renderables.append(_plain("Validation warnings: none."))
+
+    _print_panel("Deal evaluation complete", renderables, border_style="green")
 
 
 @app.command("prepare-agent-packets")
