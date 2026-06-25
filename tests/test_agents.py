@@ -237,6 +237,50 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
     assert "packet evidence for return math" in packet.score.net_return.missing_inputs
 
 
+def test_build_agent_input_packet_clears_return_math_when_support_text_is_truncated() -> None:
+    evidence_text = (
+        "Valuation cap $8M. "
+        + ("context " * 40)
+        + "Estimated dilution 20%. SPV expenses 5%. Exit value $1B."
+    )
+    evidence = [_evidence("ev_terms", evidence_text)]
+    claims = [_claim("valuation cap", "$8M", "ev_terms")]
+    store = _store(evidence=evidence, claims=claims)
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored_deal = scored_deal.model_copy(
+        update={
+            "net_return": NetReturnEstimate(
+                entry_valuation=8_000_000,
+                estimated_dilution_percent=20,
+                estimated_fees_and_carry_percent=5,
+                gross_exit_value=1_000_000_000,
+                net_return_multiple=95,
+                support_status=ScoreSupportStatus.VERIFIED,
+                evidence_ids=["ev_terms"],
+            )
+        }
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.RETURN_MATH,
+        max_evidence_records=1,
+        max_evidence_chars=30,
+    )
+
+    assert packet.allowed_evidence_ids == ["ev_terms"]
+    assert packet.evidence[0].truncated is True
+    assert "$8M" in packet.evidence[0].text
+    assert "Estimated dilution" not in packet.evidence[0].text
+    assert packet.score.net_return.entry_valuation == 8_000_000
+    assert packet.score.net_return.estimated_dilution_percent is None
+    assert packet.score.net_return.estimated_fees_and_carry_percent is None
+    assert packet.score.net_return.gross_exit_value is None
+    assert packet.score.net_return.net_return_multiple is None
+    assert packet.score.net_return.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+
+
 def test_build_agent_input_packet_does_not_prioritize_invalid_conflict_evidence() -> None:
     evidence = [
         _evidence("ev_stale_one", "Stale conflict evidence one."),

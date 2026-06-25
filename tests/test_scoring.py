@@ -60,6 +60,7 @@ def _evidence(
     *,
     deal_id: str = "deal_test",
     document_id: str = "doc_test",
+    source_freshness: SourceFreshness = SourceFreshness.CURRENT,
 ) -> EvidenceRecord:
     _TEST_EVIDENCE_TEXT_BY_ID[record_id] = text
     return EvidenceRecord(
@@ -72,7 +73,7 @@ def _evidence(
         document_type=DocumentType.MEMO,
         file_type=FileType.TXT,
         text=text,
-        source_freshness=SourceFreshness.CURRENT,
+        source_freshness=source_freshness,
     )
 
 
@@ -278,6 +279,7 @@ def test_stage_classification_ignores_negated_future_stage_mentions() -> None:
         "Pre-seed company will raise Series A next year.",
         "Not a defense company; pre-seed company.",
         "Not hard tech; pre-seed company.",
+        "Not a defense or aerospace company; pre-seed company.",
         "Non-defense pre-seed company.",
         "Non-aerospace pre-seed company.",
     ],
@@ -362,6 +364,12 @@ def test_valuation_far_ahead_gate_cites_stage_evidence() -> None:
         if gate.name == "Valuation far ahead of evidence"
     )
     assert valuation_gate.evidence_ids == ["ev_terms", "ev_stage"]
+    valuation_question = next(
+        question
+        for question in scored.diligence_questions
+        if question.question == "Confirm why the valuation is justified by current evidence."
+    )
+    assert valuation_question.evidence_ids == ["ev_terms", "ev_stage"]
 
 
 def test_unknown_stage_valuation_risk_stays_conservative_with_traction() -> None:
@@ -382,6 +390,41 @@ def test_unknown_stage_valuation_risk_stays_conservative_with_traction() -> None
 
     assert scored.company_stage == CompanyStage.UNKNOWN
     assert scored.pmf_level == PMFLevel.DEVELOPING
+    assert scored.valuation_risk == ValuationRisk.HIGH
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in scored.triggered_kill_gates
+    )
+
+
+@pytest.mark.parametrize(
+    ("stage_text", "valuation_text"),
+    [
+        ("Series B stage with paid customers and retention.", "$2B"),
+        ("Defense pilot with design partner.", "$500M"),
+    ],
+)
+def test_late_stage_valuation_risk_keeps_absolute_upper_threshold(
+    stage_text: str,
+    valuation_text: str,
+) -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            f"{stage_text} Valuation cap {valuation_text}. Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", valuation_text, "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
     assert scored.valuation_risk == ValuationRisk.HIGH
     assert any(
         gate.name == "Valuation far ahead of evidence"
@@ -474,6 +517,32 @@ def test_net_return_math_needs_round_size_for_pre_money_valuation() -> None:
     assert "verified round size" in scored.net_return.explanation
 
 
+def test_readable_pricing_is_required_before_clearing_key_terms() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap TBD. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "TBD", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    missing_terms_gate = next(
+        gate
+        for gate in scored.triggered_kill_gates
+        if gate.name == "Missing key investment terms"
+    )
+    assert missing_terms_gate.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert scored.net_return.missing_inputs == ["machine-readable entry valuation"]
+
+
 @pytest.mark.parametrize(
     "return_text",
     [
@@ -536,6 +605,76 @@ def test_stage_pmf_factor_marks_partial_support_needs_diligence() -> None:
     assert stage_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
     assert stage_factor.missing_inputs == [
         "customer, revenue, retention, usage, pilot, or design-partner proof"
+    ]
+
+
+def test_evidence_authority_with_unknown_freshness_needs_diligence() -> None:
+    scored = score_evidence_store(
+        _store(
+            evidence=[
+                _evidence(
+                    "ev_unknown",
+                    "Valuation cap $8M.",
+                    source_freshness=SourceFreshness.UNKNOWN,
+                )
+            ],
+            claims=[_claim("valuation cap", "$8M", "ev_unknown")],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    authority_factor = _score_factor(scored, "Evidence authority and freshness")
+    assert authority_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert authority_factor.missing_inputs == ["current source dates"]
+
+
+def test_fundability_factor_does_not_ask_for_funding_already_present() -> None:
+    scored = score_evidence_store(
+        _store(
+            evidence=[_evidence("ev_funding", "Lead investor committed.")],
+            claims=[],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    fundability_factor = _score_factor(scored, "Fundability and next-round risk")
+    assert fundability_factor.evidence_ids == ["ev_funding"]
+    assert "lead investor, institutional investor, or follow-on financing evidence" not in (
+        fundability_factor.missing_inputs
+    )
+    assert fundability_factor.missing_inputs == [
+        "verified deal terms",
+        "customer, revenue, retention, or usage evidence",
+    ]
+
+
+def test_valuation_net_return_factor_keeps_all_return_input_evidence_ids() -> None:
+    evidence = [
+        _evidence("ev_valuation", "Pre-money valuation $40M."),
+        _evidence("ev_round", "Round size $20M."),
+        _evidence("ev_dilution", "Estimated dilution 20%."),
+        _evidence("ev_fees", "SPV expenses 5%."),
+        _evidence("ev_carry", "Carry 20%."),
+        _evidence("ev_exit", "Exit value $1B."),
+    ]
+    claims = [
+        _claim("pre-money valuation", "$40M", "ev_valuation"),
+        _claim("round size", "$20M", "ev_round"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    factor = _score_factor(scored, "Valuation and net return")
+    assert factor.evidence_ids == [
+        "ev_valuation",
+        "ev_round",
+        "ev_dilution",
+        "ev_fees",
+        "ev_carry",
+        "ev_exit",
     ]
 
 

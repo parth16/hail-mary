@@ -268,10 +268,19 @@ def build_agent_input_packet(
         for claim in verified_claims
         if any(citation.evidence_id in allowed_evidence_ids for citation in claim.citations)
     ]
+    evidence_items = [
+        _evidence_item(
+            evidence,
+            max_evidence_chars=max_evidence_chars,
+            preferred_quotes=quotes_by_evidence_id.get(evidence.id, []),
+        )
+        for evidence in selected_evidence
+    ]
     packet_net_return = _packet_net_return_estimate(
         scored_deal.net_return,
         allowed_evidence_ids,
         selected_claims,
+        evidence_items,
     )
 
     return AgentInputPacket(
@@ -296,14 +305,7 @@ def build_agent_input_packet(
             valuation_risk=scored_deal.valuation_risk,
             net_return=packet_net_return,
         ),
-        evidence=[
-            _evidence_item(
-                evidence,
-                max_evidence_chars=max_evidence_chars,
-                preferred_quotes=quotes_by_evidence_id.get(evidence.id, []),
-            )
-            for evidence in selected_evidence
-        ],
+        evidence=evidence_items,
         verified_claims=selected_claims,
         diligence_questions=[
             question.question for question in scored_deal.diligence_questions
@@ -315,13 +317,20 @@ def _packet_net_return_estimate(
     net_return: NetReturnEstimate,
     allowed_evidence_ids: set[str],
     selected_claims: list[AgentClaimItem],
+    evidence_items: list[AgentEvidenceItem],
 ) -> NetReturnEstimate:
     filtered_evidence_ids = [
         evidence_id
         for evidence_id in net_return.evidence_ids
         if evidence_id in allowed_evidence_ids
     ]
-    if len(filtered_evidence_ids) == len(net_return.evidence_ids):
+    evidence_item_by_id = {evidence.id: evidence for evidence in evidence_items}
+    hidden_by_truncation = any(
+        evidence_item_by_id[evidence_id].truncated
+        for evidence_id in filtered_evidence_ids
+        if evidence_id in evidence_item_by_id
+    )
+    if len(filtered_evidence_ids) == len(net_return.evidence_ids) and not hidden_by_truncation:
         return net_return.model_copy(update={"evidence_ids": filtered_evidence_ids})
     missing_inputs = list(
         dict.fromkeys([*net_return.missing_inputs, "packet evidence for return math"])
