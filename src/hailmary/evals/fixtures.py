@@ -987,6 +987,45 @@ def run_public_collectors_source_guards_fixture(work_dir: Path) -> None:
     else:
         raise EvalFixtureFailure("Expected bad SEC provider source URLs to be rejected.")
 
+    bad_api_results_path = (
+        work_dir / "bad-sec-source-api-results.json"
+    ).resolve(strict=False)
+    bad_api_results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Synthetic CollectCo",
+                        "title": "Bad SEC API source",
+                        "text": "Synthetic public result with the wrong API host.",
+                        "retrieved_at": "2025-12-31T12:00:00Z",
+                        "source_url": (
+                            "https://www.sec.gov/Archives/edgar/data/"
+                            "synthetic-collectco/form-d"
+                        ),
+                        "source_api": "https://example.com/sec-api",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        prepare_public_research_results(
+            config=config,
+            company_names=["Synthetic CollectCo"],
+            sec_form_d_results_path=bad_api_results_path,
+            collected_at=BUILT_AT,
+        )
+    except ResearchCollectionError as exc:
+        _expect(
+            "invalid source_api" in str(exc) and "SEC website host" in str(exc),
+            "Expected bad provider source APIs to fail with a provider-specific error.",
+            actual_error=str(exc),
+        )
+    else:
+        raise EvalFixtureFailure("Expected bad SEC provider source APIs to be rejected.")
+
     no_result_client = _FakeUsaspendingAwardsClient(
         {
             ("Synthetic NoResultCo", 1): _usaspending_response(
@@ -1024,6 +1063,11 @@ def run_meridian_workflow_guards_fixture(work_dir: Path) -> None:
     unsafe_urls = [
         "http://portal.angellist.com/m/synthetic-meridianco/invest",
         "https://portal.angellist.com/m/synthetic-meridianco/invest?token=secret",
+        "https://portal.angellist.com/m/synthetic-meridianco/invest#details",
+        "https://portal.angellist.com/m/synthetic-meridianco/invest;jsessionid=secret",
+        "https://portal.angellist.com/m/synthetic%3Bmeridianco/invest",
+        "https://portal.angellist.com/m/synthetic%3Fmeridianco/invest",
+        "https://portal.angellist.com/m/synthetic-meridianco/session-token/invest",
         "https://user:token@portal.angellist.com/m/synthetic-meridianco/invest",
     ]
     for unsafe_url in unsafe_urls:
@@ -1036,7 +1080,7 @@ def run_meridian_workflow_guards_fixture(work_dir: Path) -> None:
             )
         except MeridianWorkflowError as exc:
             _expect(
-                "Meridian URL" in str(exc),
+                "Meridian" in str(exc) and "URL" in str(exc),
                 "Expected unsafe Meridian URLs to fail with a plain Meridian URL error.",
                 unsafe_url=unsafe_url,
                 actual_error=str(exc),
@@ -1982,8 +2026,11 @@ def run_memo_output_guards_fixture() -> None:
     expected_escaped_fragments = [
         "raw/\\[bad\\]\\(memo\\).txt",
         "Provider\\|Name \\# Bad Provider",
+        "source page: https://example.com/source?x=\\[bad\\]\\|value",
         "high\\|confidence \\# Bad Confidence",
         "Allowed notes with \\[bad\\]\\(link\\) \\# Bad License",
+        "Quote/excerpt: \"Valuation cap $8M. Evidence text with "
+        "\\[bad\\]\\(https://example.com\\) markup.\"",
         "Reason with \\[bad\\]\\(https://example.com\\) \\# bad reason",
         "Summary with \\| pipe \\# bad summary",
     ]
@@ -1992,6 +2039,58 @@ def run_memo_output_guards_fixture() -> None:
         not missing_escaped,
         "Expected final evaluation memos to contain escaped dynamic text.",
         missing_fragments=", ".join(missing_escaped),
+    )
+
+    portfolio_config = AppConfig(data_dir=Path("data"), capital_budget=2_500)
+    alpha_store = _strong_store().model_copy(
+        update={"deal_id": "deal_alpha", "company_name": "Alpha Portfolio"}
+    )
+    zeta_store = _strong_store().model_copy(
+        update={"deal_id": "deal_zeta", "company_name": "Zeta Portfolio"}
+    )
+    alpha_scored = score_evidence_store(
+        alpha_store,
+        config=portfolio_config,
+        capital_remaining=2_500,
+    )
+    zeta_scored = score_evidence_store(
+        zeta_store,
+        config=portfolio_config,
+        capital_remaining=0,
+    )
+    portfolio_report = render_portfolio_report(
+        [zeta_scored, alpha_scored],
+        config=portfolio_config,
+    )
+    allowed_line = next(
+        line
+        for line in portfolio_report.splitlines()
+        if line.startswith("- Allowed check sizes:")
+    )
+    _expect_equal(
+        allowed_line,
+        "- Allowed check sizes: $0, $1K, $2.5K",
+        "Expected portfolio reports to cap displayed check tiers by capital budget.",
+    )
+    alpha_row = next(
+        line
+        for line in portfolio_report.splitlines()
+        if line.startswith("| 1 | Alpha Portfolio |")
+    )
+    zeta_row = next(
+        line
+        for line in portfolio_report.splitlines()
+        if line.startswith("| 2 | Zeta Portfolio |")
+    )
+    _expect(
+        "INVEST | $2.5K |" in alpha_row and "| $2.5K | $0 |" in alpha_row,
+        "Expected portfolio reports to preserve the invested deal budget sequence.",
+        actual_row=alpha_row,
+    )
+    _expect(
+        "PASS | $0 |" in zeta_row and "| $0 | $0 |" in zeta_row,
+        "Expected portfolio reports to preserve the passed deal budget sequence.",
+        actual_row=zeta_row,
     )
 
 
