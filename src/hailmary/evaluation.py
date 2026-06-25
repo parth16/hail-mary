@@ -227,7 +227,7 @@ def evaluate_deal_folder(
         raise EvaluationError(f"Local generated-data setup failed: {exc}") from exc
 
     _stage(stage_callback, "folder preflight")
-    _inspect_single_deal_folder(folder, config=config)
+    inspection = _inspect_single_deal_folder(folder, config=config)
 
     mode = _evaluation_mode(config)
     _stage(stage_callback, f"mode selection - {mode.explanation}")
@@ -328,6 +328,9 @@ def evaluate_deal_folder(
     _ensure_private_directory(report_dir, private_root=config.data_dir, description="report")
     final_memo_path = report_dir / f"{deal.id}-final-evaluation.md"
     warnings = [
+        *_unreadable_path_warnings(
+            [*inspection.unreadable_paths, *ingestion_summary.unreadable_paths]
+        ),
         *_ingestion_ocr_warnings(deal),
         *_evaluation_warnings(specialist_results, guarded_decision),
     ]
@@ -1032,7 +1035,55 @@ def _deterministic_recommendation_evidence(
         if evidence is None:
             continue
         references.append(_reference_for_evidence(evidence))
-    return references[:5]
+    return _validated_deterministic_recommendation_references(
+        references[:5],
+        store,
+        scored_deal,
+    )
+
+
+def _validated_deterministic_recommendation_references(
+    references: Sequence[AgentEvidenceReference],
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> list[AgentEvidenceReference]:
+    if not references:
+        return []
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.FINAL_DECISION,
+        created_at=store.created_at,
+    )
+    safe_references: list[AgentEvidenceReference] = []
+    for reference in references:
+        recommendation = AgentRecommendationRationale(
+            recommendation=scored_deal.recommendation,
+            check_size=scored_deal.check_size,
+            reason="INFERRED: Rule-based recommendation citation validation.",
+            evidence=[reference],
+        )
+        validation = validate_agent_output(
+            AgentReviewOutput(
+                deal_id=scored_deal.deal_id,
+                company_name=scored_deal.company_name,
+                agent_role=AgentRole.FINAL_DECISION,
+                summary=[
+                    AgentSummaryPoint(
+                        summary="UNVERIFIED: Citation validation placeholder.",
+                        unsupported=True,
+                    )
+                ],
+                recommendation=recommendation,
+            ),
+            packet,
+        )
+        if not any(
+            issue.location.startswith("recommendation.evidence")
+            for issue in validation.issues
+        ):
+            safe_references.append(reference)
+    return safe_references
 
 
 def _deterministic_support_evidence_ids(
@@ -1105,6 +1156,17 @@ def _evaluation_warnings(
     if final_decision.warning:
         warnings.append(final_decision.warning)
     return warnings
+
+
+def _unreadable_path_warnings(paths: Sequence[str]) -> list[str]:
+    unreadable_paths = tuple(dict.fromkeys(paths))
+    if not unreadable_paths:
+        return []
+    path_word = "path" if len(unreadable_paths) == 1 else "paths"
+    return [
+        f"Could not read {len(unreadable_paths)} {path_word}. Hail Mary did not "
+        "scan those locations, so diligence documents may be missing."
+    ]
 
 
 def _operator_limitations(

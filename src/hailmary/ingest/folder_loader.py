@@ -153,9 +153,6 @@ def _candidate_documents(
             continue
         if not path.is_file():
             continue
-        if not os.access(path, os.R_OK):
-            unreadable_paths.append(str(relative_path))
-            continue
         if (
             is_ignored_path(relative_path)
             or _is_generated_output_path(
@@ -166,6 +163,9 @@ def _candidate_documents(
             or path.suffix.lower() not in SUPPORTED_SUFFIXES
         ):
             skipped_files.append(str(relative_path))
+            continue
+        if not os.access(path, os.R_OK):
+            unreadable_paths.append(str(relative_path))
             continue
 
         deal_name = _deal_name_for_path(
