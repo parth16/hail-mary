@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 from contextlib import suppress
 from dataclasses import dataclass
@@ -30,6 +31,10 @@ from hailmary.schemas.evidence import (
 from hailmary.utils.slug import slugify
 
 from .meridian import (
+    MERIDIAN_PLACEHOLDER_CONFIDENCE,
+    MERIDIAN_RECOMMENDED_FACTS,
+    MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+    MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX,
     MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
     MeridianWorkflowError,
     clean_meridian_url,
@@ -76,6 +81,9 @@ TEMPLATE_REQUIRED_FACT_FIELDS = {
     "text",
     "retrieved_at",
     "confidence",
+}
+MERIDIAN_PLACEHOLDER_TITLES = {
+    f"Meridian: {fact}" for fact in MERIDIAN_RECOMMENDED_FACTS
 }
 
 
@@ -270,6 +278,8 @@ def _is_blank_template_result(result: object) -> bool:
         return False
     if set(result) != RESEARCH_RESULT_FIELDS:
         return False
+    if _is_untouched_meridian_placeholder_result(result):
+        return True
     if not all(
         _is_blank_template_value(result.get(field))
         for field in TEMPLATE_REQUIRED_FACT_FIELDS
@@ -284,6 +294,65 @@ def _is_blank_template_result(result: object) -> bool:
 
 def _is_blank_template_value(value: object) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _is_untouched_meridian_placeholder_result(result: dict[str, object]) -> bool:
+    if result.get("provider_id") != "meridian":
+        return False
+    if result.get("source_kind") != SourceKind.MERIDIAN.value:
+        return False
+    if result.get("document_type") != DocumentType.PLATFORM_DEAL_PAGE.value:
+        return False
+    if not _is_meridian_placeholder_title(result.get("title")):
+        return False
+    if not _is_blank_template_value(result.get("text")):
+        return False
+    if not _is_blank_template_value(result.get("retrieved_at")):
+        return False
+    if not _is_blank_template_value(result.get("source_api")):
+        return False
+    if not _is_meridian_placeholder_confidence(result.get("confidence")):
+        return False
+
+    licensing_notes = result.get("licensing_notes")
+    if not isinstance(licensing_notes, str):
+        return False
+    if MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER not in licensing_notes:
+        return False
+    if MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes:
+        return False
+    generated_source_url = _generated_meridian_source_url(licensing_notes)
+    if generated_source_url is None:
+        return False
+
+    source_url = result.get("source_url")
+    if not isinstance(source_url, str) or not source_url.strip():
+        return False
+    if source_url.strip() != generated_source_url:
+        return False
+    try:
+        clean_meridian_url(source_url)
+    except MeridianWorkflowError:
+        return False
+    return True
+
+
+def _is_meridian_placeholder_confidence(value: object) -> bool:
+    return isinstance(value, str) and value.strip() == MERIDIAN_PLACEHOLDER_CONFIDENCE
+
+
+def _is_meridian_placeholder_title(value: object) -> bool:
+    return isinstance(value, str) and value.strip() in MERIDIAN_PLACEHOLDER_TITLES
+
+
+def _generated_meridian_source_url(licensing_notes: str) -> str | None:
+    match = re.search(
+        rf"{re.escape(MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX)}(\S+)",
+        licensing_notes,
+    )
+    if match is None:
+        return None
+    return match.group(1)
 
 
 def _is_blank_prefilled_meridian_template_result(result: dict[str, object]) -> bool:
@@ -332,6 +401,7 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
             )
         if result.source_kind == SourceKind.MERIDIAN:
             _validate_meridian_result_source(result, index=display_index)
+            _validate_completed_meridian_placeholder(result, index=display_index)
             _validate_saved_meridian_licensing_notes(result, index=display_index)
         if result.source_api is not None:
             _validate_source_api(result.source_api, index=display_index)
@@ -421,6 +491,30 @@ def _validate_saved_meridian_licensing_notes(
     raise ResearchImportError(
         f"Research result {index} uses Meridian evidence, so licensing_notes must "
         "explain the source permissions after the generated template marker is removed."
+    )
+
+
+def _validate_completed_meridian_placeholder(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    generated_source_url = _generated_meridian_source_url(result.licensing_notes)
+    if _is_meridian_placeholder_title(result.title) and generated_source_url is None:
+        raise ResearchImportError(
+            f"Research result {index} uses a generated Meridian placeholder title, so "
+            "licensing_notes must keep the generated placeholder marker until import."
+        )
+    if generated_source_url is not None and result.source_url != generated_source_url:
+        raise ResearchImportError(
+            f"Research result {index} uses a generated Meridian placeholder, so "
+            "source_url must stay as the generated Meridian deal page URL."
+        )
+    if result.confidence != MERIDIAN_PLACEHOLDER_CONFIDENCE:
+        return
+    raise ResearchImportError(
+        f"Research result {index} uses Meridian placeholder confidence guidance. "
+        "Replace confidence with your own confidence note before importing."
     )
 
 
@@ -673,11 +767,21 @@ def _evidence_record_for_result(
 
 
 def _saved_licensing_notes(licensing_notes: str) -> str:
-    if MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes:
+    if (
+        MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes
+        and MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER not in licensing_notes
+        and MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX not in licensing_notes
+    ):
         return licensing_notes
-    return " ".join(
-        licensing_notes.replace(MERIDIAN_WORKFLOW_TEMPLATE_MARKER, "").split()
+    cleaned = licensing_notes
+    cleaned = cleaned.replace(MERIDIAN_WORKFLOW_TEMPLATE_MARKER, "")
+    cleaned = cleaned.replace(MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER, "")
+    cleaned = re.sub(
+        rf"{re.escape(MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX)}\S+",
+        "",
+        cleaned,
     )
+    return " ".join(cleaned.split())
 
 
 def _result_digest(result: ResearchResultInput, *, deal_id: str) -> str:

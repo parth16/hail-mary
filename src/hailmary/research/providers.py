@@ -217,8 +217,8 @@ def _meridian_adapter() -> ProviderAdapter:
                 "paywalls, or platform restrictions. Save only permitted exports locally."
             ),
             operator_note=(
-                "Open the supplied URL in an authenticated browser session and save allowed "
-                "materials into the private local input folder."
+                "Open the supplied URL in an authenticated browser session and copy only "
+                "short allowed facts into the generated template."
             ),
         ),
         build_url=lambda _company_name, website_url: website_url,
