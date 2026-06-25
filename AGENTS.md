@@ -106,3 +106,4 @@ Rules for all future Codex runs:
 - PR #51 loop 1: Evidence review commands must reject symlinked data directories before resolving paths, flag empty evidence stores as review issues, and treat negative or zero-length source spans as missing lineage.
 - PR #51 loop 2: Review summaries should recompute claim status from live citation validation and include table indexes when table evidence also has a page number.
 - PR #51 loop 3: Evidence review should include source documents that produce no evidence or still need OCR, and external evidence summaries must show exact URL/API lineage rather than only synthetic local paths.
+- PR #54: Research workflows must reject tokenized website or portal URLs before writing plans, treat explicit live-collection and corrupt import-preview failures as blocking, and distinguish malformed timestamps from missing timestamps in operator validation output.
