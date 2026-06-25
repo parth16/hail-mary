@@ -75,8 +75,11 @@ Use these output locations:
 - `data/agent-outputs/<deal-id>/` for validated model JSON and invalid raw attempts
 - `data/reports/<deal-id>-final-evaluation.md` for the operator-facing final memo
 
+The implementation must add `data/agent-outputs/` to local-state creation and data-directory validation. It should be created with owner-only permissions and reserved as a first-class generated Hail Mary folder, so a successful run does not make later commands reject `data/` as containing unknown files.
+
 The final memo should combine:
 
+- the existing opening decision box with recommendation, suggested check, score, confidence, one-line reason, and deal terms
 - deterministic score and kill gates
 - validated specialist findings
 - final LLM recommendation
@@ -100,11 +103,12 @@ Use synthetic fixtures only.
 
 Required tests:
 
-- `evaluate-deal` succeeds for one synthetic company folder with mocked OpenAI responses.
-- Missing `OPENAI_API_KEY`, `HAILMARY_MODEL`, `HAILMARY_LOCAL_ONLY=false`, or `HAILMARY_MOCK_LLM=false` fails before model calls.
-- A specialist validation failure retries once, then continues with a warning.
+- `evaluate-deal` succeeds for one synthetic company folder with mocked OpenAI responses, and the mocked OpenAI client asserts the request payload contains only selected packet excerpts, not raw deck bytes, full extracted documents, or local source paths.
+- Missing or incompatible `HAILMARY_LLM_PROVIDER`, `OPENAI_API_KEY`, `HAILMARY_MODEL`, `HAILMARY_LOCAL_ONLY=false`, or `HAILMARY_MOCK_LLM=false` fails before model calls.
+- A specialist validation failure retries once, then continues with a warning and records the failed role as a limitation in the final memo.
 - A final-decision validation failure exits without writing a final memo.
 - Deterministic kill gates force final `PASS` even when mocked model output tries `INVEST`.
+- The final memo starts with the established decision box, including recommendation, suggested check, score, confidence, one-line reason, and deal terms.
 - `.DS_Store` inside `data/` does not block valid workflows.
 - CLI output uses Rich and does not print tracebacks for expected operator errors.
 
