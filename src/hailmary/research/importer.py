@@ -66,7 +66,7 @@ RESEARCH_RESULT_FIELDS = {
     "source_kind",
     "document_type",
 }
-TEMPLATE_FACT_FIELDS = {
+TEMPLATE_REQUIRED_FACT_FIELDS = {
     "title",
     "text",
     "retrieved_at",
@@ -265,11 +265,39 @@ def _is_blank_template_result(result: object) -> bool:
         return False
     if set(result) != RESEARCH_RESULT_FIELDS:
         return False
-    return all(_is_blank_template_value(result.get(field)) for field in TEMPLATE_FACT_FIELDS)
+    if not all(
+        _is_blank_template_value(result.get(field))
+        for field in TEMPLATE_REQUIRED_FACT_FIELDS
+    ):
+        return False
+    if _is_blank_template_value(result.get("source_url")) and _is_blank_template_value(
+        result.get("source_api")
+    ):
+        return True
+    return _is_blank_prefilled_meridian_template_result(result)
 
 
 def _is_blank_template_value(value: object) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _is_blank_prefilled_meridian_template_result(result: dict[str, object]) -> bool:
+    if result.get("provider_id") != "meridian":
+        return False
+    if result.get("source_kind") != SourceKind.MERIDIAN.value:
+        return False
+    if result.get("document_type") != DocumentType.PLATFORM_DEAL_PAGE.value:
+        return False
+    if not _is_blank_template_value(result.get("source_api")):
+        return False
+    source_url = result.get("source_url")
+    if not isinstance(source_url, str) or not source_url.strip():
+        return False
+    try:
+        clean_meridian_url(source_url)
+    except MeridianWorkflowError:
+        return False
+    return True
 
 
 def _validate_results(results: list[ResearchResultInput], *, imported_at: datetime) -> None:

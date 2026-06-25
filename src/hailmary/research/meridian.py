@@ -157,7 +157,7 @@ def clean_meridian_url(url: str) -> str:
         )
 
     path_parts = [part for part in parsed.path.split("/") if part]
-    if len(path_parts) < 3 or path_parts[0] != "m" or path_parts[-1] != "invest":
+    if len(path_parts) != 3 or path_parts[0] != "m" or path_parts[2] != "invest":
         raise MeridianWorkflowError(
             "The Meridian URL must look like a Meridian deal page, such as "
             "https://portal.angellist.com/m/example/invest."

@@ -246,6 +246,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "https://example.com/m/acme-ai/invest",
         "https://portal.angellist.com/not-m/acme-ai/invest",
         "https://portal.angellist.com/m/acme-ai/profile",
+        "https://portal.angellist.com/m/acme-ai/session-token/invest",
         "https://user:token@portal.angellist.com/m/acme-ai/invest",
         "https://portal.angellist.com:bad/m/acme-ai/invest",
         "https://portal.angellist.com/m/acme ai/invest",
@@ -909,7 +910,15 @@ def test_import_research_results_skips_untouched_template_rows(
         created_at=datetime(2026, 1, 2, tzinfo=UTC),
     )
     template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
-    template_payload["results"][1]["source_url"] = "https://example.com/prefilled"
+    template_payload["results"][1].update(
+        {
+            "provider_id": "meridian",
+            "provider_name": "Meridian deal page",
+            "source_url": "https://portal.angellist.com/m/example/invest",
+            "source_kind": "meridian",
+            "document_type": "platform_deal_page",
+        }
+    )
     template_payload["results"][0].update(
         {
             "title": "Exact public source excerpt",
@@ -940,6 +949,32 @@ def test_import_research_results_skips_untouched_template_rows(
     assert result.deal_count == 1
 
 
+def test_import_research_results_rejects_source_only_template_rows(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    plan_result = prepare_research_plan(config=config, created_at=BUILT_AT)
+    template_result = prepare_research_results_template(
+        config=config,
+        plan_path=plan_result.output_path,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    template_payload["results"][0]["source_url"] = "https://example.com/source-only"
+    template_result.output_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match=r"row 1: .*title"):
+        import_research_results(
+            config=config,
+            results_path=template_result.output_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
 @pytest.mark.parametrize(
     ("source_url", "message"),
     [
@@ -954,6 +989,10 @@ def test_import_research_results_skips_untouched_template_rows(
         (
             "https://portal.angellist.com/m/example;jsessionid=secret/invest",
             "extra text after",
+        ),
+        (
+            "https://portal.angellist.com/m/example/session-token/invest",
+            "Meridian deal page",
         ),
         (
             "https://portal.angellist.com/m/example/invest?token=secret",
