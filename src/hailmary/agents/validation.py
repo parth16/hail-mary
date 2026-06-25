@@ -103,6 +103,16 @@ def validate_agent_output(
                 message="Final-decision agent output needs an INVEST or PASS recommendation.",
             )
         )
+    if packet.agent_role != AgentRole.FINAL_DECISION and output.recommendation is not None:
+        issues.append(
+            AgentValidationIssue(
+                location="recommendation",
+                message=(
+                    "Only the final-decision agent may return an INVEST or PASS "
+                    "recommendation."
+                ),
+            )
+        )
 
     for summary_index, summary in enumerate(output.summary):
         if not summary.unsupported and not summary.evidence:
@@ -182,12 +192,31 @@ def validate_agent_output(
                 )
             )
         if not output.recommendation.evidence:
-            issues.append(
-                AgentValidationIssue(
-                    location="recommendation.evidence",
-                    message="A recommendation needs at least one cited evidence ID.",
+            if packet.evidence:
+                recommendation_text = (
+                    "An INVEST recommendation"
+                    if output.recommendation.recommendation == Recommendation.INVEST
+                    else "A PASS recommendation"
                 )
-            )
+                issues.append(
+                    AgentValidationIssue(
+                        location="recommendation.evidence",
+                        message=(
+                            f"{recommendation_text} needs at least one cited evidence ID "
+                            "when packet evidence exists."
+                        ),
+                    )
+                )
+            elif not _is_no_evidence_final_pass(output, packet):
+                issues.append(
+                    AgentValidationIssue(
+                        location="recommendation.evidence",
+                        message=(
+                            "A no-evidence final recommendation must be PASS with a $0 "
+                            "check and must clearly say NEEDS_DILIGENCE."
+                        ),
+                    )
+                )
         for reference_index, reference in enumerate(output.recommendation.evidence):
             _validate_evidence_reference(
                 reference,
@@ -197,6 +226,32 @@ def validate_agent_output(
             )
 
     return AgentValidationResult(issues=issues)
+
+
+def _is_no_evidence_final_pass(
+    output: AgentReviewOutput,
+    packet: AgentInputPacket,
+) -> bool:
+    recommendation = output.recommendation
+    if recommendation is None:
+        return False
+    return (
+        packet.agent_role == AgentRole.FINAL_DECISION
+        and not packet.evidence
+        and recommendation.recommendation == Recommendation.PASS
+        and recommendation.check_size == 0
+        and _mentions_needs_diligence(output)
+    )
+
+
+def _mentions_needs_diligence(output: AgentReviewOutput) -> bool:
+    values: list[str] = []
+    values.extend(summary.summary for summary in output.summary)
+    values.extend(finding.finding for finding in output.findings)
+    values.extend(output.limitations)
+    if output.recommendation is not None:
+        values.append(output.recommendation.reason)
+    return any("NEEDS_DILIGENCE" in value for value in values)
 
 
 def _validate_evidence_reference(
