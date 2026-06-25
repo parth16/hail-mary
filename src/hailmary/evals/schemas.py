@@ -7,13 +7,17 @@ from pydantic import BaseModel, Field
 
 class EvalCategory(StrEnum):
     EXTRACTION = "extraction"
+    OCR = "ocr"
     CITATION = "citation"
     CONTRADICTION = "contradiction"
     RESEARCH_IMPORT = "research_import"
+    PUBLIC_COLLECTORS = "public_collectors"
+    MERIDIAN = "meridian"
     PROMPT_INJECTION = "prompt_injection"
     SCORE_CALIBRATION = "score_calibration"
     MISSING_DATA = "missing_data"
     MEMO_SNAPSHOT = "memo_snapshot"
+    PRIVACY = "privacy"
 
 
 class EvalCaseResult(BaseModel):

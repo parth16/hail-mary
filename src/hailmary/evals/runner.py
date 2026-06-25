@@ -98,6 +98,42 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="ocr-image-unavailable",
+                category=EvalCategory.OCR,
+                name="Image-only OCR unavailable path",
+                description=(
+                    "Checks that image-only synthetic documents stay evidence-less "
+                    "with explicit OCR and vision-needed metadata when OCR is unavailable."
+                ),
+            ),
+            run=fixtures.run_ocr_image_unavailable_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="ocr-fake-success-source-linked",
+                category=EvalCategory.OCR,
+                name="Fake OCR success source lineage",
+                description=(
+                    "Checks that fake local OCR creates source-linked evidence with "
+                    "OCR lineage and claim extraction from synthetic image text."
+                ),
+            ),
+            run=fixtures.run_ocr_fake_success_source_linkage_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="ocr-prompt-injection-untrusted",
+                category=EvalCategory.OCR,
+                name="OCR prompt injection remains untrusted",
+                description=(
+                    "Checks that prompt-injection text returned by fake OCR remains "
+                    "untrusted source evidence and cannot support agent recommendations."
+                ),
+            ),
+            run=fixtures.run_ocr_prompt_injection_untrusted_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="citation-span-mismatch",
                 category=EvalCategory.CITATION,
                 name="Citation span mismatch rejection",
@@ -182,6 +218,30 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="public-collectors-source-guards",
+                category=EvalCategory.PUBLIC_COLLECTORS,
+                name="Public collector exact-match and source guards",
+                description=(
+                    "Checks exact company matching, related-entity skips, bad provider "
+                    "URL rejection, and no-result summaries naming the company."
+                ),
+            ),
+            run=fixtures.run_public_collectors_source_guards_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="meridian-workflow-guards",
+                category=EvalCategory.MERIDIAN,
+                name="Meridian workflow guardrails",
+                description=(
+                    "Checks unsafe Meridian URL rejection, placeholder row protections, "
+                    "and marker stripping before saved evidence."
+                ),
+            ),
+            run=fixtures.run_meridian_workflow_guards_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="prompt-injection-recommendation",
                 category=EvalCategory.PROMPT_INJECTION,
                 name="HTML prompt-injection recommendation rejection",
@@ -253,6 +313,18 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="score-calibration-guards",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Scoring calibration guardrails",
+                description=(
+                    "Checks missing key terms, negated traction and funding language, "
+                    "and stage and return-math packet instructions for missing inputs."
+                ),
+            ),
+            run=lambda _: fixtures.run_score_calibration_guards_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="missing-data-pass",
                 category=EvalCategory.MISSING_DATA,
                 name="Missing data pass gate",
@@ -287,6 +359,30 @@ def _eval_definitions() -> list[EvalDefinition]:
                 ),
             ),
             run=lambda _: fixtures.run_memo_cited_conflict_evidence_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="memo-output-guards",
+                category=EvalCategory.MEMO_SNAPSHOT,
+                name="Memo and portfolio output guardrails",
+                description=(
+                    "Checks final memo decision ordering, cited evidence beyond the "
+                    "first 25 records, and Markdown escaping for untrusted text."
+                ),
+            ),
+            run=lambda _: fixtures.run_memo_output_guards_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="privacy-output-guards",
+                category=EvalCategory.PRIVACY,
+                name="Private output and ignored-folder guardrails",
+                description=(
+                    "Checks generated folder permissions, ignored local-state scanning, "
+                    "and exclusion of browser profiles, cookies, and local database text."
+                ),
+            ),
+            run=fixtures.run_privacy_output_guards_fixture,
         ),
     ]
 
