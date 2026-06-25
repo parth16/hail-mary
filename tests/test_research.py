@@ -1390,7 +1390,7 @@ def test_collect_usaspending_awards_command_reports_incomplete_search_warning(
 def test_collect_sbir_awards_requires_enabled_web_research(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ResearchCollectionError, match="Local-only mode is on"):
+    with pytest.raises(ResearchCollectionError, match="SBIR/STTR results"):
         collect_sbir_awards(
             config=AppConfig(
                 data_dir=tmp_path / "data",
@@ -1904,6 +1904,23 @@ def test_sbir_redirect_handler_validates_before_following() -> None:
             "Found",
             {},
             "http://127.0.0.1:8000/private",
+        )
+
+
+def test_sbir_redirect_handler_rejects_http_api_redirect() -> None:
+    handler = collection_module._SbirRedirectHandler()
+    request = urllib.request.Request(
+        collection_module._sbir_awards_api_url("Acme AI", rows=1, start=0)
+    )
+
+    with pytest.raises(SbirApiError, match="expected public API endpoint"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "http://api.www.sbir.gov/public/api/awards?firm=Acme+AI&rows=1&start=0",
         )
 
 

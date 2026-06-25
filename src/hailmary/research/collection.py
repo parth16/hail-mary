@@ -851,7 +851,7 @@ def collect_usaspending_awards(
         config = validate_local_state(config)
     except ConfigError as exc:
         raise ResearchCollectionError(str(exc)) from exc
-    _ensure_live_public_research_enabled(config)
+    _ensure_live_public_research_enabled(config, source_name="USAspending")
     collected_at = _as_utc(collected_at or datetime.now(UTC))
     companies = _clean_company_names(company_names or [])
     if not companies:
@@ -995,7 +995,7 @@ def collect_sbir_awards(
         config = validate_local_state(config)
     except ConfigError as exc:
         raise ResearchCollectionError(str(exc)) from exc
-    _ensure_live_public_research_enabled(config)
+    _ensure_live_public_research_enabled(config, source_name="SBIR/STTR")
     collected_at = _as_utc(collected_at or datetime.now(UTC))
     companies = _clean_company_names(company_names or [])
     if not companies:
@@ -1226,16 +1226,20 @@ def _load_sec_form_d_search_results(path: Path) -> SecFormDSearchResultsFile:
     )
 
 
-def _ensure_live_public_research_enabled(config: AppConfig) -> None:
+def _ensure_live_public_research_enabled(
+    config: AppConfig,
+    *,
+    source_name: str,
+) -> None:
     if config.local_only:
         raise ResearchCollectionError(
             "Local-only mode is on. Set HAILMARY_LOCAL_ONLY=false before collecting "
-            "USAspending results."
+            f"{source_name} results."
         )
     if not config.enable_web_research:
         raise ResearchCollectionError(
             "Web research is disabled. Set HAILMARY_ENABLE_WEB_RESEARCH=true before "
-            "collecting USAspending results."
+            f"collecting {source_name} results."
         )
 
 
@@ -1280,7 +1284,11 @@ def _validate_sbir_api_url(url: str) -> None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").casefold()
     path = parsed.path.rstrip("/")
-    if host != "api.www.sbir.gov" or path != "/public/api/awards":
+    if (
+        parsed.scheme != "https"
+        or host != "api.www.sbir.gov"
+        or path != "/public/api/awards"
+    ):
         raise SbirApiError(
             "SBIR/STTR redirected the request away from the expected public API endpoint."
         )
