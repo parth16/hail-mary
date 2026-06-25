@@ -573,6 +573,238 @@ def test_pdf_fragment_ocr_preserves_existing_page_text(
     assert "only a small amount of text" in result.pages[0].notes
 
 
+def test_pdf_useful_ocr_merges_with_existing_page_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return "Acme investor deck"
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="Valuation cap $8M. Minimum investment $1,000.",
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert engine.pdf_calls == [1]
+    assert result.ocr_applied
+    assert not result.ocr_recommended
+    assert result.combined_text == (
+        "Acme investor deck\nValuation cap $8M. Minimum investment $1,000."
+    )
+    assert result.pages[0].raw_text == (
+        "Acme investor deck\n\nValuation cap $8M. Minimum investment $1,000."
+    )
+    assert result.pages[0].source_span_start == 0
+    assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
+    assert result.pages[0].ocr_applied
+    assert result.pages[0].ocr_confidence == 0.91
+    assert result.pages[0].notes is not None
+    assert "Existing PDF text was preserved" in result.pages[0].notes
+
+
+def test_pdf_useful_ocr_does_not_duplicate_existing_page_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return "Valuation cap $8M. Minimum investment $1,000."
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="Valuation cap $8M. Minimum investment $1,000.",
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert result.ocr_applied
+    assert result.combined_text == "Valuation cap $8M. Minimum investment $1,000."
+    assert result.combined_text.count("Valuation cap") == 1
+    assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
+
+
+def test_pdf_useful_ocr_keeps_repeated_existing_lines_when_ocr_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+    existing_text = "Valuation cap\n$8M\nRound size\n$8M"
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return existing_text
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="Valuation cap\n$8M\nRound size",
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert result.ocr_applied
+    assert result.combined_text == existing_text
+    assert result.combined_text.count("$8M") == 2
+    assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
+
+
+def test_pdf_useful_ocr_does_not_repeat_wrapped_existing_term(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+    existing_text = "Valuation cap\n$8M"
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return existing_text
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="Valuation cap $8M. Minimum investment $1,000.",
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert result.ocr_applied
+    assert result.combined_text == "Valuation cap\n$8M\nMinimum investment $1,000."
+    assert result.combined_text.count("Valuation cap") == 1
+    assert result.combined_text.count("$8M") == 1
+    assert result.combined_text.count("Minimum investment") == 1
+
+
+@pytest.mark.parametrize(
+    ("existing_text", "ocr_text"),
+    [
+        ("AI", "Paid customers use the product weekly."),
+        ("US", "Customers report growth in the United States."),
+    ],
+)
+def test_pdf_useful_ocr_keeps_short_existing_labels_when_ocr_contains_same_letters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_text: str,
+    ocr_text: str,
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return existing_text
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text=ocr_text,
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert engine.pdf_calls == [1]
+    assert result.ocr_applied
+    assert existing_text in result.combined_text
+    assert ocr_text in result.combined_text
+    assert result.combined_text.startswith(existing_text)
+    assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
+
+
+def test_pdf_fragment_ocr_does_not_reenter_evidence_after_raw_text_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class BoilerplateOnlyPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return "\n".join(["Confidential: not for distribution"] * 3)
+
+    class Reader:
+        pages = [BoilerplateOnlyPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="$10K",
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert engine.pdf_calls == [1]
+    assert result.ocr_applied
+    assert result.ocr_recommended
+    assert result.combined_text == ""
+    assert "Confidential: not for distribution" in result.pages[0].raw_text
+    assert "$10K" in result.pages[0].raw_text
+    assert result.pages[0].clean_text == ""
+    assert result.pages[0].word_count == 0
+    assert result.pages[0].needs_ocr
+    assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
+    assert result.pages[0].notes is not None
+    assert "only a small amount of text" in result.pages[0].notes
+
+
 def test_pdf_missing_pdftoppm_warns_without_crashing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

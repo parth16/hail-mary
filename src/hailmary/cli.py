@@ -46,7 +46,9 @@ from hailmary.research import (
     ResearchTemplateError,
     WebResearchError,
     builtin_research_providers,
+    collect_github_repositories,
     collect_sbir_awards,
+    collect_sec_form_d_filings,
     collect_usaspending_awards,
     collect_web_research,
     import_research_results,
@@ -625,8 +627,9 @@ def run_evals_command(
             "--category",
             help=(
                 "Run one eval category. Can be used more than once. Valid values: "
-                "extraction, citation, contradiction, research_import, prompt_injection, "
-                "score_calibration, missing_data, memo_snapshot."
+                "extraction, ocr, citation, contradiction, research_import, "
+                "public_collectors, meridian, prompt_injection, score_calibration, "
+                "missing_data, memo_snapshot, privacy."
             ),
         ),
     ] = None,
@@ -1121,6 +1124,254 @@ def prepare_public_research_results_command(
         )
     )
     _print_section("Public research results prepared", result_lines, style="green")
+
+
+@app.command("collect-sec-form-d-filings")
+def collect_sec_form_d_filings_command(
+    company: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--company",
+            help=(
+                "Company to search for in SEC Form D filings. Use more than once "
+                "for multiple companies."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=25,
+            help="Maximum SEC Form D filing records to request per company.",
+        ),
+    ] = 10,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show what would be sent to SEC EDGAR without contacting SEC.",
+        ),
+    ] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should write the private results file.",
+        ),
+    ] = None,
+) -> None:
+    """Collect public SEC Form D evidence for exact issuer-name matches."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = collect_sec_form_d_filings(
+            config=config,
+            company_names=company or [],
+            limit=limit,
+            dry_run=dry_run,
+        )
+    except ResearchCollectionError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    company_word = "company" if result.deal_count == 1 else "companies"
+    result_word = "result" if result.result_count == 1 else "results"
+    if result.dry_run:
+        _print_section(
+            "SEC Form D preview",
+            [
+                _plain(
+                    f"Dry run: Hail Mary would send {result.deal_count} "
+                    f"{company_word} to SEC EDGAR public filing search."
+                ),
+                _plain(
+                    f"A live run can request up to {limit} filing records per page "
+                    f"for up to 20 pages per company while looking for exact issuer-name "
+                    "matches."
+                ),
+                _plain("No SEC requests were sent and no results file was saved."),
+            ],
+            style="yellow",
+        )
+        return
+
+    if result.output_path is None:
+        zero_result_companies = [
+            deal.company_name for deal in result.deals if deal.result_count == 0
+        ]
+        lines = [
+            _plain(
+                f"No exact issuer-name SEC Form D {result_word} were found "
+                f"for {result.deal_count} {company_word}."
+            ),
+            _plain(
+                f"No exact SEC Form D matches were prepared for: "
+                f"{', '.join(zero_result_companies)}."
+            ),
+            _plain("No results file was saved."),
+        ]
+        for warning in result.warnings:
+            lines.append(_plain(f"Warning: {warning}"))
+        _print_section("SEC Form D results", lines, style="yellow")
+        return
+
+    data_dir_option = (
+        f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
+    )
+    next_command = (
+        f"`hailmary import-research-results {shlex.quote(str(result.output_path))}"
+        f"{data_dir_option} --dry-run`."
+    )
+    lines = [
+        _plain(
+            f"Collected {result.result_count} SEC Form D {result_word} for "
+            f"{result.deal_count} {company_word}."
+        ),
+        _plain(f"Saved the private JSON results file to {result.output_path}."),
+        _plain(
+            "Only exact issuer-name matches were prepared. Hail Mary saved parsed "
+            "filing metadata, not raw filings or contact details."
+        ),
+        _plain(f"Next, run {next_command}"),
+    ]
+    for warning in result.warnings:
+        lines.append(_plain(f"Warning: {warning}"))
+    zero_result_companies = [deal.company_name for deal in result.deals if deal.result_count == 0]
+    if zero_result_companies:
+        lines.append(
+            _plain(
+                f"No exact SEC Form D matches were prepared for: "
+                f"{', '.join(zero_result_companies)}."
+            )
+        )
+    _print_section("SEC Form D results collected", lines, style="green")
+
+
+@app.command("collect-github-repositories")
+def collect_github_repositories_command(
+    company: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--company",
+            help=(
+                "Company to search for in GitHub public repositories. Use more than "
+                "once for multiple companies."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=25,
+            help="Maximum GitHub repository records to request per company.",
+        ),
+    ] = 10,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show what would be sent to GitHub without contacting the API.",
+        ),
+    ] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should write the private results file.",
+        ),
+    ] = None,
+) -> None:
+    """Collect public GitHub repository evidence for exact owner or repository matches."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = collect_github_repositories(
+            config=config,
+            company_names=company or [],
+            limit=limit,
+            dry_run=dry_run,
+        )
+    except ResearchCollectionError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    company_word = "company" if result.deal_count == 1 else "companies"
+    result_word = "result" if result.result_count == 1 else "results"
+    if result.dry_run:
+        _print_section(
+            "GitHub repository preview",
+            [
+                _plain(
+                    f"Dry run: Hail Mary would send {result.deal_count} "
+                    f"{company_word} to the GitHub public repository search API."
+                ),
+                _plain(
+                    f"A live run can make repository-name, user-owner, and "
+                    f"organization-owner searches, requesting up to {limit} repository "
+                    "records per page for up to 5 pages per company while looking for "
+                    "exact GitHub owner or repository-name matches."
+                ),
+                _plain("No GitHub API requests were sent and no results file was saved."),
+            ],
+            style="yellow",
+        )
+        return
+
+    if result.output_path is None:
+        zero_result_companies = [
+            deal.company_name for deal in result.deals if deal.result_count == 0
+        ]
+        lines = [
+            _plain(
+                f"No exact GitHub owner or repository-name {result_word} were found "
+                f"for {result.deal_count} {company_word}."
+            ),
+            _plain(
+                f"No exact GitHub matches were prepared for: "
+                f"{', '.join(zero_result_companies)}."
+            ),
+            _plain("No results file was saved."),
+        ]
+        for warning in result.warnings:
+            lines.append(_plain(f"Warning: {warning}"))
+        _print_section("GitHub repository results", lines, style="yellow")
+        return
+
+    data_dir_option = (
+        f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
+    )
+    next_command = (
+        f"`hailmary import-research-results {shlex.quote(str(result.output_path))}"
+        f"{data_dir_option} --dry-run`."
+    )
+    lines = [
+        _plain(
+            f"Collected {result.result_count} GitHub repository {result_word} for "
+            f"{result.deal_count} {company_word}."
+        ),
+        _plain(f"Saved the private JSON results file to {result.output_path}."),
+        _plain(
+            "Only exact GitHub owner or repository-name matches were prepared. "
+            "Hail Mary saved repository metadata only and did not clone code or fetch "
+            "README files."
+        ),
+        _plain(f"Next, run {next_command}"),
+    ]
+    for warning in result.warnings:
+        lines.append(_plain(f"Warning: {warning}"))
+    zero_result_companies = [deal.company_name for deal in result.deals if deal.result_count == 0]
+    if zero_result_companies:
+        lines.append(
+            _plain(
+                f"No exact GitHub matches were prepared for: "
+                f"{', '.join(zero_result_companies)}."
+            )
+        )
+    _print_section("GitHub repository results collected", lines, style="green")
 
 
 @app.command("collect-usaspending-awards")

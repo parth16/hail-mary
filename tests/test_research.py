@@ -4,6 +4,7 @@ import json
 import shlex
 import socket
 import stat
+import time
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +20,9 @@ from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.research import (
+    GitHubApiError,
+    GitHubRepositoryCollectionRunSummary,
+    GitHubRepositorySearchResponse,
     MeridianWorkflowError,
     ResearchCollectionDealSummary,
     ResearchCollectionError,
@@ -31,7 +35,13 @@ from hailmary.research import (
     SbirAwardRecord,
     SbirAwardsResponse,
     SbirCollectionRunSummary,
+    SecFormDApiError,
+    SecFormDCollectionRunSummary,
+    SecFormDFilingRecord,
+    SecFormDFilingsResponse,
+    UrlLibGitHubRepositorySearchClient,
     UrlLibSbirAwardsClient,
+    UrlLibSecFormDFilingsClient,
     UrlLibUsaspendingAwardsClient,
     UsaspendingApiError,
     UsaspendingAwardRecord,
@@ -39,7 +49,9 @@ from hailmary.research import (
     UsaspendingCollectionRunSummary,
     WebResearchError,
     builtin_research_providers,
+    collect_github_repositories,
     collect_sbir_awards,
+    collect_sec_form_d_filings,
     collect_usaspending_awards,
     collect_web_research,
     import_research_results,
@@ -2131,6 +2143,1181 @@ def test_collect_sbir_awards_command_reports_incomplete_search_warning(
     assert "No exact firm-name SBIR/STTR results were found" in output
     assert "Warning: SBIR/STTR still returned full fuzzy result pages" in output
     assert "No results file was saved" in output
+
+
+def test_collect_sec_form_d_filings_requires_enabled_web_research(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ResearchCollectionError, match="SEC Form D results"):
+        collect_sec_form_d_filings(
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                local_only=True,
+                enable_web_research=True,
+            ),
+            company_names=["Acme AI"],
+        )
+
+
+def test_collect_sec_form_d_filings_writes_private_exact_matches(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    ingest_folder(root, config=config)
+    client = _FakeSecFormDFilingsClient(
+        {
+            ("Acme AI", 0): _sec_form_d_response(
+                [
+                    _sec_form_d_filing(
+                        issuer_name="Acme AI",
+                        total_offering_amount="$1,000,000",
+                    ),
+                    _sec_form_d_filing(
+                        issuer_name="Acme AI Holdings",
+                        accession_number="0001234567-26-000002",
+                    ),
+                ]
+            ),
+            ("Beta Robotics", 0): _sec_form_d_response([]),
+        }
+    )
+
+    result = collect_sec_form_d_filings(
+        config=config,
+        company_names=["Acme AI", "Beta Robotics"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == [("Acme AI", 5, 0), ("Beta Robotics", 5, 0)]
+    assert result.output_path is not None
+    assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
+    assert result.result_count == 1
+    assert [(deal.company_name, deal.result_count) for deal in result.deals] == [
+        ("Acme AI", 1),
+        ("Beta Robotics", 0),
+    ]
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert len(saved["results"]) == 1
+    prepared = saved["results"][0]
+    assert prepared["company_name"] == "Acme AI"
+    assert prepared["provider_id"] == "sec_form_d"
+    assert prepared["provider_name"] == "SEC EDGAR Form D search"
+    assert prepared["title"] == "SEC Form D filing for Acme AI"
+    assert prepared["retrieved_at"] == "2026-01-01T00:00:00Z"
+    assert prepared["source_url"].startswith("https://www.sec.gov/Archives/")
+    assert prepared["source_api"].startswith("https://www.sec.gov/cgi-bin/browse-edgar")
+    assert "Total offering amount: $1,000,000." in prepared["text"]
+    assert "Acme AI Holdings" not in prepared["text"]
+    assert "founder@example.com" not in prepared["text"]
+    assert "555-0100" not in prepared["text"]
+    assert "Main Street" not in prepared["text"]
+    assert "raw filings" in prepared["licensing_notes"]
+
+    import_summary = import_research_results(
+        config=config,
+        results_path=result.output_path,
+        dry_run=True,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    assert import_summary.imported_count == 1
+
+
+def test_collect_sec_form_d_filings_no_exact_results_names_companies(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSecFormDFilingsClient(
+        {
+            ("Acme AI", 0): _sec_form_d_response(
+                [_sec_form_d_filing(issuer_name="Acme AI Holdings")]
+            ),
+            ("Beta Robotics", 0): _sec_form_d_response([]),
+        }
+    )
+
+    result = collect_sec_form_d_filings(
+        config=config,
+        company_names=["Acme AI", "Beta Robotics"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is None
+    assert result.result_count == 0
+    assert [deal.company_name for deal in result.deals if deal.result_count == 0] == [
+        "Acme AI",
+        "Beta Robotics",
+    ]
+
+
+def test_collect_sec_form_d_filings_dry_run_does_not_call_api(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSecFormDFilingsClient({})
+
+    result = collect_sec_form_d_filings(
+        config=config,
+        company_names=["Acme AI"],
+        limit=3,
+        dry_run=True,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.output_path is None
+    assert result.dry_run is True
+    assert result.deal_count == 1
+    assert result.result_count == 0
+
+
+def test_collect_sec_form_d_filings_requires_sec_user_agent_for_live_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HAILMARY_SEC_USER_AGENT", raising=False)
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+
+    with pytest.raises(ResearchCollectionError, match="HAILMARY_SEC_USER_AGENT"):
+        collect_sec_form_d_filings(
+            config=config,
+            company_names=["Acme AI"],
+            collected_at=BUILT_AT,
+        )
+
+
+def test_sec_form_d_user_agent_requires_contact_email() -> None:
+    with pytest.raises(ResearchCollectionError, match="contact email"):
+        collection_module._validate_sec_form_d_user_agent("Hail Mary diligence")
+
+
+def test_collect_sec_form_d_filings_surfaces_api_failures(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSecFormDFilingsClient(
+        {},
+        error=SecFormDApiError("Could not reach SEC EDGAR: timed out"),
+    )
+
+    with pytest.raises(ResearchCollectionError, match="Could not reach SEC EDGAR"):
+        collect_sec_form_d_filings(
+            config=config,
+            company_names=["Acme AI"],
+            client=client,
+            collected_at=BUILT_AT,
+        )
+
+
+def test_collect_sec_form_d_filings_rejects_bad_source_url(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSecFormDFilingsClient(
+        {
+            ("Acme AI", 0): _sec_form_d_raw_response(
+                [
+                    {
+                        **_sec_form_d_filing(issuer_name="Acme AI").model_dump(),
+                        "source_url": "https://example.com/sec-form-d.txt",
+                    }
+                ]
+            )
+        }
+    )
+
+    with pytest.raises(ResearchCollectionError, match="source_url must use"):
+        collect_sec_form_d_filings(
+            config=config,
+            company_names=["Acme AI"],
+            limit=5,
+            client=client,
+            collected_at=BUILT_AT,
+        )
+
+
+def test_sec_form_d_response_requires_pagination_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_sec_form_d_resolved_public_endpoint",
+        lambda _url: None,
+    )
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module._sec_form_d_atom_api_url(
+                "Acme AI",
+                count=1,
+                start=0,
+            )
+
+        def read(self, _size: int) -> bytes:
+            return b"<feed></feed>"
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(SecFormDApiError, match="missing pagination metadata"):
+        UrlLibSecFormDFilingsClient(
+            user_agent="Hail Mary tests tests@example.com",
+            request_interval_seconds=0,
+        ).search_filings(
+            "Acme AI",
+            count=1,
+            start=0,
+            timeout_seconds=1.0,
+        )
+
+
+def test_sec_form_d_atom_parser_skips_malformed_related_fuzzy_entry() -> None:
+    related_href = (
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/0001234567-26-000001-index.htm"
+    )
+    exact_href = (
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000002/0001234567-26-000002-index.htm"
+    )
+    xml_text = f"""
+    <feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+      <opensearch:totalResults>2</opensearch:totalResults>
+      <opensearch:startIndex>0</opensearch:startIndex>
+      <opensearch:itemsPerPage>2</opensearch:itemsPerPage>
+      <entry>
+        <title>D - Acme AI Holdings (0001234567)</title>
+        <category term="D" />
+        <link href="{related_href}" />
+      </entry>
+      <entry>
+        <title>D - Acme AI (0001234568)</title>
+        <category term="D" />
+        <link href="{exact_href}" />
+      </entry>
+    </feed>
+    """
+    fetched_urls: list[str] = []
+
+    def fake_fetch(source_url: str) -> dict[str, str | list[str] | None]:
+        fetched_urls.append(source_url)
+        return {"issuer_name": "Acme AI", "federal_exemptions": ["06b"]}
+
+    response = collection_module._parse_sec_form_d_atom_response(
+        xml_text,
+        requested_company_name="Acme AI",
+        source_api=collection_module._sec_form_d_atom_api_url(
+            "Acme AI",
+            count=2,
+            start=0,
+        ),
+        fetch_submission=fake_fetch,
+    )
+
+    assert fetched_urls == [
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000002/0001234567-26-000002.txt"
+    ]
+    assert len(response.results) == 1
+    assert response.results[0]["issuer_name"] == "Acme AI"
+
+
+def test_sec_form_d_atom_parser_fails_malformed_exact_entry() -> None:
+    exact_href = (
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000002/0001234567-26-000002-index.htm"
+    )
+    xml_text = f"""
+    <feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+      <opensearch:totalResults>1</opensearch:totalResults>
+      <opensearch:startIndex>0</opensearch:startIndex>
+      <opensearch:itemsPerPage>1</opensearch:itemsPerPage>
+      <entry>
+        <title>D - Acme AI (0001234568)</title>
+        <category term="D" />
+        <link href="{exact_href}" />
+      </entry>
+    </feed>
+    """
+
+    def fake_fetch(_source_url: str) -> dict[str, str | list[str] | None]:
+        raise SecFormDApiError("SEC Form D filing metadata could not be parsed as XML.")
+
+    with pytest.raises(SecFormDApiError, match="could not be parsed"):
+        collection_module._parse_sec_form_d_atom_response(
+            xml_text,
+            requested_company_name="Acme AI",
+            source_api=collection_module._sec_form_d_atom_api_url(
+                "Acme AI",
+                count=1,
+                start=0,
+            ),
+            fetch_submission=fake_fetch,
+        )
+
+
+def test_sec_form_d_complete_submission_url_keeps_dashed_accession_filename() -> None:
+    source_url = collection_module._sec_form_d_complete_submission_url(
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/0001234567-26-000001-index.htm",
+        accession_number="0001234567-26-000001",
+    )
+
+    assert source_url.endswith("/0001234567-26-000001.txt")
+
+
+def test_sec_form_d_complete_submission_url_handles_primary_doc_subdirectory() -> None:
+    source_url = collection_module._sec_form_d_complete_submission_url(
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/xslFormDX01/primary_doc.xml",
+        accession_number="0001234567-26-000001",
+    )
+
+    assert source_url == (
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/0001234567-26-000001.txt"
+    )
+
+
+def test_sec_form_d_redirect_handler_rejects_http_redirect() -> None:
+    handler = collection_module._SecFormDRedirectHandler()
+    request = urllib.request.Request(
+        collection_module._sec_form_d_atom_api_url("Acme AI", count=1, start=0)
+    )
+
+    with pytest.raises(SecFormDApiError, match="must stay on HTTPS"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "http://www.sec.gov/cgi-bin/browse-edgar?action=getcompany",
+        )
+
+
+def test_sec_form_d_redirect_handler_rejects_atom_to_archive_redirect() -> None:
+    handler = collection_module._SecFormDRedirectHandler()
+    request = urllib.request.Request(
+        collection_module._sec_form_d_atom_api_url("Acme AI", count=1, start=0)
+    )
+
+    with pytest.raises(SecFormDApiError, match="expected public API endpoint"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://www.sec.gov/Archives/edgar/data/1234567890/"
+            "000123456726000001/0001234567-26-000001.txt",
+        )
+
+
+def test_sec_form_d_redirect_handler_rejects_detail_to_search_redirect() -> None:
+    handler = collection_module._SecFormDRedirectHandler()
+    request = urllib.request.Request(
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/0001234567-26-000001.txt"
+    )
+
+    with pytest.raises(SecFormDApiError, match="archive path"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            collection_module._sec_form_d_atom_api_url("Acme AI", count=1, start=0),
+        )
+
+
+def test_sec_form_d_client_disables_ambient_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+    captured_handlers: list[object] = []
+
+    def fake_build_opener(
+        *handlers: object,
+    ) -> urllib.request.OpenerDirector:
+        captured_handlers.extend(handlers)
+        return urllib.request.OpenerDirector()
+
+    monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
+
+    collection_module._build_sec_form_d_api_opener()
+
+    proxy_handlers = [
+        handler
+        for handler in captured_handlers
+        if isinstance(handler, urllib.request.ProxyHandler)
+    ]
+    assert proxy_handlers
+    proxy_handler = cast(_ProxyHandlerWithProxies, proxy_handlers[0])
+    assert proxy_handler.proxies == {}
+
+
+def test_collect_github_repositories_requires_enabled_web_research(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ResearchCollectionError, match="GitHub results"):
+        collect_github_repositories(
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                local_only=True,
+                enable_web_research=True,
+            ),
+            company_names=["Acme AI"],
+        )
+
+
+def test_collect_github_repositories_writes_private_exact_matches(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    ingest_folder(root, config=config)
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai",
+                        full_name="synthetic/acme-ai",
+                        owner_login="synthetic",
+                    ),
+                    _github_repository(
+                        name="acme-ai-related",
+                        full_name="synthetic/acme-ai-related",
+                        owner_login="synthetic",
+                    ),
+                ]
+            ),
+            ("Beta Robotics", 1): _github_repository_response([]),
+        }
+    )
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI", "Beta Robotics"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == [("Acme AI", 5, 1), ("Beta Robotics", 5, 1)]
+    assert result.output_path is not None
+    assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
+    assert result.result_count == 1
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert len(saved["results"]) == 1
+    prepared = saved["results"][0]
+    assert prepared["company_name"] == "Acme AI"
+    assert prepared["provider_id"] == "github"
+    assert prepared["provider_name"] == "GitHub repository search"
+    assert prepared["title"] == "GitHub repository synthetic/acme-ai"
+    assert prepared["source_url"] == "https://github.com/synthetic/acme-ai"
+    assert prepared["source_api"] == "https://api.github.com/repos/synthetic/acme-ai"
+    assert "Repository: synthetic/acme-ai." in prepared["text"]
+    assert "acme-ai-related" not in prepared["text"]
+    assert "did not clone code" in prepared["licensing_notes"]
+
+    import_summary = import_research_results(
+        config=config,
+        results_path=result.output_path,
+        dry_run=True,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    assert import_summary.imported_count == 1
+
+
+def test_collect_github_repositories_no_exact_results_names_companies(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai-related",
+                        full_name="synthetic/acme-ai-related",
+                        owner_login="synthetic",
+                    )
+                ]
+            ),
+            ("Beta Robotics", 1): _github_repository_response([]),
+        }
+    )
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI", "Beta Robotics"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is None
+    assert result.result_count == 0
+    assert [deal.company_name for deal in result.deals if deal.result_count == 0] == [
+        "Acme AI",
+        "Beta Robotics",
+    ]
+
+
+def test_collect_github_repositories_dry_run_does_not_call_api(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeGitHubRepositorySearchClient({})
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI"],
+        limit=3,
+        dry_run=True,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.output_path is None
+    assert result.dry_run is True
+    assert result.deal_count == 1
+    assert result.result_count == 0
+
+
+def test_collect_github_repositories_paginates_when_response_has_next(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    ingest_folder(root, config=config)
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response([], has_next=True),
+            ("Acme AI", 2): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai",
+                        full_name="synthetic/acme-ai",
+                        owner_login="synthetic",
+                    )
+                ]
+            ),
+        }
+    )
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == [("Acme AI", 5, 1), ("Acme AI", 5, 2)]
+    assert result.result_count == 1
+
+
+def test_collect_github_repositories_prioritizes_owner_matches_before_names(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    ingest_folder(root, config=config)
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai",
+                        full_name="unrelated/acme-ai",
+                        owner_login="unrelated",
+                    ),
+                    _github_repository(
+                        name="owner-tool",
+                        full_name="acme-ai/owner-tool",
+                        owner_login="acme-ai",
+                    ),
+                ]
+            ),
+        }
+    )
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI"],
+        limit=1,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["source_url"] == "https://github.com/acme-ai/owner-tool"
+
+
+def test_collect_github_repositories_surfaces_api_failures(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeGitHubRepositorySearchClient(
+        {},
+        error=GitHubApiError("Could not reach GitHub: timed out"),
+    )
+
+    with pytest.raises(ResearchCollectionError, match="Could not reach GitHub"):
+        collect_github_repositories(
+            config=config,
+            company_names=["Acme AI"],
+            client=client,
+            collected_at=BUILT_AT,
+        )
+
+
+def test_collect_github_repositories_rejects_bad_source_url(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_raw_repository_response(
+                [
+                    {
+                        **_github_repository(
+                            name="acme-ai",
+                            full_name="synthetic/acme-ai",
+                            owner_login="synthetic",
+                        ),
+                        "html_url": "https://example.com/synthetic/acme-ai",
+                    }
+                ]
+            )
+        }
+    )
+
+    with pytest.raises(ResearchCollectionError, match="source_url must use"):
+        collect_github_repositories(
+            config=config,
+            company_names=["Acme AI"],
+            limit=5,
+            client=client,
+            collected_at=BUILT_AT,
+        )
+
+
+def test_github_response_requires_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_github_resolved_public_endpoint",
+        lambda _url: None,
+    )
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module._github_repository_search_api_url(
+                "Acme AI",
+                per_page=1,
+                page=1,
+            )
+
+        def read(self, _size: int) -> bytes:
+            return b'{"total_count":0}'
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(GitHubApiError, match="unexpected response"):
+        UrlLibGitHubRepositorySearchClient(
+            request_interval_seconds=0,
+        ).search_repositories(
+            "Acme AI",
+            per_page=1,
+            page=1,
+            timeout_seconds=1.0,
+        )
+
+
+def test_github_response_requires_pagination_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_github_resolved_public_endpoint",
+        lambda _url: None,
+    )
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module._github_repository_search_api_url(
+                "Acme AI",
+                per_page=1,
+                page=1,
+            )
+
+        def read(self, _size: int) -> bytes:
+            return b'{"items":[]}'
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(GitHubApiError, match="unexpected response"):
+        UrlLibGitHubRepositorySearchClient(
+            request_interval_seconds=0,
+        ).search_repositories(
+            "Acme AI",
+            per_page=1,
+            page=1,
+            timeout_seconds=1.0,
+        )
+
+
+def test_github_repository_search_api_urls_include_owner_scopes() -> None:
+    urls = collection_module._github_repository_search_api_urls(
+        "Acme AI",
+        per_page=5,
+        page=1,
+    )
+
+    assert "q=user%3Aacme-ai+fork%3Afalse" in urls[0]
+    assert "q=org%3Aacme-ai+fork%3Afalse" in urls[1]
+    assert "q=Acme+AI+in%3Aname+fork%3Afalse" in urls[2]
+    assert any("q=Acme+AI+in%3Aname+fork%3Afalse" in url for url in urls)
+    assert any("q=user%3Aacme-ai+fork%3Afalse" in url for url in urls)
+    assert any("q=org%3Aacme-ai+fork%3Afalse" in url for url in urls)
+
+
+def test_github_client_paces_generated_search_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_github_resolved_public_endpoint",
+        lambda _url: None,
+    )
+    sleeps: list[float] = []
+    opened_urls: list[str] = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self, url: str) -> None:
+            self._url = url
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return self._url
+
+        def read(self, _size: int) -> bytes:
+            return b'{"total_count":0,"incomplete_results":false,"items":[]}'
+
+    class FakeOpener:
+        def open(
+            self,
+            request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            opened_urls.append(request.full_url)
+            return FakeResponse(request.full_url)
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    response = UrlLibGitHubRepositorySearchClient(
+        request_interval_seconds=0.25,
+    ).search_repositories(
+        "Acme AI",
+        per_page=1,
+        page=1,
+        timeout_seconds=1.0,
+    )
+
+    assert response.result_count == 0
+    assert len(opened_urls) == 3
+    assert sleeps == [0.25, 0.25, 0.25]
+
+
+def test_github_redirect_handler_rejects_outside_host() -> None:
+    handler = collection_module._GitHubRedirectHandler()
+    request = urllib.request.Request(
+        collection_module._github_repository_search_api_url(
+            "Acme AI",
+            per_page=1,
+            page=1,
+        )
+    )
+
+    with pytest.raises(GitHubApiError, match="GitHub redirect URL"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://example.com/search/repositories",
+        )
+
+
+def test_github_redirect_handler_rejects_non_search_api_redirect() -> None:
+    handler = collection_module._GitHubRedirectHandler()
+    request = urllib.request.Request(
+        collection_module._github_repository_search_api_url(
+            "Acme AI",
+            per_page=1,
+            page=1,
+        )
+    )
+
+    with pytest.raises(GitHubApiError, match="expected public API endpoint"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://api.github.com/repos/synthetic/acme-ai",
+        )
+
+
+def test_github_client_disables_ambient_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+    captured_handlers: list[object] = []
+
+    def fake_build_opener(
+        *handlers: object,
+    ) -> urllib.request.OpenerDirector:
+        captured_handlers.extend(handlers)
+        return urllib.request.OpenerDirector()
+
+    monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
+
+    collection_module._build_github_api_opener()
+
+    proxy_handlers = [
+        handler
+        for handler in captured_handlers
+        if isinstance(handler, urllib.request.ProxyHandler)
+    ]
+    assert proxy_handlers
+    proxy_handler = cast(_ProxyHandlerWithProxies, proxy_handlers[0])
+    assert proxy_handler.proxies == {}
+
+
+def test_collect_sec_form_d_filings_command_dry_run_reports_no_sec_contact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-sec-form-d-filings",
+            "--company",
+            "Acme AI",
+            "--limit",
+            "3",
+            "--dry-run",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = _plain_cli_output(result.output)
+    assert "SEC Form D preview" in output
+    assert "would send 1 company to SEC EDGAR public filing search" in output
+    assert "up to 3 filing records per page for up to 20 pages" in output
+    assert "No SEC requests were sent" in output
+    assert not list((tmp_path / "data" / "research-results").glob("*.json"))
+
+
+def test_collect_github_repositories_command_dry_run_reports_no_api_contact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-github-repositories",
+            "--company",
+            "Acme AI",
+            "--limit",
+            "3",
+            "--dry-run",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = _plain_cli_output(result.output)
+    assert "GitHub repository preview" in output
+    assert "would send 1 company to the GitHub public repository search API" in output
+    assert "repository-name, user-owner, and organization-owner searches" in output
+    assert "up to 3 repository records per page for up to 5 pages" in output
+    assert "No GitHub API requests were sent" in output
+    assert not list((tmp_path / "data" / "research-results").glob("*.json"))
+
+
+def test_collect_sec_form_d_filings_command_success_reports_import_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    output_path = tmp_path / "data" / "research-results" / "sec-form-d-results.json"
+
+    def fake_collect_sec_form_d_filings(
+        *,
+        config: AppConfig,
+        company_names: list[str] | None,
+        limit: int,
+        dry_run: bool,
+    ) -> SecFormDCollectionRunSummary:
+        _ = config
+        assert company_names == ["Acme AI"]
+        assert limit == 5
+        assert dry_run is False
+        return SecFormDCollectionRunSummary(
+            output_path=output_path,
+            collected_at=BUILT_AT,
+            deals=[
+                ResearchCollectionDealSummary(
+                    company_name="Acme AI",
+                    result_count=1,
+                )
+            ],
+        )
+
+    monkeypatch.setattr(
+        cli_module,
+        "collect_sec_form_d_filings",
+        fake_collect_sec_form_d_filings,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-sec-form-d-filings",
+            "--company",
+            "Acme AI",
+            "--limit",
+            "5",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = _plain_cli_output(result.output)
+    assert "SEC Form D results collected" in output
+    assert "Collected 1 SEC Form D result for 1 company" in output
+    assert "import-research-results" in output
+    assert "raw filings or contact details" in output
+
+
+def test_collect_github_repositories_command_failure_has_plain_english_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_collect_github_repositories(
+        *,
+        config: AppConfig,
+        company_names: list[str] | None,
+        limit: int,
+        dry_run: bool,
+    ) -> GitHubRepositoryCollectionRunSummary:
+        _ = (config, company_names, limit, dry_run)
+        raise ResearchCollectionError("GitHub returned HTTP 403.")
+
+    monkeypatch.setattr(
+        cli_module,
+        "collect_github_repositories",
+        fake_collect_github_repositories,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-github-repositories",
+            "--company",
+            "Acme AI",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "GitHub returned HTTP 403" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_prepare_meridian_workflow_writes_private_workflow_and_template(
@@ -4809,6 +5996,68 @@ class _FakeSbirAwardsClient:
             ) from exc
 
 
+class _FakeSecFormDFilingsClient:
+    def __init__(
+        self,
+        responses: dict[tuple[str, int], SecFormDFilingsResponse],
+        *,
+        error: SecFormDApiError | None = None,
+    ) -> None:
+        self.responses = responses
+        self.error = error
+        self.calls: list[tuple[str, int, int]] = []
+
+    def search_filings(
+        self,
+        company_name: str,
+        *,
+        count: int,
+        start: int,
+        timeout_seconds: float,
+    ) -> SecFormDFilingsResponse:
+        _ = timeout_seconds
+        self.calls.append((company_name, count, start))
+        if self.error is not None:
+            raise self.error
+        try:
+            return self.responses[(company_name, start)]
+        except KeyError as exc:
+            raise AssertionError(
+                f"No fake SEC Form D response for {company_name} start {start}."
+            ) from exc
+
+
+class _FakeGitHubRepositorySearchClient:
+    def __init__(
+        self,
+        responses: dict[tuple[str, int], GitHubRepositorySearchResponse],
+        *,
+        error: GitHubApiError | None = None,
+    ) -> None:
+        self.responses = responses
+        self.error = error
+        self.calls: list[tuple[str, int, int]] = []
+
+    def search_repositories(
+        self,
+        company_name: str,
+        *,
+        per_page: int,
+        page: int,
+        timeout_seconds: float,
+    ) -> GitHubRepositorySearchResponse:
+        _ = timeout_seconds
+        self.calls.append((company_name, per_page, page))
+        if self.error is not None:
+            raise self.error
+        try:
+            return self.responses[(company_name, page)]
+        except KeyError as exc:
+            raise AssertionError(
+                f"No fake GitHub response for {company_name} page {page}."
+            ) from exc
+
+
 def _usaspending_response(
     results: list[UsaspendingAwardRecord],
     *,
@@ -4845,6 +6094,57 @@ def _sbir_response(results: list[SbirAwardRecord]) -> SbirAwardsResponse:
 
 def _sbir_raw_response(results: list[dict[str, object]]) -> SbirAwardsResponse:
     return SbirAwardsResponse.model_validate({"results": results})
+
+
+def _sec_form_d_response(
+    results: list[SecFormDFilingRecord],
+    *,
+    has_next: bool = False,
+) -> SecFormDFilingsResponse:
+    return SecFormDFilingsResponse.model_validate(
+        {
+            "results": [result.model_dump() for result in results],
+            "has_next": has_next,
+        }
+    )
+
+
+def _sec_form_d_raw_response(
+    results: list[dict[str, object]],
+    *,
+    has_next: bool = False,
+) -> SecFormDFilingsResponse:
+    return SecFormDFilingsResponse.model_validate(
+        {"results": results, "has_next": has_next}
+    )
+
+
+def _github_repository_response(
+    results: list[dict[str, object]],
+    *,
+    incomplete_results: bool = False,
+    has_next: bool = False,
+    total_count: int | None = None,
+) -> GitHubRepositorySearchResponse:
+    return GitHubRepositorySearchResponse.model_validate(
+        {
+            "total_count": len(results) if total_count is None else total_count,
+            "incomplete_results": incomplete_results,
+            "has_next": has_next,
+            "items": results,
+        }
+    )
+
+
+def _github_raw_repository_response(
+    results: list[dict[str, object]],
+    *,
+    incomplete_results: bool = False,
+) -> GitHubRepositorySearchResponse:
+    return _github_repository_response(
+        results,
+        incomplete_results=incomplete_results,
+    )
 
 
 def _usaspending_award(
@@ -4907,6 +6207,75 @@ def _sbir_award(
             "poc_phone": "555-0100",
         }
     )
+
+
+def _sec_form_d_filing(
+    *,
+    issuer_name: str,
+    filing_type: str = "D",
+    accession_number: str = "0001234567-26-000001",
+    total_offering_amount: str | None = None,
+) -> SecFormDFilingRecord:
+    accession_digits = accession_number.replace("-", "")
+    accession_filename = collection_module._sec_accession_filename(accession_number)
+    assert accession_filename is not None
+    return SecFormDFilingRecord.model_validate(
+        {
+            "issuer_name": issuer_name,
+            "filing_type": filing_type,
+            "accession_number": accession_number,
+            "source_url": (
+                "https://www.sec.gov/Archives/edgar/data/1234567890/"
+                f"{accession_digits}/{accession_filename}.txt"
+            ),
+            "source_api": collection_module._sec_form_d_atom_api_url(
+                issuer_name,
+                count=5,
+                start=0,
+            ),
+            "filing_date": "2026-01-01",
+            "form_name": "Notice of Exempt Offering of Securities",
+            "total_offering_amount": total_offering_amount,
+            "total_amount_sold": "$250,000",
+            "total_remaining": "$750,000",
+            "minimum_investment_accepted": "$2,500",
+            "total_investors": "5",
+            "industry_group": "Other Technology",
+            "revenue_range": "Decline to Disclose",
+            "federal_exemptions": ["06b"],
+            "contact_email": "founder@example.com",
+            "contact_phone": "555-0100",
+            "street_address": "1 Main Street",
+        }
+    )
+
+
+def _github_repository(
+    *,
+    name: str,
+    full_name: str,
+    owner_login: str,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "full_name": full_name,
+        "owner": {"login": owner_login},
+        "html_url": f"https://github.com/{full_name}",
+        "url": f"https://api.github.com/repos/{full_name}",
+        "description": "Synthetic public repository metadata.",
+        "language": "Python",
+        "stargazers_count": 42,
+        "forks_count": 7,
+        "open_issues_count": 3,
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "pushed_at": "2026-01-02T00:00:00Z",
+        "license": {"name": "MIT License"},
+        "private": False,
+        "fork": False,
+        "archived": False,
+        "disabled": False,
+    }
 
 
 def _write_public_source_results(path: Path, results: list[dict[str, object]]) -> None:

@@ -841,6 +841,41 @@ def test_score_evidence_store_passes_when_platform_minimum_exceeds_max_check() -
     )
 
 
+def test_score_evidence_store_rounds_fractional_platform_minimum_up() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Minimum investment $2,500.50.",
+        ),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    minimum_claim = _claim("minimum investment", "$2,500.50", "ev_terms").model_copy(
+        update={"normalized_value": "usd_cents:250050"}
+    )
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        minimum_claim,
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(
+            data_dir=Path("data"),
+            capital_budget=2_500,
+            max_check=2_500,
+        ),
+    )
+
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert any(
+        gate.name == "Platform minimum above maximum check"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_score_evidence_store_passes_when_no_nonzero_check_fits() -> None:
     evidence = [
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
@@ -961,6 +996,42 @@ def test_score_evidence_store_ignores_qualified_negated_traction() -> None:
 @pytest.mark.parametrize(
     "traction_text",
     [
+        "The company is operating without any customers yet.",
+        "The company is operating without any revenue yet.",
+        "The company has no actual customers yet.",
+        "The company has no customer revenue yet.",
+        "The company lacks customers and revenue.",
+    ],
+)
+def test_score_evidence_store_ignores_common_negative_traction_phrases(
+    traction_text: str,
+) -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M.",
+        ),
+        _evidence("ev_negative_traction", traction_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert scored.recommendation == Recommendation.PASS
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+@pytest.mark.parametrize(
+    "traction_text",
+    [
         "No churn among paid customers.",
         "No retention issues among enterprise customers.",
     ],
@@ -1040,6 +1111,38 @@ def test_score_evidence_store_ignores_qualified_negated_funding_language() -> No
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
         _evidence("ev_traction", "ARR revenue growth with paid customers."),
         _evidence("ev_funding", "There is no committed lead investor yet."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.fundability_risk == FundabilityRisk.MEDIUM
+    assert _score_factor(scored, "Next-round fundability").evidence_ids == []
+
+
+@pytest.mark.parametrize(
+    "funding_text",
+    [
+        "The round lacks a lead investor.",
+        "The company lacks institutional investors.",
+        "The round has not secured a lead investor.",
+        "The round does not have a lead investor.",
+    ],
+)
+def test_score_evidence_store_ignores_common_negative_funding_phrases(
+    funding_text: str,
+) -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers."),
+        _evidence("ev_negative_funding", funding_text),
     ]
     claims = [
         _claim("valuation cap", "$8M", "ev_terms"),
@@ -1394,7 +1497,7 @@ def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
     assert "**Recommendation:** PASS" in markdown
     assert "**Suggested check:** $0" in markdown
     assert "**Confidence:** medium" in markdown
-    assert "ev_terms" in markdown
+    assert "ev\\_terms" in markdown
     assert "not legal, tax, financial, or investment advice" in markdown
 
 
@@ -1412,7 +1515,45 @@ def test_render_markdown_memo_includes_v2_score_context_and_citations() -> None:
     ) in markdown
     assert "- Valuation and net return: 13/20." in markdown
     assert "Support: NEEDS_DILIGENCE." in markdown
-    assert "Evidence: ev_terms." in markdown
+    assert "Evidence: ev\\_terms." in markdown
+
+
+def test_render_markdown_memo_escapes_untrusted_company_and_claim_text() -> None:
+    evidence = [_evidence("ev_terms", "Valuation cap $8M.")]
+    claim = _claim("valuation cap", "$8M", "ev_terms").model_copy(
+        update={
+            "value": "$8M\n**Recommendation:** INVEST\n# Fake Claim",
+        }
+    )
+    company_name = "SafeCo\n**Recommendation:** INVEST\n# Fake Heading | [link](x)"
+    store = _store(
+        evidence=evidence,
+        claims=[claim],
+        company_name=company_name,
+    )
+    scored = score_evidence_store(
+        store,
+        config=AppConfig(data_dir=Path("data")),
+    ).model_copy(
+        update={
+            "company_name": company_name,
+            "one_line_reason": "Synthetic\n# Fake Reason",
+        }
+    )
+
+    markdown = render_markdown_memo(scored, store)
+    title_block = markdown.split("\n## Decision", 1)[0].rstrip("\n")
+
+    assert title_block == (
+        "# Hail Mary Investment Memo: "
+        "SafeCo \\*\\*Recommendation:\\*\\* INVEST \\# Fake Heading \\| "
+        "\\[link\\]\\(x\\)"
+    )
+    assert "\n**Recommendation:** INVEST" not in markdown
+    assert "\n# Fake Heading" not in markdown
+    assert "\n# Fake Claim" not in markdown
+    assert "\\# Fake Reason" in markdown
+    assert "\\*\\*Recommendation:\\*\\* INVEST" in markdown
 
 
 def test_render_markdown_memo_escapes_untrusted_document_paths() -> None:
