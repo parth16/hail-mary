@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import shlex
+import socket
 import stat
+import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -20,7 +23,9 @@ from hailmary.research import (
     ResearchProviderCategory,
     ResearchTaskStatus,
     ResearchTemplateError,
+    WebResearchError,
     builtin_research_providers,
+    collect_web_research,
     import_research_results,
     prepare_meridian_workflow,
     prepare_public_research_results,
@@ -28,6 +33,11 @@ from hailmary.research import (
     prepare_research_results_template,
 )
 from hailmary.research.schemas import ResearchResultInput
+from hailmary.research.web import (
+    WebFetchResponse,
+    _BoundHTTPConnection,
+    _build_guarded_opener,
+)
 from hailmary.schemas.agents import AgentRole
 from hailmary.schemas.documents import DocumentType, IngestedDeal, SourceKind
 from hailmary.schemas.evidence import EvidenceStore
@@ -36,6 +46,10 @@ from hailmary.scoring.scorer import score_evidence_store
 
 runner = CliRunner()
 BUILT_AT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+class _ProxyHandlerWithProxies(Protocol):
+    proxies: dict[str, str]
 
 
 def test_builtin_research_providers_hide_paid_by_default() -> None:
@@ -194,6 +208,364 @@ def test_prepare_research_plan_adds_meridian_manual_task(tmp_path: Path) -> None
     assert meridian_task.url == "https://portal.angellist.com/m/example/invest"
     assert meridian_task.status == ResearchTaskStatus.NEEDS_OPERATOR
     assert "Do not bypass" in meridian_task.licensing_notes
+
+
+def test_collect_web_research_requires_enabled_web_research(tmp_path: Path) -> None:
+    with pytest.raises(WebResearchError, match="Local-only mode is on"):
+        collect_web_research(
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                local_only=True,
+                enable_web_research=True,
+            ),
+        )
+
+
+def test_collect_web_research_fetches_public_plan_url(tmp_path: Path) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com",
+        created_at=BUILT_AT,
+    )
+    client = _FakeWebResearchClient(
+        {
+            "https://example.com": WebFetchResponse(
+                final_url="https://example.com",
+                content_type="text/html; charset=utf-8",
+                text=(
+                    "<html><head><title>Acme AI Homepage</title>"
+                    "<script>ignoreThis()</script></head>"
+                    "<body><h1>Acme AI</h1><p>Customer traction from pilots.</p></body></html>"
+                ),
+            )
+        }
+    )
+
+    result = collect_web_research(
+        config=config,
+        plan_path=plan_result.output_path,
+        provider_ids=["company_website"],
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == ["https://example.com"]
+    assert result.output_path is not None
+    assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
+    assert result.fetched_count == 1
+    assert result.failed_count == 0
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert len(saved["results"]) == 1
+    fetched = saved["results"][0]
+    assert fetched["company_name"] == "Acme AI"
+    assert "deal_id" not in fetched
+    assert fetched["provider_id"] == "company_website"
+    assert fetched["title"] == "Acme AI Homepage"
+    assert fetched["source_url"] == "https://example.com"
+    assert fetched["retrieved_at"] == "2026-01-01T00:00:00Z"
+    assert "Customer traction from pilots" in fetched["text"]
+    assert "ignoreThis" not in fetched["text"]
+    assert fetched["confidence"].startswith("medium:")
+
+
+def test_collect_web_research_keeps_ingested_deal_ids(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    summary = ingest_folder(root, config=config)
+    plan_result = prepare_research_plan(
+        config=config,
+        website_url="https://example.com",
+        created_at=BUILT_AT,
+    )
+    client = _FakeWebResearchClient(
+        {
+            "https://example.com": WebFetchResponse(
+                final_url="https://example.com",
+                content_type="text/plain",
+                text="Acme AI has customer pilots.",
+            )
+        }
+    )
+
+    result = collect_web_research(
+        config=config,
+        plan_path=plan_result.output_path,
+        provider_ids=["company_website"],
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["deal_id"] == summary.deals[0].id
+
+
+def test_collect_web_research_dry_run_does_not_fetch(tmp_path: Path) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com",
+        created_at=BUILT_AT,
+    )
+    client = _FakeWebResearchClient({})
+
+    result = collect_web_research(
+        config=config,
+        plan_path=plan_result.output_path,
+        provider_ids=["company_website"],
+        client=client,
+        dry_run=True,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.output_path is None
+    assert result.planned_count == 1
+    assert result.fetched_count == 0
+    assert result.tasks[0].reason == "Dry run: the page was not fetched."
+
+
+def test_collect_web_research_rejects_unmatched_provider_filter(tmp_path: Path) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com",
+        created_at=BUILT_AT,
+    )
+
+    with pytest.raises(WebResearchError, match="does not match this research plan"):
+        collect_web_research(
+            config=config,
+            plan_path=plan_result.output_path,
+            provider_ids=["not_a_provider"],
+            client=_FakeWebResearchClient({}),
+            collected_at=BUILT_AT,
+        )
+
+
+def test_collect_web_research_skips_generated_search_pages(tmp_path: Path) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com",
+        created_at=BUILT_AT,
+    )
+    client = _FakeWebResearchClient({})
+
+    result = collect_web_research(
+        config=config,
+        plan_path=plan_result.output_path,
+        provider_ids=["sec_form_d"],
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.output_path is None
+    assert result.skipped_count == 1
+    assert "generated search page" in result.tasks[0].reason
+
+
+def test_collect_web_research_rejects_private_network_urls(tmp_path: Path) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="http://127.0.0.1:8000",
+        created_at=BUILT_AT,
+    )
+    client = _FakeWebResearchClient({})
+
+    result = collect_web_research(
+        config=config,
+        plan_path=plan_result.output_path,
+        provider_ids=["company_website"],
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.output_path is None
+    assert result.failed_count == 1
+    assert "private, local, or reserved network address" in result.tasks[0].reason
+
+
+def test_guarded_web_opener_disables_ambient_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+    captured_handlers: list[object] = []
+
+    def fake_build_opener(
+        *handlers: object,
+    ) -> urllib.request.OpenerDirector:
+        captured_handlers.extend(handlers)
+        return urllib.request.OpenerDirector()
+
+    monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
+
+    _build_guarded_opener("company_website")
+    proxy_handlers = [
+        handler
+        for handler in captured_handlers
+        if isinstance(handler, urllib.request.ProxyHandler)
+    ]
+    assert proxy_handlers
+    proxy_handler = cast(_ProxyHandlerWithProxies, proxy_handlers[0])
+    assert proxy_handler.proxies == {}
+
+
+def test_bound_http_connection_uses_vetted_public_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened_addresses: list[tuple[str, int]] = []
+
+    class FakeSocket:
+        def setsockopt(self, *_args: object) -> None:
+            return None
+
+    def fake_getaddrinfo(
+        host: str,
+        port: int,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        _ = (family, type, proto, flags)
+        assert host == "example.com"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+    def fake_create_connection(
+        address: tuple[str, int],
+        timeout: object | None = None,
+        source_address: tuple[str, int] | None = None,
+    ) -> FakeSocket:
+        _ = (timeout, source_address)
+        opened_addresses.append(address)
+        return FakeSocket()
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    connection = _BoundHTTPConnection(
+        "example.com",
+        provider_id="company_website",
+        timeout=1.0,
+    )
+    connection._create_connection = fake_create_connection  # type: ignore[assignment]
+
+    connection.connect()
+
+    assert opened_addresses == [("93.184.216.34", 80)]
+
+
+def test_collect_web_research_command_dry_run_reports_no_network_contact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com",
+        created_at=BUILT_AT,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-web-research",
+            str(plan_result.output_path),
+            "--provider",
+            "company_website",
+            "--dry-run",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Web research preview" in result.output
+    assert "1 public web page would be fetched" in result.output
+    assert "No websites were contacted" in result.output
+    assert not list((tmp_path / "data" / "research-results").glob("*.json"))
+
+
+def test_collect_web_research_command_exits_nonzero_when_fetch_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="http://127.0.0.1:8000",
+        created_at=BUILT_AT,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-web-research",
+            str(plan_result.output_path),
+            "--provider",
+            "company_website",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "1 web research task failed" in result.output
+    assert "private, local, or reserved network address" in _plain_cli_output(
+        result.output
+    )
+    assert "Traceback" not in result.output
 
 
 def test_prepare_meridian_workflow_writes_private_workflow_and_template(
@@ -2258,6 +2630,24 @@ def _write_results(path: Path, results: list[dict[str, object]]) -> None:
 
 def _plain_cli_output(output: str) -> str:
     return " ".join(output.replace("│", " ").split())
+
+
+class _FakeWebResearchClient:
+    def __init__(self, responses: dict[str, WebFetchResponse]) -> None:
+        self.responses = responses
+        self.calls: list[str] = []
+
+    def fetch(
+        self,
+        url: str,
+        *,
+        provider_id: str,
+        timeout_seconds: float,
+        max_bytes: int,
+    ) -> WebFetchResponse:
+        _ = (provider_id, timeout_seconds, max_bytes)
+        self.calls.append(url)
+        return self.responses[url]
 
 
 def _write_public_source_results(path: Path, results: list[dict[str, object]]) -> None:

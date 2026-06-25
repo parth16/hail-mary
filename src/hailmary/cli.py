@@ -43,7 +43,9 @@ from hailmary.research import (
     ResearchProviderCategory,
     ResearchTaskStatus,
     ResearchTemplateError,
+    WebResearchError,
     builtin_research_providers,
+    collect_web_research,
     import_research_results,
     prepare_meridian_workflow,
     prepare_public_research_results,
@@ -630,6 +632,110 @@ def prepare_research_plan_command(
     if result.plan.local_only:
         plan_lines.append(_plain("Local-only mode is on, so this plan is a checklist only."))
     _print_panel("Research plan prepared", plan_lines, border_style="green")
+
+
+@app.command("collect-web-research")
+def collect_web_research_command(
+    research_plan: Annotated[
+        Path | None,
+        typer.Argument(
+            help=(
+                "Research plan JSON to collect public web pages from. If omitted, "
+                "Hail Mary uses the latest private research plan."
+            ),
+        ),
+    ] = None,
+    provider: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--provider",
+            help=(
+                "Only collect tasks for this provider ID. Use more than once for "
+                "multiple providers."
+            ),
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show which public URLs would be fetched without contacting websites.",
+        ),
+    ] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read plans and write private results.",
+        ),
+    ] = None,
+) -> None:
+    """Collect import-ready evidence text from planned public web pages."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = collect_web_research(
+            config=config,
+            plan_path=research_plan,
+            provider_ids=provider or [],
+            dry_run=dry_run,
+        )
+    except WebResearchError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    fetch_word = "page" if result.fetched_count == 1 else "pages"
+    planned_word = "page" if result.planned_count == 1 else "pages"
+    failed_word = "task" if result.failed_count == 1 else "tasks"
+    skipped_word = "task" if result.skipped_count == 1 else "tasks"
+    if result.dry_run:
+        lines = [
+            _plain(
+                f"Dry run: {result.planned_count} public web {planned_word} would be fetched."
+            ),
+            _plain("No websites were contacted and no results file was saved."),
+        ]
+        border_style = "yellow"
+        title = "Web research preview"
+    else:
+        lines = [
+            _plain(f"Fetched {result.fetched_count} public web {fetch_word}.")
+        ]
+        if result.output_path is not None:
+            data_dir_option = (
+                f" --data-dir {shlex.quote(str(config.data_dir))}"
+                if data_dir is not None
+                else ""
+            )
+            next_command = (
+                f"`hailmary import-research-results {shlex.quote(str(result.output_path))}"
+                f"{data_dir_option} --dry-run`."
+            )
+            lines.append(_plain(f"Saved the private JSON results file to {result.output_path}."))
+            lines.append(_plain(f"Next, run {next_command}"))
+        else:
+            lines.append(_plain("No results file was saved."))
+        lines.append(
+            _plain("No authenticated, paid, Meridian, or local-only sources were contacted.")
+        )
+        border_style = "green" if result.failed_count == 0 else "yellow"
+        title = "Web research collected"
+
+    if result.failed_count:
+        lines.append(_plain(f"{result.failed_count} web research {failed_word} failed."))
+    if result.skipped_count:
+        lines.append(_plain(f"Skipped {result.skipped_count} ineligible {skipped_word}."))
+    for task in result.tasks:
+        if task.status in {"failed", "planned"}:
+            lines.append(
+                _plain(
+                    f"- {task.company_name} / {task.provider_id}: {task.reason}"
+                )
+            )
+
+    _print_panel(title, lines, border_style=border_style)
+    if result.failed_count:
+        raise typer.Exit(1)
 
 
 @app.command("prepare-research-results-template")
