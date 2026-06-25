@@ -11,7 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, Self
+from typing import Any, Protocol, Self
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -21,6 +21,12 @@ from hailmary.config import AppConfig, ConfigError, validate_local_state
 from .providers import builtin_research_providers
 from .schemas import ResearchProvider, ResearchResultInput, ResearchResultsFile
 from .source_urls import validate_http_url, validate_provider_source_url
+from .web import (
+    WebResearchFetchError,
+    _ensure_resolved_public_host,
+    _GuardedHTTPHandler,
+    _GuardedHTTPSHandler,
+)
 
 
 class ResearchCollectionError(RuntimeError):
@@ -71,6 +77,7 @@ USASPENDING_AWARD_TYPE_CODES = [
     "IDV_D",
     "IDV_E",
 ]
+USASPENDING_MAX_PAGES = 20
 
 
 class PublicSourceSearchResult(BaseModel):
@@ -193,10 +200,22 @@ class UsaspendingAwardRecord(BaseModel):
         return value
 
 
+class UsaspendingPageMetadata(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    page: int | None = None
+    has_next: bool = Field(default=False, alias="hasNext")
+
+
 class UsaspendingAwardsResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    results: list[UsaspendingAwardRecord] = Field(default_factory=list)
+    results: list[UsaspendingAwardRecord]
+    page_metadata: UsaspendingPageMetadata | None = None
+
+    @property
+    def has_next_page(self) -> bool:
+        return self.page_metadata is not None and self.page_metadata.has_next
 
 
 SecFormDSearchResultsFile = PublicSourceSearchResultsFile
@@ -254,9 +273,10 @@ class UsaspendingAwardsClient(Protocol):
         company_name: str,
         *,
         limit: int,
+        page: int,
         timeout_seconds: float,
-    ) -> Iterable[UsaspendingAwardRecord]:
-        """Return USAspending public API award records for one company."""
+    ) -> UsaspendingAwardsResponse:
+        """Return one USAspending public API award-results page for one company."""
 
 
 @dataclass(frozen=True)
@@ -326,9 +346,12 @@ class UrlLibUsaspendingAwardsClient:
         company_name: str,
         *,
         limit: int,
+        page: int,
         timeout_seconds: float,
-    ) -> Iterable[UsaspendingAwardRecord]:
-        payload = _usaspending_awards_payload(company_name, limit=limit)
+    ) -> UsaspendingAwardsResponse:
+        _validate_usaspending_api_url(USASPENDING_AWARDS_ENDPOINT)
+        _ensure_usaspending_resolved_public_endpoint(USASPENDING_AWARDS_ENDPOINT)
+        payload = _usaspending_awards_payload(company_name, limit=limit, page=page)
         request = urllib.request.Request(
             USASPENDING_AWARDS_ENDPOINT,
             data=json.dumps(payload).encode("utf-8"),
@@ -339,7 +362,7 @@ class UrlLibUsaspendingAwardsClient:
             },
             method="POST",
         )
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener = _build_usaspending_api_opener()
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
                 status_code = int(getattr(response, "status", 200))
@@ -376,7 +399,34 @@ class UrlLibUsaspendingAwardsClient:
             raise UsaspendingApiError(
                 f"USAspending returned an unexpected response: {detail}"
             ) from exc
-        return parsed_response.results
+        return parsed_response
+
+
+class _UsaspendingRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        _validate_usaspending_api_url(newurl)
+        _ensure_usaspending_resolved_public_endpoint(newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and not isinstance(redirected, urllib.request.Request):
+            raise UsaspendingApiError("USAspending returned an unsupported redirect.")
+        return redirected
+
+
+def _build_usaspending_api_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _GuardedHTTPHandler("usaspending"),
+        _GuardedHTTPSHandler("usaspending"),
+        _UsaspendingRedirectHandler(),
+    )
 
 
 @dataclass(frozen=True)
@@ -534,26 +584,44 @@ def collect_usaspending_awards(
     results: list[ResearchResultInput] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
+        deal_results: list[ResearchResultInput] = []
+        page = 1
+        seen_awards: set[str] = set()
         try:
-            award_records = list(
-                awards_client.search_awards(
+            while len(deal_results) < limit:
+                awards_response = awards_client.search_awards(
                     deal.company_name,
                     limit=limit,
+                    page=page,
                     timeout_seconds=timeout_seconds,
                 )
-            )
+                for award in awards_response.results:
+                    if award.generated_internal_id in seen_awards:
+                        continue
+                    seen_awards.add(award.generated_internal_id)
+                    if not _exact_company_name_match(deal.company_name, award.recipient_name):
+                        continue
+                    deal_results.append(
+                        _research_result_from_usaspending_award(
+                            deal,
+                            award,
+                            provider=provider,
+                            collected_at=collected_at,
+                        )
+                    )
+                    if len(deal_results) >= limit:
+                        break
+                if len(deal_results) >= limit or not awards_response.has_next_page:
+                    break
+                page += 1
+                if page > USASPENDING_MAX_PAGES:
+                    raise UsaspendingApiError(
+                        "USAspending returned more than 20 pages before Hail Mary "
+                        "could finish checking exact recipient-name matches. Narrow "
+                        "the company name and try again."
+                    )
         except UsaspendingApiError as exc:
             raise ResearchCollectionError(str(exc)) from exc
-        deal_results = [
-            _research_result_from_usaspending_award(
-                deal,
-                award,
-                provider=provider,
-                collected_at=collected_at,
-            )
-            for award in award_records
-            if _exact_company_name_match(deal.company_name, award.recipient_name)
-        ]
         results.extend(deal_results)
         deal_summaries.append(
             ResearchCollectionDealSummary(
@@ -698,22 +766,41 @@ def _validate_usaspending_limit(limit: int) -> None:
 
 
 def _validate_usaspending_api_url(url: str) -> None:
-    validate_provider_source_url(
-        "usaspending",
-        url,
-        field_name="USAspending API URL",
-    )
+    try:
+        validate_provider_source_url(
+            "usaspending",
+            url,
+            field_name="USAspending API URL",
+        )
+    except ValueError as exc:
+        raise UsaspendingApiError(str(exc)) from exc
     if url != USASPENDING_AWARDS_ENDPOINT:
         raise UsaspendingApiError(
             "USAspending redirected the request away from the expected public API endpoint."
         )
 
 
-def _usaspending_awards_payload(company_name: str, *, limit: int) -> dict[str, object]:
+def _ensure_usaspending_resolved_public_endpoint(url: str) -> None:
+    _validate_usaspending_api_url(url)
+    try:
+        _ensure_resolved_public_host(url)
+    except WebResearchFetchError as exc:
+        message = str(exc)
+        message = message.replace("The page URL", "The USAspending API URL")
+        message = message.replace("Website host", "USAspending host")
+        raise UsaspendingApiError(message) from exc
+
+
+def _usaspending_awards_payload(
+    company_name: str,
+    *,
+    limit: int,
+    page: int,
+) -> dict[str, object]:
     return {
         "subawards": False,
         "limit": limit,
-        "page": 1,
+        "page": page,
         "sort": "Award Amount",
         "order": "desc",
         "filters": {

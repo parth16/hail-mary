@@ -12,6 +12,7 @@ from typing import Protocol, cast
 import pytest
 from typer.testing import CliRunner
 
+import hailmary.research.collection as collection_module
 from hailmary.agents.packets import build_agent_input_packet
 from hailmary.cli import app
 from hailmary.config import AppConfig
@@ -27,6 +28,7 @@ from hailmary.research import (
     UrlLibUsaspendingAwardsClient,
     UsaspendingApiError,
     UsaspendingAwardRecord,
+    UsaspendingAwardsResponse,
     WebResearchError,
     builtin_research_providers,
     collect_usaspending_awards,
@@ -597,22 +599,24 @@ def test_collect_usaspending_awards_writes_private_exact_matches(
     )
     client = _FakeUsaspendingAwardsClient(
         {
-            "Acme AI": [
-                _usaspending_award(
-                    recipient_name="Acme AI",
-                    award_id="FAKE-123",
-                    generated_internal_id="CONT_AWD_FAKE_123",
-                    award_amount=12345.67,
-                    description="Research and development support.",
-                ),
-                _usaspending_award(
-                    recipient_name="Acme AI Holdings",
-                    award_id="FAKE-999",
-                    generated_internal_id="CONT_AWD_FAKE_999",
-                    award_amount=999.0,
-                ),
-            ],
-            "Beta Robotics": [],
+            ("Acme AI", 1): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Acme AI",
+                        award_id="FAKE-123",
+                        generated_internal_id="CONT_AWD_FAKE_123",
+                        award_amount=12345.67,
+                        description="Research and development support.",
+                    ),
+                    _usaspending_award(
+                        recipient_name="Acme AI Holdings",
+                        award_id="FAKE-999",
+                        generated_internal_id="CONT_AWD_FAKE_999",
+                        award_amount=999.0,
+                    ),
+                ],
+            ),
+            ("Beta Robotics", 1): _usaspending_response([]),
         }
     )
 
@@ -624,7 +628,7 @@ def test_collect_usaspending_awards_writes_private_exact_matches(
         collected_at=BUILT_AT,
     )
 
-    assert client.calls == [("Acme AI", 5), ("Beta Robotics", 5)]
+    assert client.calls == [("Acme AI", 5, 1), ("Beta Robotics", 5, 1)]
     assert result.output_path is not None
     assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
     assert result.result_count == 1
@@ -648,6 +652,210 @@ def test_collect_usaspending_awards_writes_private_exact_matches(
     assert "Acme AI Holdings" not in prepared["text"]
     assert prepared["confidence"].startswith("medium:")
     assert "USAspending API" in prepared["licensing_notes"]
+
+
+def test_collect_usaspending_awards_paginates_until_exact_match(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeUsaspendingAwardsClient(
+        {
+            ("Acme AI", 1): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Acme AI Federal",
+                        award_id="FAKE-111",
+                        generated_internal_id="CONT_AWD_FAKE_111",
+                    ),
+                ],
+                has_next=True,
+            ),
+            ("Acme AI", 2): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Acme AI",
+                        award_id="FAKE-222",
+                        generated_internal_id="CONT_AWD_FAKE_222",
+                        award_amount=100.0,
+                    ),
+                ]
+            ),
+        }
+    )
+
+    result = collect_usaspending_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == [("Acme AI", 5, 1), ("Acme AI", 5, 2)]
+    assert result.result_count == 1
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["title"] == "USAspending award FAKE-222 for Acme AI"
+
+
+def test_collect_usaspending_awards_does_not_report_no_match_after_page_cap(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeUsaspendingAwardsClient(
+        {
+            ("Acme AI", page): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Acme AI Federal",
+                        award_id=f"FAKE-{page}",
+                        generated_internal_id=f"CONT_AWD_FAKE_{page}",
+                    )
+                ],
+                has_next=True,
+            )
+            for page in range(1, 21)
+        }
+    )
+
+    with pytest.raises(ResearchCollectionError, match="more than 20 pages"):
+        collect_usaspending_awards(
+            config=config,
+            company_names=["Acme AI"],
+            limit=5,
+            client=client,
+            collected_at=BUILT_AT,
+        )
+
+
+def test_usaspending_response_requires_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_usaspending_resolved_public_endpoint",
+        lambda _url: None,
+    )
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module.USASPENDING_AWARDS_ENDPOINT
+
+        def read(self, _size: int) -> bytes:
+            return b'{"messages":["schema changed"]}'
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(UsaspendingApiError, match="unexpected response"):
+        UrlLibUsaspendingAwardsClient().search_awards(
+            "Acme AI",
+            limit=1,
+            page=1,
+            timeout_seconds=1.0,
+        )
+
+
+def test_usaspending_redirect_handler_validates_before_following() -> None:
+    handler = collection_module._UsaspendingRedirectHandler()
+    request = urllib.request.Request(collection_module.USASPENDING_AWARDS_ENDPOINT)
+
+    with pytest.raises(UsaspendingApiError, match="USAspending API URL"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "http://127.0.0.1:8000/private",
+        )
+
+
+def test_usaspending_client_vets_dns_before_opening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked_urls: list[str] = []
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> object:
+            _ = timeout
+            raise AssertionError("The API should not be opened after DNS validation fails.")
+
+    def fake_ensure_public_endpoint(url: str) -> None:
+        checked_urls.append(url)
+        raise UsaspendingApiError(
+            "USAspending host api.usaspending.gov resolves to a private, local, "
+            "or reserved network address."
+        )
+
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_usaspending_resolved_public_endpoint",
+        fake_ensure_public_endpoint,
+    )
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(UsaspendingApiError, match="private, local, or reserved"):
+        UrlLibUsaspendingAwardsClient().search_awards(
+            "Acme AI",
+            limit=1,
+            page=1,
+            timeout_seconds=1.0,
+        )
+
+    assert checked_urls == [collection_module.USASPENDING_AWARDS_ENDPOINT]
+
+
+def test_usaspending_awards_payload_uses_requested_page() -> None:
+    payload = collection_module._usaspending_awards_payload(
+        "Acme AI",
+        limit=7,
+        page=3,
+    )
+
+    assert payload["limit"] == 7
+    assert payload["page"] == 3
 
 
 def test_collect_usaspending_awards_dry_run_does_not_call_api(
@@ -702,6 +910,11 @@ def test_usaspending_client_disables_ambient_proxies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_usaspending_resolved_public_endpoint",
+        lambda _url: None,
+    )
     captured_handlers: list[object] = []
 
     class FakeResponse:
@@ -717,7 +930,7 @@ def test_usaspending_client_disables_ambient_proxies(
             return None
 
         def geturl(self) -> str:
-            return "https://api.usaspending.gov/api/v2/search/spending_by_award/"
+            return collection_module.USASPENDING_AWARDS_ENDPOINT
 
         def read(self, _size: int) -> bytes:
             return b'{"results":[]}'
@@ -740,15 +953,14 @@ def test_usaspending_client_disables_ambient_proxies(
 
     monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
 
-    results = list(
-        UrlLibUsaspendingAwardsClient().search_awards(
-            "Acme AI",
-            limit=1,
-            timeout_seconds=1.0,
-        )
+    response = UrlLibUsaspendingAwardsClient().search_awards(
+        "Acme AI",
+        limit=1,
+        page=1,
+        timeout_seconds=1.0,
     )
 
-    assert results == []
+    assert response.results == []
     proxy_handlers = [
         handler
         for handler in captured_handlers
@@ -2880,26 +3092,45 @@ class _FakeHeaders:
 class _FakeUsaspendingAwardsClient:
     def __init__(
         self,
-        responses: dict[str, list[UsaspendingAwardRecord]],
+        responses: dict[tuple[str, int], UsaspendingAwardsResponse],
         *,
         error: UsaspendingApiError | None = None,
     ) -> None:
         self.responses = responses
         self.error = error
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, int]] = []
 
     def search_awards(
         self,
         company_name: str,
         *,
         limit: int,
+        page: int,
         timeout_seconds: float,
-    ) -> list[UsaspendingAwardRecord]:
+    ) -> UsaspendingAwardsResponse:
         _ = timeout_seconds
-        self.calls.append((company_name, limit))
+        self.calls.append((company_name, limit, page))
         if self.error is not None:
             raise self.error
-        return self.responses[company_name]
+        try:
+            return self.responses[(company_name, page)]
+        except KeyError as exc:
+            raise AssertionError(
+                f"No fake USAspending response for {company_name} page {page}."
+            ) from exc
+
+
+def _usaspending_response(
+    results: list[UsaspendingAwardRecord],
+    *,
+    has_next: bool = False,
+) -> UsaspendingAwardsResponse:
+    return UsaspendingAwardsResponse.model_validate(
+        {
+            "results": [result.model_dump(by_alias=True) for result in results],
+            "page_metadata": {"hasNext": has_next},
+        }
+    )
 
 
 def _usaspending_award(

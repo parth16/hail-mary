@@ -14,6 +14,7 @@ from hailmary.research.collection import (
     UsaspendingAwardsClient,
     UsaspendingAwardsResponse,
     UsaspendingCollectionRunSummary,
+    UsaspendingPageMetadata,
     collect_usaspending_awards,
     prepare_public_research_results,
 )
@@ -93,6 +94,7 @@ __all__ = [
     "UsaspendingAwardsClient",
     "UsaspendingAwardsResponse",
     "UsaspendingCollectionRunSummary",
+    "UsaspendingPageMetadata",
     "builtin_provider_adapters",
     "builtin_research_providers",
     "collect_usaspending_awards",
