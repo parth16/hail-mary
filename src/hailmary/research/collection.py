@@ -211,7 +211,7 @@ class UsaspendingPageMetadata(BaseModel):
 class UsaspendingAwardsResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    results: list[UsaspendingAwardRecord]
+    results: list[dict[str, Any]]
     page_metadata: UsaspendingPageMetadata
 
     @property
@@ -248,6 +248,7 @@ class UsaspendingCollectionRunSummary(BaseModel):
     dry_run: bool = False
     endpoint: str = USASPENDING_AWARDS_ENDPOINT
     deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
     @property
     def deal_count(self) -> int:
@@ -583,6 +584,7 @@ def collect_usaspending_awards(
 
     awards_client = client or UrlLibUsaspendingAwardsClient()
     results: list[ResearchResultInput] = []
+    run_warnings: list[str] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
         deal_results: list[ResearchResultInput] = []
@@ -596,9 +598,13 @@ def collect_usaspending_awards(
                     page=page,
                     timeout_seconds=timeout_seconds,
                 )
-                for award in awards_response.results:
-                    if not _exact_company_name_match(deal.company_name, award.recipient_name):
+                for raw_award in awards_response.results:
+                    recipient_name = _usaspending_raw_recipient_name(raw_award)
+                    if recipient_name is None:
                         continue
+                    if not _exact_company_name_match(deal.company_name, recipient_name):
+                        continue
+                    award = _validate_usaspending_exact_award(raw_award, deal=deal)
                     dedupe_key = award.generated_internal_id or award.award_id
                     if dedupe_key is not None:
                         if dedupe_key in seen_awards:
@@ -618,6 +624,16 @@ def collect_usaspending_awards(
                     break
                 page += 1
                 if page > USASPENDING_MAX_PAGES:
+                    if deal_results:
+                        run_warnings.append(
+                            "USAspending still had more fuzzy result pages for "
+                            f"{deal.company_name} after Hail Mary checked "
+                            f"{USASPENDING_MAX_PAGES} pages. Hail Mary saved "
+                            f"{len(deal_results)} exact recipient-name matches "
+                            "it already validated, but more "
+                            "USAspending results may exist."
+                        )
+                        break
                     raise UsaspendingApiError(
                         "USAspending returned more than 20 pages before Hail Mary "
                         "could finish checking exact recipient-name matches. Narrow "
@@ -638,6 +654,7 @@ def collect_usaspending_awards(
             output_path=None,
             collected_at=collected_at,
             deals=deal_summaries,
+            warnings=run_warnings,
         )
 
     try:
@@ -666,6 +683,7 @@ def collect_usaspending_awards(
         output_path=output_path,
         collected_at=collected_at,
         deals=deal_summaries,
+        warnings=run_warnings,
     )
 
 
@@ -814,6 +832,29 @@ def _usaspending_awards_payload(
     }
 
 
+def _usaspending_raw_recipient_name(raw_award: dict[str, Any]) -> str | None:
+    value = raw_award.get("Recipient Name")
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _validate_usaspending_exact_award(
+    raw_award: dict[str, Any],
+    *,
+    deal: ResearchCollectionDeal,
+) -> UsaspendingAwardRecord:
+    try:
+        return UsaspendingAwardRecord.model_validate(raw_award)
+    except ValidationError as exc:
+        detail = _first_validation_detail(exc)
+        raise ResearchCollectionError(
+            f"An exact USAspending result for {deal.company_name} is incomplete: "
+            f"{detail}"
+        ) from exc
+
+
 def _research_result_from_usaspending_award(
     deal: ResearchCollectionDeal,
     award: UsaspendingAwardRecord,
@@ -901,7 +942,7 @@ def _format_money(value: float) -> str:
 
 
 def _clean_company_names(company_names: list[str]) -> list[str]:
-    cleaned = [company_name.strip() for company_name in company_names]
+    cleaned = [re.sub(r"\s+", " ", company_name).strip() for company_name in company_names]
     if any(not company_name for company_name in cleaned):
         raise ResearchCollectionError("Company names cannot be blank.")
     seen: set[str] = set()

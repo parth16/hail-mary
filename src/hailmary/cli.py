@@ -1085,7 +1085,10 @@ def collect_usaspending_awards_command(
                     f"Dry run: Hail Mary would send {result.deal_count} "
                     f"{company_word} to the USAspending public API."
                 ),
-                _plain(f"At most {limit} award records would be requested per company."),
+                _plain(
+                    f"A live run can request up to {limit} award records per page "
+                    f"for up to 20 pages per company while looking for exact matches."
+                ),
                 _plain("No API requests were sent and no results file was saved."),
             ],
             style="yellow",
@@ -1125,6 +1128,8 @@ def collect_usaspending_awards_command(
         ),
         _plain(f"Next, run {next_command}"),
     ]
+    for warning in result.warnings:
+        lines.append(_plain(f"Warning: {warning}"))
     zero_result_companies = [deal.company_name for deal in result.deals if deal.result_count == 0]
     if zero_result_companies:
         lines.append(

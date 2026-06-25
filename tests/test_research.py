@@ -749,6 +749,8 @@ def test_collect_usaspending_awards_skips_unrelated_malformed_rows(
         {
             ("Acme AI", 1): _usaspending_raw_response(
                 [
+                    {"Award ID": "BROKEN-NO-RECIPIENT"},
+                    {"Recipient Name": None, "Award ID": "BROKEN-NULL-RECIPIENT"},
                     {"Recipient Name": "Acme AI Federal"},
                     _usaspending_award(
                         recipient_name="Acme AI",
@@ -801,6 +803,96 @@ def test_collect_usaspending_awards_fails_on_malformed_exact_row(
             client=client,
             collected_at=BUILT_AT,
         )
+
+
+def test_collect_usaspending_awards_keeps_matches_when_page_cap_is_hit(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    responses = {
+        ("Acme AI", 1): _usaspending_response(
+            [
+                _usaspending_award(
+                    recipient_name="Acme AI",
+                    award_id="FAKE-123",
+                    generated_internal_id="CONT_AWD_FAKE_123",
+                )
+            ],
+            has_next=True,
+        )
+    }
+    responses.update(
+        {
+            ("Acme AI", page): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Acme AI Federal",
+                        award_id=f"FAKE-{page}",
+                        generated_internal_id=f"CONT_AWD_FAKE_{page}",
+                    )
+                ],
+                has_next=True,
+            )
+            for page in range(2, 21)
+        }
+    )
+    client = _FakeUsaspendingAwardsClient(responses)
+
+    result = collect_usaspending_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.result_count == 1
+    assert result.output_path is not None
+    assert result.warnings
+    assert "more fuzzy result pages" in result.warnings[0]
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["title"] == "USAspending award FAKE-123 for Acme AI"
+
+
+def test_collect_usaspending_awards_normalizes_saved_company_name(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeUsaspendingAwardsClient(
+        {
+            ("Acme AI", 1): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Acme AI",
+                        award_id="FAKE-123",
+                        generated_internal_id="CONT_AWD_FAKE_123",
+                    )
+                ]
+            ),
+        }
+    )
+
+    result = collect_usaspending_awards(
+        config=config,
+        company_names=[" Acme   AI "],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == [("Acme AI", 5, 1)]
+    assert result.deals[0].company_name == "Acme AI"
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["company_name"] == "Acme AI"
 
 
 def test_usaspending_response_requires_results(
@@ -1157,6 +1249,9 @@ def test_collect_usaspending_awards_command_dry_run_reports_no_api_contact(
     assert result.exit_code == 0, result.output
     assert "USAspending preview" in result.output
     assert "would send 1 company to the USAspending public API" in _plain_cli_output(
+        result.output
+    )
+    assert "up to 3 award records per page for up to 20 pages" in _plain_cli_output(
         result.output
     )
     assert "No API requests were sent" in result.output

@@ -61,7 +61,8 @@ hailmary prepare-public-research-results \
   --company "ExampleCo" \
   --sec-form-d-results sec-form-d-results.json \
   --sam-gov-results sam-gov-results.json
-hailmary collect-usaspending-awards --company "ExampleCo" --dry-run
+HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
+  hailmary collect-usaspending-awards --company "ExampleCo" --dry-run
 hailmary prepare-meridian-workflow \
   --company "ExampleCo" \
   --meridian-url "https://portal.angellist.com/m/example/invest"
