@@ -278,7 +278,10 @@ def evaluate_deal_folder(
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir, description="report")
     final_memo_path = report_dir / f"{deal.id}-final-evaluation.md"
-    warnings = _evaluation_warnings(specialist_results, guarded_decision)
+    warnings = [
+        *_ingestion_ocr_warnings(deal),
+        *_evaluation_warnings(specialist_results, guarded_decision),
+    ]
     _write_private_text(
         final_memo_path,
         render_final_evaluation_memo(
@@ -911,6 +914,39 @@ def _evaluation_warnings(
     if final_decision.warning:
         warnings.append(final_decision.warning)
     return warnings
+
+
+def _ingestion_ocr_warnings(deal: IngestedDeal) -> list[str]:
+    ocr_warning_documents = sum(
+        1
+        for document in deal.documents
+        if _has_ocr_warning(document.source.notes)
+    )
+    if not ocr_warning_documents:
+        return []
+    document_word = "document" if ocr_warning_documents == 1 else "documents"
+    return [
+        f"{ocr_warning_documents} {document_word} had image-based text reading (OCR) "
+        "warnings during ingestion. OCR means reading text from images. Review the saved "
+        "document metadata before relying on that text."
+    ]
+
+
+def _has_ocr_warning(notes: str | None) -> bool:
+    if not notes:
+        return False
+    lowered_notes = notes.lower()
+    if "image-based text reading (ocr)" not in lowered_notes:
+        return False
+    return any(
+        marker in lowered_notes
+        for marker in [
+            "could not",
+            "found no readable text",
+            "low confidence",
+            "needs the local",
+        ]
+    )
 
 
 def _packet_request_text(

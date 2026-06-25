@@ -414,18 +414,18 @@ def _extract_image(
             ocr_result = ocr_engine.image_to_text(path, page_number=1)
         except LocalOcrError as exc:
             return _image_needs_ocr_result(str(exc))
-        page = _make_page(
-            ocr_result.text,
+        page = ExtractedPage(
             page_number=1,
-            needs_ocr=not bool(ocr_result.text.strip()),
-            vision_recommended=not bool(ocr_result.text.strip()),
+            raw_text="",
+            clean_text="",
+            word_count=0,
+            needs_ocr=True,
+            vision_recommended=True,
             source_span_start=0,
-            notes=_ocr_page_notes(ocr_result),
+            source_span_end=0,
         )
-        if ocr_result.text.strip():
-            page.ocr_applied = True
-            page.ocr_confidence = ocr_result.confidence
-        else:
+        _apply_ocr_result_to_page(page, ocr_result)
+        if not ocr_result.text.strip():
             page.notes = _append_note(page.notes, IMAGE_LOCAL_OCR_NOTE)
         return _result_from_pages(
             [page],
@@ -462,8 +462,29 @@ def _apply_ocr_result_to_page(
     page: ExtractedPage,
     ocr_result: LocalOcrResult,
 ) -> None:
+    page.ocr_applied = True
+    page.ocr_confidence = ocr_result.confidence
     if not ocr_result.text.strip():
         page.notes = _append_note(page.notes, _ocr_page_notes(ocr_result))
+        return
+
+    if _ocr_result_is_low_confidence(ocr_result):
+        updated_page = _make_page(
+            ocr_result.text,
+            page_number=page.page_number,
+            needs_ocr=True,
+            vision_recommended=True,
+            source_span_start=page.source_span_start,
+            notes=_ocr_page_notes(ocr_result),
+        )
+        page.raw_text = updated_page.raw_text
+        page.clean_text = ""
+        page.word_count = 0
+        page.needs_ocr = True
+        page.vision_recommended = True
+        page.source_span_end = updated_page.source_span_end
+        page.removed_boilerplate_lines = updated_page.removed_boilerplate_lines
+        page.notes = updated_page.notes
         return
 
     updated_page = _make_page(
@@ -481,17 +502,19 @@ def _apply_ocr_result_to_page(
     page.vision_recommended = False
     page.source_span_end = updated_page.source_span_end
     page.removed_boilerplate_lines = updated_page.removed_boilerplate_lines
-    page.ocr_applied = True
-    page.ocr_confidence = ocr_result.confidence
     page.notes = updated_page.notes
+
+
+def _ocr_result_is_low_confidence(ocr_result: LocalOcrResult) -> bool:
+    return (
+        ocr_result.confidence is not None
+        and ocr_result.confidence < LOW_OCR_CONFIDENCE_THRESHOLD
+    )
 
 
 def _ocr_page_notes(ocr_result: LocalOcrResult) -> str:
     notes = _append_note(None, OCR_APPLIED_NOTE)
-    if (
-        ocr_result.confidence is not None
-        and ocr_result.confidence < LOW_OCR_CONFIDENCE_THRESHOLD
-    ):
+    if _ocr_result_is_low_confidence(ocr_result):
         notes = _append_note(
             notes,
             "Image-based text reading (OCR) finished with low confidence. "

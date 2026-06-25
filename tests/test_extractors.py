@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -242,6 +243,56 @@ def test_image_ocr_missing_tesseract_warns_without_crashing(
     assert "OCR means reading text from images" in result.notes
 
 
+def test_subprocess_ocr_decodes_tesseract_output_with_utf8_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image_path = tmp_path / "scan.png"
+    image_path.write_bytes(b"synthetic image placeholder")
+    seen_options: dict[str, object] = {}
+
+    def fake_run(
+        args: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        encoding: str,
+        errors: str,
+    ) -> subprocess.CompletedProcess[str]:
+        seen_options.update(
+            {
+                "check": check,
+                "capture_output": capture_output,
+                "text": text,
+                "encoding": encoding,
+                "errors": errors,
+            }
+        )
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\t"
+                "top\twidth\theight\tconf\ttext\n"
+                "5\t1\t1\t1\t1\t1\t0\t0\t10\t10\t91\tCaf\u00e9\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("hailmary.ingest.ocr.shutil.which", lambda _: "/usr/bin/tesseract")
+    monkeypatch.setattr("hailmary.ingest.ocr.subprocess.run", fake_run)
+
+    result = SubprocessLocalOcrEngine().image_to_text(image_path)
+
+    assert result.text == "Caf\u00e9"
+    assert seen_options == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+
+
 def test_image_ocr_low_confidence_is_recorded(tmp_path: Path) -> None:
     image_path = tmp_path / "scan.jpg"
     image_path.write_bytes(b"synthetic image placeholder")
@@ -256,6 +307,12 @@ def test_image_ocr_low_confidence_is_recorded(tmp_path: Path) -> None:
 
     assert result.ocr_applied
     assert result.ocr_confidence == 0.24
+    assert result.ocr_recommended
+    assert result.vision_recommended
+    assert result.combined_text == ""
+    assert result.pages[0].raw_text == "Minimum investment $1,000."
+    assert result.pages[0].clean_text == ""
+    assert result.pages[0].needs_ocr
     assert result.notes is not None
     assert "low confidence" in result.notes
     assert result.pages[0].notes is not None

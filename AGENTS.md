@@ -89,3 +89,4 @@ Rules for all future Codex runs:
 - PR #42 loop 1: Meridian workflow placeholder updates must preserve legacy generated markers as well as legacy placeholder confidence, and Meridian deal URLs should reject any explicit port rather than only malformed ports.
 - PR #42 loop 2: URL validators that ban ports must check for an explicit port delimiter as well as parsed numeric ports, because empty ports can parse as no port.
 - PR #41: Local OCR should stay opt-in, degrade cleanly when local executables are missing, recompute citation spans after OCR inserts PDF page text, carry OCR confidence through evidence records, and keep OCR-returned prompt-injection text on the same untrusted-source path as other extracted text.
+- PR #41 loop 1: Low-confidence OCR text should remain out of evidence until reviewed, OCR subprocess output should decode with explicit UTF-8 replacement, and evaluate-deal must surface ingestion OCR warnings in operator output and final memos.

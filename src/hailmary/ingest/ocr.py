@@ -68,23 +68,31 @@ class SubprocessLocalOcrEngine:
         pdftoppm_path = self._pdftoppm_path()
         with tempfile.TemporaryDirectory(prefix="hailmary-ocr-") as temp_dir_name:
             output_prefix = Path(temp_dir_name) / "page"
-            render_result = subprocess.run(
-                [
-                    pdftoppm_path,
-                    "-f",
-                    str(page_number),
-                    "-l",
-                    str(page_number),
-                    "-png",
-                    "-r",
-                    "300",
-                    str(path),
-                    str(output_prefix),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                render_result = subprocess.run(
+                    [
+                        pdftoppm_path,
+                        "-f",
+                        str(page_number),
+                        "-l",
+                        str(page_number),
+                        "-png",
+                        "-r",
+                        "300",
+                        str(path),
+                        str(output_prefix),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError as exc:
+                raise LocalOcrError(
+                    "Could not render the PDF page for image-based text reading (OCR): "
+                    f"{exc}. {OCR_EXPLANATION}"
+                ) from exc
             if render_result.returncode != 0:
                 raise LocalOcrError(
                     "Could not render the PDF page for image-based text reading (OCR): "
@@ -100,12 +108,20 @@ class SubprocessLocalOcrEngine:
 
     def _tesseract_image(self, path: Path) -> LocalOcrResult:
         tesseract_path = self._tesseract_path()
-        result = subprocess.run(
-            [tesseract_path, str(path), "stdout", "tsv"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [tesseract_path, str(path), "stdout", "tsv"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            raise LocalOcrError(
+                "Could not run image-based text reading (OCR): "
+                f"{exc}. {OCR_EXPLANATION}"
+            ) from exc
         if result.returncode != 0:
             raise LocalOcrError(
                 "Could not run image-based text reading (OCR): "

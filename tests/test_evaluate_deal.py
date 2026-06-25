@@ -22,7 +22,15 @@ from hailmary.schemas.agents import (
     AgentSummaryPoint,
     AgentValidationIssue,
 )
-from hailmary.schemas.documents import DocumentType, FileType, SourceKind
+from hailmary.schemas.documents import (
+    DocumentType,
+    ExtractionQuality,
+    FileType,
+    IngestedDeal,
+    IngestedDocument,
+    SourceDocument,
+    SourceKind,
+)
 from hailmary.schemas.evidence import (
     ClaimConflict,
     ClaimRecord,
@@ -236,6 +244,49 @@ def test_evaluate_deal_specialist_validation_failure_retries_then_records_limita
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "Team failed validation after one repair attempt" in memo_text
     assert len(list(result.agent_output_dir.glob("team-attempt-*-invalid.json"))) == 2
+
+
+def test_evaluate_deal_warnings_include_ingestion_ocr_warnings() -> None:
+    source = SourceDocument(
+        id="doc_ocr",
+        deal_id="deal_ocr",
+        path=Path("scan.png"),
+        source_kind=SourceKind.LOCAL_FILE,
+        document_type=DocumentType.UNKNOWN,
+        file_type=FileType.PNG,
+        title="scan",
+        ingested_at=datetime(2026, 1, 1, tzinfo=UTC),
+        sha256="abc",
+        extraction_quality=ExtractionQuality.LOW,
+        ocr_recommended=True,
+        ocr_applied=True,
+        ocr_confidence=0.2,
+        vision_recommended=True,
+        notes=(
+            "Image-based text reading (OCR) finished with low confidence. "
+            "Review the source image before relying on this text."
+        ),
+    )
+    deal = IngestedDeal(
+        id="deal_ocr",
+        company_name="OcrCo",
+        documents=[
+            IngestedDocument(
+                source=source,
+                pages=[],
+                tables=[],
+                output_path=Path("doc.json"),
+            )
+        ],
+    )
+
+    warnings = evaluation._ingestion_ocr_warnings(deal)
+
+    assert warnings == [
+        "1 document had image-based text reading (OCR) warnings during ingestion. "
+        "OCR means reading text from images. Review the saved document metadata before "
+        "relying on that text."
+    ]
 
 
 def test_evaluate_deal_final_decision_validation_failure_does_not_write_final_memo(

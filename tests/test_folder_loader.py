@@ -383,6 +383,47 @@ def test_image_ocr_missing_tool_stays_evidence_less_and_warns(tmp_path: Path) ->
     assert not document.pages[0].ocr_applied
 
 
+def test_low_confidence_image_ocr_does_not_create_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "LowConfidenceOcrCo"
+    company.mkdir(parents=True)
+    (company / "scan.png").write_bytes(b"synthetic image placeholder")
+    engine = ImageOcrEngine(
+        LocalOcrResult(
+            text="Valuation cap $8M. Minimum investment $1,000.",
+            confidence=0.21,
+        )
+    )
+
+    summary = ingest_folder(
+        root,
+        config=AppConfig(data_dir=tmp_path / "data"),
+        ocr_engine=engine,
+    )
+
+    deal = summary.deals[0]
+    assert deal.evidence_count == 0
+    assert deal.claim_count == 0
+    document = deal.documents[0]
+    assert document.source.ocr_applied
+    assert document.source.ocr_confidence == 0.21
+    assert document.source.ocr_recommended
+    assert document.source.notes is not None
+    assert "low confidence" in document.source.notes
+    assert document.pages[0].ocr_applied
+    assert document.pages[0].needs_ocr
+    assert document.pages[0].clean_text == ""
+    assert document.pages[0].raw_text == "Valuation cap $8M. Minimum investment $1,000."
+
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    assert saved_store["evidence"] == []
+    assert any(
+        "No usable extracted text was available" in note
+        for note in saved_store["notes"]
+    )
+
+
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
 def test_output_directory_symlink_outside_data_dir_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
