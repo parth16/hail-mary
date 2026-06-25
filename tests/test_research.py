@@ -3535,6 +3535,42 @@ def test_import_research_results_rejects_completed_meridian_placeholder_url_edit
         )
 
 
+def test_import_research_results_rejects_completed_meridian_placeholder_missing_marker(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+            "source_url": "https://portal.angellist.com/m/other-example/invest",
+            "licensing_notes": "Authenticated source. Use only permitted facts.",
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match="generated placeholder marker"):
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
 def test_import_research_results_rejects_meridian_placeholder_confidence(
     tmp_path: Path,
 ) -> None:

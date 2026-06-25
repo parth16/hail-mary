@@ -500,6 +500,11 @@ def _validate_completed_meridian_placeholder(
     index: int,
 ) -> None:
     generated_source_url = _generated_meridian_source_url(result.licensing_notes)
+    if _is_meridian_placeholder_title(result.title) and generated_source_url is None:
+        raise ResearchImportError(
+            f"Research result {index} uses a generated Meridian placeholder title, so "
+            "licensing_notes must keep the generated placeholder marker until import."
+        )
     if generated_source_url is not None and result.source_url != generated_source_url:
         raise ResearchImportError(
             f"Research result {index} uses a generated Meridian placeholder, so "
