@@ -282,6 +282,140 @@ def test_evaluate_deal_deterministic_pass_overrides_model_invest(
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "**Recommendation:** PASS" in memo_text
     assert "Deterministic scoring forced PASS" in memo_text
+    assert "Valuation cap" not in result.final_recommendation.reason
+
+
+def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient(
+        outputs_by_role={AgentRole.FINAL_DECISION: [_invest_output_json]}
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            mock_llm=False,
+            min_check=5_000,
+        ),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.INVEST
+    assert result.deterministic_score.check_size == 5_000
+    assert result.final_recommendation.recommendation == Recommendation.INVEST
+    assert result.final_recommendation.check_size == 5_000
+    assert any("deterministic allocation" in warning for warning in result.warnings)
+
+
+def test_evaluate_deal_final_memo_includes_conflict_evidence_for_forced_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(
+        tmp_path,
+        body=(
+            "Valuation cap $8M. Valuation cap $10M. Discount 20%. Round size $1M. "
+            "ARR revenue growth with paid customers and retention. "
+            "Lead investor committed and seed round is active."
+        ),
+    )
+    client = RecordingReviewClient(
+        outputs_by_role={AgentRole.FINAL_DECISION: [_invest_output_json]}
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+    assert result.final_recommendation.evidence
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Conflicting material deal terms" in memo_text
+    assert "Valuation cap $8M" in memo_text
+    assert "Valuation cap $10M" in memo_text
+
+
+def test_evaluate_deal_no_evidence_writes_pass_memo_without_model_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = tmp_path / "EmptyCo"
+    company_dir.mkdir()
+    (company_dir / "empty.txt").write_text("", encoding="utf-8")
+    client = RecordingReviewClient()
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert client.calls == []
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+    assert result.final_recommendation.check_size == 0
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "**Recommendation:** PASS" in memo_text
+    assert "NEEDS\\_DILIGENCE: No usable source-linked evidence was available" in memo_text
+    assert "skipped model committee review" in memo_text
+
+
+def test_evaluate_deal_renders_final_decision_findings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient(
+        outputs_by_role={AgentRole.FINAL_DECISION: [_final_finding_output_json]}
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Final caveat: Validate customer concentration before wiring funds." in memo_text
+
+
+def test_evaluate_deal_final_memo_includes_source_document_location(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient()
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "document: memo.txt" in memo_text
+    assert "source kind: local_file" in memo_text
 
 
 def test_evaluate_deal_rejects_collection_folder_with_multiple_deals(
@@ -440,6 +574,31 @@ def _invest_output_json(packet: AgentInputPacket) -> str:
             recommendation=Recommendation.INVEST,
             check_size=1_000,
             reason="The model says invest, but deterministic gates should override it.",
+            evidence=[reference],
+        ),
+    ).model_dump_json()
+
+
+def _final_finding_output_json(packet: AgentInputPacket) -> str:
+    evidence = packet.evidence[0]
+    reference = AgentEvidenceReference(evidence_id=evidence.id, quote=_quote(evidence.text))
+    return AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        findings=[
+            AgentFinding(
+                title="Final caveat",
+                finding="Validate customer concentration before wiring funds.",
+                confidence=ConfidenceLevel.MEDIUM,
+                materiality="high",
+                evidence=[reference],
+            )
+        ],
+        recommendation=AgentRecommendationRationale(
+            recommendation=Recommendation.INVEST,
+            check_size=packet.score.check_size,
+            reason="The final decision is supported by source-linked packet evidence.",
             evidence=[reference],
         ),
     ).model_dump_json()

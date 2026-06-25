@@ -20,17 +20,23 @@ from hailmary.config import AppConfig, ConfigError, create_local_state, validate
 from hailmary.ingest.folder_loader import IngestionError, ingest_folder
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
+    AgentFinding,
     AgentInputPacket,
     AgentPacketFile,
     AgentRecommendationRationale,
     AgentReviewOutput,
     AgentRole,
+    AgentSummaryPoint,
     AgentValidationIssue,
 )
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
-from hailmary.schemas.scoring import Recommendation, ScoredDeal
-from hailmary.scoring.scorer import score_evidence_store, validated_verified_claims
+from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal
+from hailmary.scoring.scorer import (
+    score_evidence_store,
+    validated_conflicts,
+    validated_verified_claims,
+)
 from hailmary.utils.slug import slugify
 
 DEFAULT_EVALUATION_MAX_CONCURRENCY = 3
@@ -235,31 +241,38 @@ def evaluate_deal_folder(
         packet_file.agent_role: packet_file.path for packet_file in packet_files
     }
 
-    _stage(stage_callback, "specialist committee review")
-    specialist_results = _run_specialist_reviews(
-        review_client,
-        packets_by_role=packets_by_role,
-        packet_paths_by_role=packet_paths_by_role,
-        output_dir=output_dir,
-        max_concurrency=max_concurrency,
-    )
-
-    _stage(stage_callback, "final decision review")
     final_packet = packets_by_role[AgentRole.FINAL_DECISION]
-    final_result = _run_packet_with_repair(
-        review_client,
-        final_packet,
-        packet_path=packet_paths_by_role[AgentRole.FINAL_DECISION],
-        output_dir=output_dir,
-        committee_context=_committee_context_text(specialist_results),
-        fail_on_model_error=True,
-    )
-    if final_result.output is None:
-        raise EvaluationError(
-            "The final-decision review did not pass validation after one repair attempt. "
-            "Hail Mary did not write a final memo."
+    if final_packet.allowed_evidence_ids:
+        _stage(stage_callback, "specialist committee review")
+        specialist_results = _run_specialist_reviews(
+            review_client,
+            packets_by_role=packets_by_role,
+            packet_paths_by_role=packet_paths_by_role,
+            output_dir=output_dir,
+            max_concurrency=max_concurrency,
         )
-    guarded_decision = _guard_final_decision(scored_deal, final_result.output)
+
+        _stage(stage_callback, "final decision review")
+        final_result = _run_packet_with_repair(
+            review_client,
+            final_packet,
+            packet_path=packet_paths_by_role[AgentRole.FINAL_DECISION],
+            output_dir=output_dir,
+            committee_context=_committee_context_text(specialist_results),
+            fail_on_model_error=True,
+        )
+        if final_result.output is None:
+            raise EvaluationError(
+                "The final-decision review did not pass validation after one repair attempt. "
+                "Hail Mary did not write a final memo."
+            )
+        final_output = final_result.output
+        guarded_decision = _guard_final_decision(scored_deal, store, final_output)
+    else:
+        _stage(stage_callback, "specialist committee review")
+        specialist_results = []
+        _stage(stage_callback, "final decision review")
+        final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
 
     _stage(stage_callback, "final memo write")
     report_dir = config.data_dir / "reports"
@@ -272,7 +285,7 @@ def evaluate_deal_folder(
             scored_deal,
             store,
             specialist_results=specialist_results,
-            final_output=final_result.output,
+            final_output=final_output,
             final_recommendation=guarded_decision.recommendation,
             warnings=warnings,
         ),
@@ -284,7 +297,7 @@ def evaluate_deal_folder(
         company_name=deal.company_name,
         deterministic_score=scored_deal,
         final_recommendation=guarded_decision.recommendation,
-        final_output=final_result.output,
+        final_output=final_output,
         specialist_results=specialist_results,
         final_memo_path=final_memo_path,
         agent_output_dir=output_dir,
@@ -404,7 +417,7 @@ def render_final_evaluation_memo(
     else:
         lines.append("- No specialist output passed validation.")
 
-    lines.extend(["", "## Final LLM Recommendation"])
+    lines.extend(["", "## Final Recommendation"])
     lines.append(
         f"- Recommendation: {final_recommendation.recommendation}; "
         f"check size: {_format_check_size(final_recommendation.check_size)}."
@@ -417,6 +430,13 @@ def render_final_evaluation_memo(
         prefix = "UNVERIFIED: " if summary.unsupported else ""
         lines.append(
             f"- {prefix}{_memo_text(summary.summary)}{_citation_text(summary.evidence)}"
+        )
+    for finding in final_output.findings:
+        prefix = "UNVERIFIED: " if finding.unsupported else ""
+        lines.append(
+            f"- {prefix}{_memo_text(finding.title)}: {_memo_text(finding.finding)} "
+            f"Confidence: {finding.confidence}. Materiality: "
+            f"{_memo_text(finding.materiality)}.{_citation_text(finding.evidence)}"
         )
 
     lines.extend(["", "## Evidence Cited"])
@@ -720,6 +740,7 @@ def _committee_context_text(results: Sequence[RoleReviewResult]) -> str:
 
 def _guard_final_decision(
     scored_deal: ScoredDeal,
+    store: EvidenceStore,
     final_output: AgentReviewOutput,
 ) -> GuardedFinalDecision:
     model_recommendation = final_output.recommendation
@@ -739,7 +760,7 @@ def _guard_final_decision(
                 recommendation=Recommendation.PASS,
                 check_size=0,
                 reason=f"Deterministic scoring forced PASS: {scored_deal.one_line_reason}",
-                evidence=model_recommendation.evidence,
+                evidence=_deterministic_recommendation_evidence(store, scored_deal),
             ),
             warning=forced_pass_warning,
         )
@@ -747,16 +768,133 @@ def _guard_final_decision(
     if model_recommendation.recommendation == Recommendation.PASS:
         return GuardedFinalDecision(recommendation=model_recommendation)
 
-    check_size = min(model_recommendation.check_size, scored_deal.check_size)
+    check_size = scored_deal.check_size
     capped_check_warning: str | None = None
     if check_size != model_recommendation.check_size:
         capped_check_warning = (
-            "The final model check size was capped at the deterministic allocation."
+            "The final model check size was replaced with the deterministic allocation."
         )
     return GuardedFinalDecision(
         recommendation=model_recommendation.model_copy(update={"check_size": check_size}),
         warning=capped_check_warning,
     )
+
+
+def _no_evidence_final_decision(
+    scored_deal: ScoredDeal,
+) -> tuple[AgentReviewOutput, GuardedFinalDecision]:
+    limitation = (
+        "No usable source-linked evidence was available, so Hail Mary skipped model "
+        "committee review and wrote a deterministic PASS/$0 memo."
+    )
+    recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason=(
+            "NEEDS_DILIGENCE: No usable source-linked evidence was available; "
+            f"deterministic scoring forced PASS. {scored_deal.one_line_reason}"
+        ),
+        evidence=[],
+    )
+    output = AgentReviewOutput(
+        deal_id=scored_deal.deal_id,
+        company_name=scored_deal.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        summary=[
+            AgentSummaryPoint(
+                summary=(
+                    "NEEDS_DILIGENCE: No extractable source-linked evidence was available "
+                    "for final model review."
+                ),
+                unsupported=True,
+            )
+        ],
+        findings=[
+            AgentFinding(
+                title="No usable evidence",
+                finding=(
+                    "NEEDS_DILIGENCE: The deal requires readable source documents before "
+                    "investment diligence can support material claims."
+                ),
+                confidence=ConfidenceLevel.LOW,
+                materiality="high",
+                unsupported=True,
+            )
+        ],
+        limitations=[limitation],
+        recommendation=recommendation,
+    )
+    return output, GuardedFinalDecision(recommendation=recommendation, warning=limitation)
+
+
+def _deterministic_recommendation_evidence(
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> list[AgentEvidenceReference]:
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    references: list[AgentEvidenceReference] = []
+    for evidence_id in _deterministic_support_evidence_ids(store, scored_deal):
+        evidence = evidence_by_id.get(evidence_id)
+        if evidence is None:
+            continue
+        references.append(_reference_for_evidence(evidence))
+    return references[:5]
+
+
+def _deterministic_support_evidence_ids(
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> list[str]:
+    evidence_ids: list[str] = []
+
+    def add_id(evidence_id: str) -> None:
+        if evidence_id not in evidence_ids:
+            evidence_ids.append(evidence_id)
+
+    for evidence_id in _conflict_evidence_ids(store):
+        add_id(evidence_id)
+    for factor in scored_deal.score_factors:
+        for evidence_id in factor.evidence_ids:
+            add_id(evidence_id)
+    for question in scored_deal.diligence_questions:
+        for evidence_id in question.evidence_ids:
+            add_id(evidence_id)
+    for claim in validated_verified_claims(store):
+        for citation in claim.citations:
+            add_id(citation.evidence_id)
+    if not evidence_ids:
+        for evidence in store.evidence[:5]:
+            add_id(evidence.id)
+    return evidence_ids
+
+
+def _conflict_evidence_ids(store: EvidenceStore) -> list[str]:
+    claim_by_id = {claim.id: claim for claim in store.claims}
+    evidence_ids: list[str] = []
+    for conflict in validated_conflicts(store):
+        for claim_id in conflict.claim_ids:
+            claim = claim_by_id.get(claim_id)
+            if claim is None:
+                continue
+            for citation in claim.citations:
+                if citation.evidence_id not in evidence_ids:
+                    evidence_ids.append(citation.evidence_id)
+    return evidence_ids
+
+
+def _reference_for_evidence(evidence: EvidenceRecord) -> AgentEvidenceReference:
+    quote = _reference_quote(evidence.text)
+    return AgentEvidenceReference(evidence_id=evidence.id, quote=quote or None)
+
+
+def _reference_quote(text: str) -> str:
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return ""
+    sentence = collapsed.split(".", 1)[0].strip()
+    if sentence:
+        return sentence[:240].rstrip()
+    return collapsed[:240].rstrip()
 
 
 def _evaluation_warnings(
@@ -1073,9 +1211,28 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
     excerpt = _memo_text(evidence.text[:500])
     if len(evidence.text) > 500:
         excerpt = f"{excerpt}..."
+    source_parts = [
+        f"document: {_memo_text(str(evidence.document_path))}",
+        f"locator: {locator}",
+        f"evidence kind: {evidence.evidence_kind}",
+        f"source kind: {evidence.source_kind}",
+        f"document type: {evidence.document_type}",
+    ]
+    if evidence.provider_name:
+        source_parts.append(f"provider: {_memo_text(evidence.provider_name)}")
+    if evidence.source_url:
+        source_parts.append(f"source page: {_memo_text(evidence.source_url)}")
+    if evidence.source_api:
+        source_parts.append(f"data service source: {_memo_text(evidence.source_api)}")
+    if evidence.retrieved_at:
+        source_parts.append(f"retrieved at: {evidence.retrieved_at.isoformat()}")
+    if evidence.external_confidence:
+        source_parts.append(f"confidence: {_memo_text(evidence.external_confidence)}")
+    if evidence.licensing_notes:
+        source_parts.append(f"licensing: {_memo_text(evidence.licensing_notes)}")
     return (
-        f"- {_memo_text(evidence.id)}: {locator}, {evidence.evidence_kind}, "
-        f"{evidence.source_kind}, {evidence.document_type}. Quote/excerpt: \"{excerpt}\""
+        f"- {_memo_text(evidence.id)}: {'; '.join(source_parts)}. "
+        f"Quote/excerpt: \"{excerpt}\""
     )
 
 
