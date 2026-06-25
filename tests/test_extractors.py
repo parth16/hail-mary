@@ -650,6 +650,51 @@ def test_pdf_useful_ocr_does_not_duplicate_existing_page_text(
     assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
 
 
+@pytest.mark.parametrize(
+    ("existing_text", "ocr_text"),
+    [
+        ("AI", "Paid customers use the product weekly."),
+        ("US", "Customers report growth in the United States."),
+    ],
+)
+def test_pdf_useful_ocr_keeps_short_existing_labels_when_ocr_contains_same_letters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_text: str,
+    ocr_text: str,
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return existing_text
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text=ocr_text,
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert engine.pdf_calls == [1]
+    assert result.ocr_applied
+    assert existing_text in result.combined_text
+    assert ocr_text in result.combined_text
+    assert result.combined_text.startswith(existing_text)
+    assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
+
+
 def test_pdf_fragment_ocr_does_not_reenter_evidence_after_raw_text_merge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

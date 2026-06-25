@@ -594,13 +594,32 @@ def _merge_existing_page_text_with_ocr(*, existing_text: str, ocr_text: str) -> 
     if not ocr:
         return existing
 
-    normalized_existing = _normalize_text_for_merge(existing)
-    normalized_ocr = _normalize_text_for_merge(ocr)
-    if normalized_existing and normalized_existing in normalized_ocr:
-        return ocr
-    if normalized_ocr and normalized_ocr in normalized_existing:
+    existing_lines = _normalized_nonblank_lines(existing)
+    ocr_lines = _normalized_nonblank_lines(ocr)
+    if existing_lines == ocr_lines:
         return existing
-    return f"{existing}\n\n{ocr}"
+    existing_line_set = set(existing_lines)
+    ocr_line_set = set(ocr_lines)
+    if existing_lines and set(existing_lines).issubset(ocr_line_set):
+        return ocr
+    if ocr_lines and set(ocr_lines).issubset(existing_line_set):
+        return existing
+
+    merged_lines = [line.strip() for line in existing.splitlines() if line.strip()]
+    merged_lines.extend(
+        line.strip()
+        for line in ocr.splitlines()
+        if line.strip() and _normalize_text_for_merge(line) not in existing_line_set
+    )
+    return "\n\n".join(merged_lines)
+
+
+def _normalized_nonblank_lines(text: str) -> list[str]:
+    return [
+        normalized_line
+        for line in text.splitlines()
+        if (normalized_line := _normalize_text_for_merge(line))
+    ]
 
 
 def _normalize_text_for_merge(text: str) -> str:
