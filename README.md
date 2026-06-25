@@ -150,7 +150,7 @@ After the first push:
 - when GitHub Codex automatic reviews are enabled, rely on the automatic review trigger; comment `@codex review` only if the trigger does not run and an immediate manual review is needed
 - never stage raw investment docs or generated confidential output
 
-After publishing a PR, monitor Codex review activity every minute. An eyes reaction means Codex has started reviewing. If Codex leaves actionable comments, address them, run the relevant tests, push the fixes, and keep monitoring. Cap automatic review loops at five. After the fifth loop, run another loop only for P1 feedback; otherwise merge and move ahead.
+After publishing a PR, start a background monitor that checks every minute for Codex review activity, CI status, test failures, and merge conflicts. An eyes reaction means Codex has started reviewing. If Codex leaves actionable comments, CI fails, tests fail, or merge conflicts appear, address them automatically, run the relevant tests, push the fixes, and keep monitoring. Cap Codex feedback loops at five. After the fifth loop, run another loop only for outstanding P1 feedback; otherwise, if CI and mergeability are clean, merge and move ahead.
 
 ## Product Standards
 

@@ -776,8 +776,8 @@ After the first push:
 - include summary, validation commands, privacy notes, and known limitations in every PR body
 - self-review every change before pushing; fix obvious correctness, safety, clarity, and test gaps before opening a PR
 - when GitHub Codex automatic reviews are enabled, rely on the automatic review trigger; comment `@codex review` only if the trigger does not run and an immediate manual review is needed
-- after publishing a PR, poll every minute for Codex review activity; address actionable comments, push fixes, and continue the review loop until Codex gives a thumbs-up reaction or the operator explicitly stops it
-- wait for GitHub/Codex review before merging unless explicitly instructed otherwise
+- after publishing a PR, start a background monitor that polls every minute for Codex review activity, CI status, test failures, and merge conflicts; address actionable Codex comments, CI failures, test failures, and merge conflicts automatically, run relevant tests, push fixes, and keep monitoring
+- cap Codex feedback iterations at five; after the fifth iteration, run another iteration only for outstanding P1 Codex feedback, otherwise merge automatically when CI and mergeability are clean
 - never stage raw investment docs or unrelated local files
 
 ## 19. Quality Bar
