@@ -230,7 +230,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert row["company_name"] == "Acme AI"
     assert row["provider_id"] == "meridian"
     assert row["provider_name"] == "Meridian deal page"
-    assert row["source_url"] == ""
+    assert row["source_url"] == "https://portal.angellist.com/m/acme-ai/invest"
     assert row["retrieved_at"] == ""
     assert row["source_kind"] == "meridian"
     assert row["document_type"] == "platform_deal_page"
@@ -242,12 +242,15 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     [
         "",
         "mailto:founder@example.com",
+        "http://portal.angellist.com/m/acme-ai/invest",
         "https://example.com/m/acme-ai/invest",
         "https://portal.angellist.com/not-m/acme-ai/invest",
         "https://portal.angellist.com/m/acme-ai/profile",
         "https://user:token@portal.angellist.com/m/acme-ai/invest",
         "https://portal.angellist.com:bad/m/acme-ai/invest",
         "https://portal.angellist.com/m/acme ai/invest",
+        "https://portal.angellist.com/m/acme-ai;jsessionid=secret/invest",
+        "https://portal.angellist.com/m/acme-ai/invest;jsessionid=secret",
         "https://portal.angellist.com/m/acme-ai/invest?token=secret",
         "https://portal.angellist.com/m/acme-ai/invest#details",
     ],
@@ -906,6 +909,7 @@ def test_import_research_results_skips_untouched_template_rows(
         created_at=datetime(2026, 1, 2, tzinfo=UTC),
     )
     template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    template_payload["results"][1]["source_url"] = "https://example.com/prefilled"
     template_payload["results"][0].update(
         {
             "title": "Exact public source excerpt",
@@ -934,6 +938,59 @@ def test_import_research_results_skips_untouched_template_rows(
     assert result.skipped_duplicate_count == 0
     assert result.skipped_blank_template_row_count == len(template_payload["results"]) - 1
     assert result.deal_count == 1
+
+
+@pytest.mark.parametrize(
+    ("source_url", "message"),
+    [
+        (
+            "http://portal.angellist.com/m/example/invest",
+            "must start with https://",
+        ),
+        (
+            "https://portal.angellist.com/m/example/invest;jsessionid=secret",
+            "extra text after",
+        ),
+        (
+            "https://portal.angellist.com/m/example;jsessionid=secret/invest",
+            "extra text after",
+        ),
+        (
+            "https://portal.angellist.com/m/example/invest?token=secret",
+            "extra text after",
+        ),
+        (
+            "https://example.com/m/example/invest",
+            "portal.angellist.com",
+        ),
+    ],
+)
+def test_import_research_results_rejects_unsafe_meridian_source_urls(
+    tmp_path: Path,
+    source_url: str,
+    message: str,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-bad-meridian-url.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                source_url=source_url,
+                source_kind="meridian",
+                document_type="platform_deal_page",
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match=message):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
 
 
 def test_import_research_results_reports_original_template_row_number(
@@ -1222,8 +1279,8 @@ def test_import_research_results_defaults_meridian_to_meridian_source_kind(
                 provider_id="meridian",
                 provider_name=None,
                 title="Meridian deal page excerpt",
-                source_url=None,
-                source_api="Meridian portal export",
+                source_url="https://portal.angellist.com/m/example/invest",
+                source_api=None,
                 licensing_notes="Authenticated source.",
             )
         ],

@@ -53,7 +53,7 @@ def prepare_meridian_workflow(
 
     created_at = _as_utc(created_at or datetime.now(UTC))
     cleaned_company_name = _clean_company_name(company_name)
-    cleaned_meridian_url = _clean_meridian_url(meridian_url)
+    cleaned_meridian_url = clean_meridian_url(meridian_url)
     provider = _meridian_provider()
 
     template_dir = config.data_dir / "research-results-templates"
@@ -73,7 +73,7 @@ def prepare_meridian_workflow(
                 "title": "",
                 "text": "",
                 "retrieved_at": "",
-                "source_url": "",
+                "source_url": cleaned_meridian_url,
                 "source_api": "",
                 "confidence": "",
                 "licensing_notes": provider.licensing_notes,
@@ -120,7 +120,7 @@ def _clean_company_name(company_name: str) -> str:
     return cleaned
 
 
-def _clean_meridian_url(url: str) -> str:
+def clean_meridian_url(url: str) -> str:
     cleaned = url.strip()
     if not cleaned:
         raise MeridianWorkflowError("Meridian URL cannot be blank.")
@@ -128,8 +128,8 @@ def _clean_meridian_url(url: str) -> str:
         parsed = urlparse(cleaned)
     except ValueError as exc:
         raise MeridianWorkflowError("The Meridian URL is not a valid URL.") from exc
-    if parsed.scheme not in {"http", "https"}:
-        raise MeridianWorkflowError("The Meridian URL must start with http:// or https://.")
+    if parsed.scheme != "https":
+        raise MeridianWorkflowError("The Meridian URL must start with https://.")
     try:
         host = parsed.hostname
     except ValueError as exc:
@@ -146,9 +146,9 @@ def _clean_meridian_url(url: str) -> str:
         )
     if any(character.isspace() for character in cleaned):
         raise MeridianWorkflowError("The Meridian URL cannot contain spaces.")
-    if parsed.query or parsed.fragment:
+    if ";" in parsed.path or parsed.params or parsed.query or parsed.fragment:
         raise MeridianWorkflowError(
-            "The Meridian URL cannot include extra text after ? or #. "
+            "The Meridian URL cannot include extra text after ;, ?, or #. "
             "Use the base deal page URL."
         )
     if host.casefold() != "portal.angellist.com":
@@ -189,8 +189,8 @@ def _safety_rules() -> list[str]:
         ),
         "Copy only facts and short excerpts you are allowed to save locally.",
         (
-            "Every completed result row must include the time viewed, the Meridian "
-            "page URL, confidence, and licensing notes."
+            "Every completed result row must keep the generated Meridian page URL "
+            "and include the time viewed, confidence, and licensing notes."
         ),
     ]
 
@@ -201,8 +201,8 @@ def _manual_steps() -> list[str]:
         "Complete normal sign-in and access checks yourself.",
         "Review the page and collect only permitted facts tied to page text.",
         (
-            "Paste each fact into the results template. Fill source_url with the "
-            "Meridian page URL for completed rows."
+            "Paste each fact into the results template. Keep source_url as the "
+            "generated Meridian page URL for completed rows."
         ),
         "Run the dry-run import command before importing evidence.",
     ]

@@ -29,6 +29,7 @@ from hailmary.schemas.evidence import (
 )
 from hailmary.utils.slug import slugify
 
+from .meridian import MeridianWorkflowError, clean_meridian_url
 from .providers import builtin_research_providers
 from .schemas import (
     ResearchImportDealSummary,
@@ -69,8 +70,6 @@ TEMPLATE_FACT_FIELDS = {
     "title",
     "text",
     "retrieved_at",
-    "source_url",
-    "source_api",
     "confidence",
 }
 
@@ -292,6 +291,8 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
                 index=display_index,
                 field_name="source_url",
             )
+        if result.source_kind == SourceKind.MERIDIAN:
+            _validate_meridian_result_source(result, index=display_index)
         if result.source_api is not None:
             _validate_source_api(result.source_api, index=display_index)
         _validate_known_provider_source_kind(result, index=display_index)
@@ -343,6 +344,25 @@ def _validate_url_reference(source_url: str, *, index: int, field_name: str) -> 
 def _validate_source_api(source_api: str, *, index: int) -> None:
     if _source_api_looks_like_url(source_api):
         _validate_url_reference(source_api, index=index, field_name="source_api")
+
+
+def _validate_meridian_result_source(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    if result.source_url is None:
+        raise ResearchImportError(
+            f"Research result {index} uses Meridian evidence, so source_url must be "
+            "a Meridian deal page URL."
+        )
+    try:
+        clean_meridian_url(result.source_url)
+    except MeridianWorkflowError as exc:
+        raise ResearchImportError(
+            f"Research result {index} source_url is not a safe Meridian deal page URL: "
+            f"{exc}"
+        ) from exc
 
 
 def _source_api_looks_like_url(source_api: str) -> bool:
