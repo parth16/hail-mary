@@ -12,9 +12,29 @@ from hailmary.cli import app
 from hailmary.ingest import folder_loader
 from hailmary.ingest.extractors import ExtractionResult
 from hailmary.ingest.extractors import extract_document as real_extract_document
+from hailmary.ingest.ocr import LocalOcrResult
 from hailmary.schemas.documents import ExtractedPage, ExtractionQuality
 
 runner = CliRunner()
+
+
+class CliFakeOcrEngine:
+    def image_to_text(
+        self,
+        path: Path,
+        *,
+        page_number: int | None = None,
+    ) -> LocalOcrResult:
+        del path
+        assert page_number == 1
+        return LocalOcrResult(
+            text="Valuation cap $8M. Minimum investment $1,000.",
+            confidence=0.9,
+        )
+
+    def pdf_page_to_text(self, path: Path, *, page_number: int) -> LocalOcrResult:
+        del path, page_number
+        return LocalOcrResult(text="")
 
 
 def test_bin_wrapper_runs_without_uv_run() -> None:
@@ -74,7 +94,7 @@ def test_ingest_folder_warns_when_documents_need_image_text_reading(
     source.mkdir(parents=True)
     (source / "ScanCo pitch deck.pdf").write_bytes(b"%PDF-1.4")
 
-    def fake_extract_document(path: Path) -> ExtractionResult:
+    def fake_extract_document(path: Path, **_: object) -> ExtractionResult:
         assert path.name == "ScanCo pitch deck.pdf"
         page = ExtractedPage(
             page_number=1,
@@ -124,6 +144,41 @@ def test_ingest_folder_warns_for_image_only_deal(tmp_path: Path, monkeypatch: Mo
     assert saved_document["source"]["vision_recommended"]
 
 
+def test_ingest_folder_enable_ocr_uses_local_image_text_reading(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "pitch-decks" / "OcrCliCo"
+    source.mkdir(parents=True)
+    (source / "scan.png").write_bytes(b"synthetic image placeholder")
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(folder_loader, "SubprocessLocalOcrEngine", CliFakeOcrEngine)
+
+    result = runner.invoke(
+        app,
+        [
+            "ingest-folder",
+            str(source.parent),
+            "--data-dir",
+            str(data_dir),
+            "--enable-ocr",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Used image-based text reading (OCR) on 1 document" in normalized_output
+    assert "OCR means reading text from images" in normalized_output
+    assert "source-linked evidence" in normalized_output
+
+    summary_path = data_dir / "processed" / "ingestion_summary.json"
+    saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    saved_document = saved_summary["deals"][0]["documents"][0]
+    assert saved_document["source"]["ocr_applied"]
+    assert saved_document["source"]["ocr_confidence"] == 0.9
+    assert not saved_document["source"]["ocr_recommended"]
+
+
 def test_ingest_folder_warns_when_no_usable_evidence_is_built(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -132,7 +187,7 @@ def test_ingest_folder_warns_when_no_usable_evidence_is_built(
     source.mkdir(parents=True)
     (source / "empty.pdf").write_bytes(b"%PDF-1.4")
 
-    def fake_extract_document(path: Path) -> ExtractionResult:
+    def fake_extract_document(path: Path, **_: object) -> ExtractionResult:
         assert path.name == "empty.pdf"
         return ExtractionResult(
             pages=[],
@@ -161,7 +216,7 @@ def test_ingest_folder_warns_for_each_deal_without_usable_evidence(
     (empty_source / "empty.pdf").write_bytes(b"%PDF-1.4")
     (full_source / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
 
-    def fake_extract_document(path: Path) -> ExtractionResult:
+    def fake_extract_document(path: Path, **_: object) -> ExtractionResult:
         if path.name == "empty.pdf":
             return ExtractionResult(
                 pages=[],

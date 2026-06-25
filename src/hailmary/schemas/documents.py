@@ -63,6 +63,8 @@ class SourceDocument(BaseModel):
     confidentiality_detected: bool = False
     extraction_quality: ExtractionQuality
     ocr_recommended: bool = False
+    ocr_applied: bool = False
+    ocr_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     vision_recommended: bool = False
     notes: str | None = None
 
@@ -73,6 +75,8 @@ class ExtractedPage(BaseModel):
     clean_text: str
     word_count: int = 0
     needs_ocr: bool = False
+    ocr_applied: bool = False
+    ocr_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     vision_recommended: bool = False
     source_span_start: int | None = None
     source_span_end: int | None = None

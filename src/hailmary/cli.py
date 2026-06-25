@@ -158,6 +158,33 @@ def _config_from_options(data_dir: Path | None, *, ignore_saved: bool = False) -
         _exit_with_config_error(exc)
 
 
+def _config_with_ocr_override(
+    config: AppConfig,
+    *,
+    enable_ocr: bool | None,
+) -> AppConfig:
+    if enable_ocr is None:
+        return config
+    return config.model_copy(update={"enable_ocr": enable_ocr})
+
+
+def _has_ocr_warning(notes: str | None) -> bool:
+    if not notes:
+        return False
+    lowered_notes = notes.lower()
+    if "image-based text reading (ocr)" not in lowered_notes:
+        return False
+    return any(
+        marker in lowered_notes
+        for marker in [
+            "could not",
+            "found no readable text",
+            "low confidence",
+            "needs the local",
+        ]
+    )
+
+
 @app.command("init")
 def init(
     data_dir: Annotated[
@@ -208,10 +235,24 @@ def ingest_folder(
             help="Where Hail Mary should store local generated files.",
         ),
     ] = None,
+    enable_ocr: Annotated[
+        bool | None,
+        typer.Option(
+            "--enable-ocr/--disable-ocr",
+            help=(
+                "Use local image-based text reading (OCR) when local tools are installed. "
+                "OCR means reading text from images."
+            ),
+            show_default=False,
+        ),
+    ] = None,
 ) -> None:
     """Scan a local folder and save source-linked document metadata."""
 
-    config = _config_from_options(data_dir)
+    config = _config_with_ocr_override(
+        _config_from_options(data_dir),
+        enable_ocr=enable_ocr,
+    )
     try:
         create_local_state(config, force=False)
     except ConfigError as exc:
@@ -256,6 +297,21 @@ def ingest_folder(
         metrics.add_row(_plain("Evidence records"), _plain(str(evidence_count)))
         metrics.add_row(_plain("Deal-term claims"), _plain(str(claim_count)))
 
+    ocr_applied_documents = sum(
+        1
+        for deal in summary.deals
+        for document in deal.documents
+        if document.source.ocr_applied
+    )
+    if ocr_applied_documents:
+        document_word = "document" if ocr_applied_documents == 1 else "documents"
+        summary_lines.append(
+            _plain(
+                f"Used image-based text reading (OCR) on {ocr_applied_documents} "
+                f"{document_word}. OCR means reading text from images."
+            )
+        )
+
     _print_section("Scan complete", summary_lines, style="green")
     console.print(metrics)
 
@@ -289,7 +345,24 @@ def ingest_folder(
         warning_lines.append(
             _plain(
                 f"{image_text_documents} {document_word} may need image-based text reading "
-                "(OCR) before Hail Mary can use all of their content."
+                "(OCR) before Hail Mary can use all of their content. OCR means reading "
+                "text from images."
+            )
+        )
+
+    ocr_warning_documents = sum(
+        1
+        for deal in summary.deals
+        for document in deal.documents
+        if _has_ocr_warning(document.source.notes)
+    )
+    if ocr_warning_documents:
+        document_word = "document" if ocr_warning_documents == 1 else "documents"
+        warning_lines.append(
+            _plain(
+                f"{ocr_warning_documents} {document_word} had image-based text reading "
+                "(OCR) warnings. OCR means reading text from images. Review the saved "
+                "document metadata before relying on that text."
             )
         )
 
@@ -388,10 +461,24 @@ def evaluate_deal(
             help="Maximum number of specialist model reviews to run at once.",
         ),
     ] = 3,
+    enable_ocr: Annotated[
+        bool | None,
+        typer.Option(
+            "--enable-ocr/--disable-ocr",
+            help=(
+                "Use local image-based text reading (OCR) during ingestion when local "
+                "tools are installed. OCR means reading text from images."
+            ),
+            show_default=False,
+        ),
+    ] = None,
 ) -> None:
     """Evaluate one deal end to end and write a final Markdown memo."""
 
-    config = _config_from_options(data_dir)
+    config = _config_with_ocr_override(
+        _config_from_options(data_dir),
+        enable_ocr=enable_ocr,
+    )
     stages = [
         "local setup and privacy checks",
         "ingestion",

@@ -450,6 +450,8 @@ def _evidence_item(
         source_freshness=evidence.source_freshness,
         page_number=evidence.page_number,
         table_index=evidence.table_index,
+        ocr_applied=evidence.ocr_applied,
+        ocr_confidence=evidence.ocr_confidence if evidence.ocr_applied else None,
         truncated=truncated,
     )
 

@@ -278,7 +278,10 @@ def evaluate_deal_folder(
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir, description="report")
     final_memo_path = report_dir / f"{deal.id}-final-evaluation.md"
-    warnings = _evaluation_warnings(specialist_results, guarded_decision)
+    warnings = [
+        *_ingestion_ocr_warnings(deal),
+        *_evaluation_warnings(specialist_results, guarded_decision),
+    ]
     _write_private_text(
         final_memo_path,
         render_final_evaluation_memo(
@@ -913,6 +916,41 @@ def _evaluation_warnings(
     return warnings
 
 
+def _ingestion_ocr_warnings(deal: IngestedDeal) -> list[str]:
+    ocr_warning_documents = sum(
+        1
+        for document in deal.documents
+        if document.source.ocr_recommended or _has_ocr_warning(document.source.notes)
+    )
+    if not ocr_warning_documents:
+        return []
+    document_word = "document" if ocr_warning_documents == 1 else "documents"
+    return [
+        f"{ocr_warning_documents} {document_word} had image-based text reading (OCR) "
+        "warnings during ingestion. OCR means reading text from images. Review the saved "
+        "document metadata before relying on that text."
+    ]
+
+
+def _has_ocr_warning(notes: str | None) -> bool:
+    if not notes:
+        return False
+    lowered_notes = notes.lower()
+    if "image-based text reading (ocr)" not in lowered_notes:
+        return False
+    return any(
+        marker in lowered_notes
+        for marker in [
+            "could not",
+            "found no readable text",
+            "low confidence",
+            "needs the local",
+            "needs local ocr",
+            "may need",
+        ]
+    )
+
+
 def _packet_request_text(
     packet: AgentInputPacket,
     *,
@@ -1232,10 +1270,22 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
         source_parts.append(f"confidence: {_memo_text(evidence.external_confidence)}")
     if evidence.licensing_notes:
         source_parts.append(f"licensing: {_memo_text(evidence.licensing_notes)}")
+    if evidence.ocr_applied:
+        source_parts.append(
+            "text source: image-based text reading (OCR; OCR means reading text from images)"
+        )
+        if evidence.ocr_confidence is not None:
+            source_parts.append(
+                f"OCR confidence: {_memo_text(_format_ocr_confidence(evidence.ocr_confidence))}"
+            )
     return (
         f"- {_memo_text(evidence.id)}: {'; '.join(source_parts)}. "
         f"Quote/excerpt: \"{excerpt}\""
     )
+
+
+def _format_ocr_confidence(confidence: float) -> str:
+    return f"{confidence:.0%}"
 
 
 def _limitation_lines(

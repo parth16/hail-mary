@@ -108,6 +108,7 @@ class GitHubApiError(RuntimeError):
 
 GITHUB_REPOSITORY_SEARCH_ENDPOINT = "https://api.github.com/search/repositories"
 GITHUB_MAX_PAGES = 5
+GITHUB_SEARCH_REQUEST_INTERVAL_SECONDS = 6.1
 
 
 @dataclass(frozen=True)
@@ -1169,6 +1170,7 @@ def _build_sec_form_d_api_opener() -> urllib.request.OpenerDirector:
 @dataclass(frozen=True)
 class UrlLibGitHubRepositorySearchClient:
     user_agent: str = "HailMary/0.1 GitHub public repository research"
+    request_interval_seconds: float = GITHUB_SEARCH_REQUEST_INTERVAL_SECONDS
 
     def search_repositories(
         self,
@@ -1215,6 +1217,8 @@ class UrlLibGitHubRepositorySearchClient:
     ) -> GitHubRepositorySearchResponse:
         _validate_github_repository_search_url(request_url)
         _ensure_github_resolved_public_endpoint(request_url)
+        if self.request_interval_seconds > 0:
+            time.sleep(self.request_interval_seconds)
         request = urllib.request.Request(
             request_url,
             headers={
@@ -1911,7 +1915,10 @@ def collect_github_repositories(
                     page=page,
                     timeout_seconds=timeout_seconds,
                 )
-                for raw_repository in repositories_response.results:
+                for raw_repository in _prioritize_github_repository_matches(
+                    repositories_response.results,
+                    deal.company_name,
+                ):
                     if not _github_raw_repository_matches_company(
                         raw_repository,
                         deal.company_name,
@@ -2393,7 +2400,7 @@ def _github_repository_search_api_urls(
     page: int,
 ) -> list[str]:
     requested_slug = _normalize_company_slug(company_name)
-    queries = [f"{company_name} in:name fork:false"]
+    queries: list[str] = []
     if requested_slug:
         queries.extend(
             [
@@ -2401,6 +2408,7 @@ def _github_repository_search_api_urls(
                 f"org:{requested_slug} fork:false",
             ]
         )
+    queries.append(f"{company_name} in:name fork:false")
     return [
         _github_repository_search_api_url(
             company_name,
@@ -2452,12 +2460,35 @@ def _github_raw_repository_matches_company(
     raw_repository: dict[str, Any],
     company_name: str,
 ) -> bool:
+    return _github_repository_match_priority(raw_repository, company_name) < 2
+
+
+def _prioritize_github_repository_matches(
+    raw_repositories: list[dict[str, Any]],
+    company_name: str,
+) -> list[dict[str, Any]]:
+    return [
+        raw_repository
+        for _, raw_repository in sorted(
+            enumerate(raw_repositories),
+            key=lambda indexed_repository: (
+                _github_repository_match_priority(
+                    indexed_repository[1],
+                    company_name,
+                ),
+                indexed_repository[0],
+            ),
+        )
+    ]
+
+
+def _github_repository_match_priority(
+    raw_repository: dict[str, Any],
+    company_name: str,
+) -> int:
     requested_slug = _normalize_company_slug(company_name)
     if not requested_slug:
-        return False
-    name = raw_repository.get("name")
-    if isinstance(name, str) and _normalize_company_slug(name) == requested_slug:
-        return True
+        return 2
     owner = raw_repository.get("owner")
     if isinstance(owner, dict):
         owner_login = owner.get("login")
@@ -2465,12 +2496,17 @@ def _github_raw_repository_matches_company(
             isinstance(owner_login, str)
             and _normalize_company_slug(owner_login) == requested_slug
         ):
-            return True
+            return 0
     owner_login = raw_repository.get("owner_login")
-    return (
+    if (
         isinstance(owner_login, str)
         and _normalize_company_slug(owner_login) == requested_slug
-    )
+    ):
+        return 0
+    name = raw_repository.get("name")
+    if isinstance(name, str) and _normalize_company_slug(name) == requested_slug:
+        return 1
+    return 2
 
 
 def _validate_usaspending_exact_award(
@@ -3078,10 +3114,22 @@ def _sec_form_d_complete_submission_url(
         raise SecFormDApiError(
             "SEC EDGAR returned a Form D result with an unusable accession number."
         )
-    folder_path = path.rsplit("/", 1)[0]
+    accession_digits = accession_filename.replace("-", "")
+    folder_path = _sec_accession_folder_path(
+        path,
+        accession_digits=accession_digits,
+    )
     source_url = f"https://{parsed.netloc}{folder_path}/{accession_filename}.txt"
     _validate_sec_form_d_archive_url(source_url, field_name="SEC Form D source URL")
     return source_url
+
+
+def _sec_accession_folder_path(path: str, *, accession_digits: str) -> str:
+    path_parts = path.split("/")
+    for index, path_part in enumerate(path_parts):
+        if path_part == accession_digits:
+            return "/".join(path_parts[: index + 1])
+    return path.rsplit("/", 1)[0]
 
 
 def _sec_accession_filename(accession_number: str) -> str | None:

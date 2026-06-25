@@ -4,6 +4,7 @@ import json
 import shlex
 import socket
 import stat
+import time
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2521,6 +2522,19 @@ def test_sec_form_d_complete_submission_url_keeps_dashed_accession_filename() ->
     assert source_url.endswith("/0001234567-26-000001.txt")
 
 
+def test_sec_form_d_complete_submission_url_handles_primary_doc_subdirectory() -> None:
+    source_url = collection_module._sec_form_d_complete_submission_url(
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/xslFormDX01/primary_doc.xml",
+        accession_number="0001234567-26-000001",
+    )
+
+    assert source_url == (
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/0001234567-26-000001.txt"
+    )
+
+
 def test_sec_form_d_redirect_handler_rejects_http_redirect() -> None:
     handler = collection_module._SecFormDRedirectHandler()
     request = urllib.request.Request(
@@ -2786,6 +2800,51 @@ def test_collect_github_repositories_paginates_when_response_has_next(
     assert result.result_count == 1
 
 
+def test_collect_github_repositories_prioritizes_owner_matches_before_names(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    ingest_folder(root, config=config)
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai",
+                        full_name="unrelated/acme-ai",
+                        owner_login="unrelated",
+                    ),
+                    _github_repository(
+                        name="owner-tool",
+                        full_name="acme-ai/owner-tool",
+                        owner_login="acme-ai",
+                    ),
+                ]
+            ),
+        }
+    )
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI"],
+        limit=1,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["source_url"] == "https://github.com/acme-ai/owner-tool"
+
+
 def test_collect_github_repositories_surfaces_api_failures(
     tmp_path: Path,
 ) -> None:
@@ -2891,7 +2950,9 @@ def test_github_response_requires_items(
     )
 
     with pytest.raises(GitHubApiError, match="unexpected response"):
-        UrlLibGitHubRepositorySearchClient().search_repositories(
+        UrlLibGitHubRepositorySearchClient(
+            request_interval_seconds=0,
+        ).search_repositories(
             "Acme AI",
             per_page=1,
             page=1,
@@ -2947,7 +3008,9 @@ def test_github_response_requires_pagination_metadata(
     )
 
     with pytest.raises(GitHubApiError, match="unexpected response"):
-        UrlLibGitHubRepositorySearchClient().search_repositories(
+        UrlLibGitHubRepositorySearchClient(
+            request_interval_seconds=0,
+        ).search_repositories(
             "Acme AI",
             per_page=1,
             page=1,
@@ -2962,9 +3025,74 @@ def test_github_repository_search_api_urls_include_owner_scopes() -> None:
         page=1,
     )
 
+    assert "q=user%3Aacme-ai+fork%3Afalse" in urls[0]
+    assert "q=org%3Aacme-ai+fork%3Afalse" in urls[1]
+    assert "q=Acme+AI+in%3Aname+fork%3Afalse" in urls[2]
     assert any("q=Acme+AI+in%3Aname+fork%3Afalse" in url for url in urls)
     assert any("q=user%3Aacme-ai+fork%3Afalse" in url for url in urls)
     assert any("q=org%3Aacme-ai+fork%3Afalse" in url for url in urls)
+
+
+def test_github_client_paces_generated_search_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_github_resolved_public_endpoint",
+        lambda _url: None,
+    )
+    sleeps: list[float] = []
+    opened_urls: list[str] = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self, url: str) -> None:
+            self._url = url
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return self._url
+
+        def read(self, _size: int) -> bytes:
+            return b'{"total_count":0,"incomplete_results":false,"items":[]}'
+
+    class FakeOpener:
+        def open(
+            self,
+            request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            opened_urls.append(request.full_url)
+            return FakeResponse(request.full_url)
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    response = UrlLibGitHubRepositorySearchClient(
+        request_interval_seconds=0.25,
+    ).search_repositories(
+        "Acme AI",
+        per_page=1,
+        page=1,
+        timeout_seconds=1.0,
+    )
+
+    assert response.result_count == 0
+    assert len(opened_urls) == 3
+    assert sleeps == [0.25, 0.25, 0.25]
 
 
 def test_github_redirect_handler_rejects_outside_host() -> None:

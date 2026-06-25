@@ -223,6 +223,8 @@ def _document_evidence_records(
                 page_number=page.page_number,
                 source_span_start=span_start,
                 source_span_end=span_end,
+                ocr_applied=page.ocr_applied,
+                ocr_confidence=page.ocr_confidence if page.ocr_applied else None,
                 source_freshness=source_freshness,
             )
         )
