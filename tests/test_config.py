@@ -843,6 +843,40 @@ def test_negative_gross_return_multiple_is_rejected(
         load_config()
 
 
+def test_oversized_gross_return_multiple_exponent_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_GROSS_RETURN_MULTIPLE", "1e1000000")
+
+    with pytest.raises(ConfigError, match="gross return multiple is too long"):
+        load_config()
+
+
+def test_oversized_percent_precision_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_RESERVE_PERCENT", f"0.{'0' * 200}1")
+
+    with pytest.raises(ConfigError, match="reserve percent is too long"):
+        load_config()
+
+
+def test_init_rejects_oversized_decimal_before_writing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="gross return multiple is too long"):
+        create_local_state(
+            AppConfig(gross_return_multiple=Decimal("1e1000000")),
+            force=True,
+        )
+
+    assert not (tmp_path / ".hailmary" / "config.yaml").exists()
+
+
 def test_nonfinite_portfolio_decimal_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

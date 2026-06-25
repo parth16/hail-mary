@@ -18,6 +18,7 @@ class ConfigError(ValueError):
 CHECK_SIZE_TIERS = (0, 1_000, 2_500, 5_000, 7_500, 10_000)
 MAX_CHECK_SIZE = max(CHECK_SIZE_TIERS)
 CHECK_SIZE_TIER_TEXT = "$0, $1K, $2.5K, $5K, $7.5K, or $10K"
+MAX_PORTFOLIO_DECIMAL_FIXED_CHARS = 120
 MERIDIAN_PROFILE_MARKER = ".hailmary-profile"
 
 
@@ -463,6 +464,10 @@ def _ensure_investment_limits(config: AppConfig) -> None:
     _ensure_percent(config.carry_percent, name="carry percent")
     if not config.gross_return_multiple.is_finite():
         raise ConfigError("The gross return multiple must be a finite number.")
+    _ensure_bounded_decimal(
+        config.gross_return_multiple,
+        name="gross return multiple",
+    )
     if config.gross_return_multiple < 0:
         raise ConfigError("The gross return multiple cannot be negative.")
 
@@ -470,8 +475,33 @@ def _ensure_investment_limits(config: AppConfig) -> None:
 def _ensure_percent(value: Decimal, *, name: str) -> None:
     if not value.is_finite():
         raise ConfigError(f"The {name} must be a finite number.")
+    _ensure_bounded_decimal(value, name=name)
     if value < 0 or value > 100:
         raise ConfigError(f"The {name} must be between 0 and 100.")
+
+
+def _ensure_bounded_decimal(value: Decimal, *, name: str) -> None:
+    if _fixed_decimal_text_length(value) <= MAX_PORTFOLIO_DECIMAL_FIXED_CHARS:
+        return
+    raise ConfigError(
+        f"The {name} is too long to use as a portfolio assumption. "
+        "Use a simpler number with at most "
+        f"{MAX_PORTFOLIO_DECIMAL_FIXED_CHARS} fixed-point digits."
+    )
+
+
+def _fixed_decimal_text_length(value: Decimal) -> int:
+    if value == 0:
+        return 1
+    value_tuple = value.as_tuple()
+    exponent = value_tuple.exponent
+    if not isinstance(exponent, int):
+        return MAX_PORTFOLIO_DECIMAL_FIXED_CHARS + 1
+    digit_count = len(value_tuple.digits)
+    if exponent >= 0:
+        return digit_count + exponent
+    integer_digits = max(value.adjusted() + 1, 1)
+    return integer_digits + 1 + abs(exponent)
 
 
 def _read_local_config(path: Path) -> dict[str, str]:

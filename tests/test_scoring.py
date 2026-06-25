@@ -1907,6 +1907,26 @@ def test_score_deals_command_rejects_conflicting_reserve_overrides(tmp_path: Pat
     assert "Traceback" not in result.output
 
 
+def test_score_deals_command_rejects_oversized_decimal_override(tmp_path: Path) -> None:
+    store = _strong_store(deal_id="deal_one", company_name="Deal One")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(
+        app,
+        [
+            "score-deals",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--gross-return-multiple",
+            "1e999999999999999999",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "gross return multiple is too long" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_score_deals_missing_ingestion_summary_has_plain_english_error(
     tmp_path: Path,
 ) -> None:
