@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,14 +11,19 @@ from docx import Document
 from hailmary.agents.packets import build_agent_input_packet
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig
+from hailmary.evaluation import render_final_evaluation_memo
 from hailmary.ingest.extractors import extract_document
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.ingest.ocr import LocalOcrResult
 from hailmary.research import (
+    MeridianWorkflowError,
+    ResearchCollectionError,
+    ResearchImportError,
     UsaspendingAwardRecord,
     UsaspendingAwardsResponse,
     collect_usaspending_awards,
     import_research_results,
+    prepare_meridian_workflow,
     prepare_public_research_results,
 )
 from hailmary.schemas.agents import (
@@ -41,7 +47,7 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import Recommendation, ScoredDeal
+from hailmary.schemas.scoring import FundabilityRisk, PMFLevel, Recommendation, ScoredDeal
 from hailmary.scoring.memo import render_markdown_memo, render_portfolio_report
 from hailmary.scoring.scorer import (
     score_evidence_store,
@@ -300,6 +306,69 @@ def run_ocr_low_text_documents_fixture(work_dir: Path) -> None:
             for issue in validation.issues
         ),
         "Expected prompt-injection text returned by OCR to fail validation.",
+    )
+
+
+def run_ocr_image_unavailable_fixture(work_dir: Path) -> None:
+    root = (work_dir / "pitch-decks").resolve(strict=False)
+    company = root / "Synthetic ImageCo"
+    company.mkdir(parents=True)
+    image_path = company / "scan.png"
+    image_path.write_bytes(b"synthetic image placeholder")
+
+    extraction = extract_document(image_path)
+    _expect(
+        extraction.ocr_recommended and extraction.vision_recommended,
+        "Expected image-only extraction to recommend local OCR and image review.",
+    )
+    _expect_equal(
+        extraction.combined_text,
+        "",
+        "Expected image-only extraction without OCR to produce no extracted text.",
+    )
+    _expect(
+        extraction.pages[0].needs_ocr and extraction.pages[0].vision_recommended,
+        "Expected the synthetic image page to be marked as needing OCR and vision review.",
+    )
+
+    summary = ingest_folder(
+        root,
+        config=AppConfig(data_dir=(work_dir / "data").resolve(strict=False)),
+    )
+    _expect_equal(
+        len(summary.deals),
+        1,
+        "Expected image-only ingestion to keep one synthetic deal record.",
+    )
+    deal = summary.deals[0]
+    _expect_equal(
+        deal.evidence_count,
+        0,
+        "Expected image-only ingestion without OCR to remain evidence-less.",
+    )
+    _expect_equal(
+        deal.claim_count,
+        0,
+        "Expected image-only ingestion without OCR not to synthesize claims.",
+    )
+    _expect(
+        deal.documents[0].source.ocr_recommended
+        and deal.documents[0].source.vision_recommended,
+        "Expected ingested image metadata to preserve OCR and vision-needed flags.",
+    )
+    _expect(
+        deal.evidence_store_path is not None and deal.evidence_store_path.exists(),
+        "Expected image-only ingestion to still write an evidence store.",
+    )
+    if deal.evidence_store_path is None:
+        raise EvalFixtureFailure("Expected image-only ingestion to write an evidence store.")
+    store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    _expect_equal(
+        len(store.evidence),
+        0,
+        "Expected the image-only evidence store to contain no evidence records.",
     )
 
 
@@ -820,6 +889,300 @@ def run_usaspending_pagination_fixture(work_dir: Path) -> None:
     )
 
 
+def run_public_collectors_source_guards_fixture(work_dir: Path) -> None:
+    config = AppConfig(
+        data_dir=(work_dir / "data").resolve(strict=False),
+        local_only=False,
+        enable_web_research=True,
+    )
+    sec_results_path = (work_dir / "sec-source-results.json").resolve(strict=False)
+    sec_results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Synthetic CollectCo",
+                        "title": "Synthetic CollectCo Form D",
+                        "text": "Synthetic CollectCo filed a public financing notice.",
+                        "retrieved_at": "2025-12-31T12:00:00Z",
+                        "source_url": (
+                            "https://www.sec.gov/Archives/edgar/data/"
+                            "synthetic-collectco/form-d"
+                        ),
+                    },
+                    {
+                        "company_name": "Synthetic CollectCo Holdings",
+                        "title": "Related entity Form D",
+                        "text": "Related entity text that must not be imported.",
+                        "retrieved_at": "2025-12-31T12:00:00Z",
+                        "source_url": (
+                            "https://www.sec.gov/Archives/edgar/data/"
+                            "synthetic-collectco-holdings/form-d"
+                        ),
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prepared = prepare_public_research_results(
+        config=config,
+        company_names=["Synthetic CollectCo", "Synthetic MissingCo"],
+        sec_form_d_results_path=sec_results_path,
+        collected_at=BUILT_AT,
+    )
+    _expect_equal(
+        [(deal.company_name, deal.result_count) for deal in prepared.deals],
+        [("Synthetic CollectCo", 1), ("Synthetic MissingCo", 0)],
+        "Expected public-source preparation to keep exact matches and name no-result companies.",
+    )
+    _expect(
+        prepared.output_path is not None and prepared.output_path.exists(),
+        "Expected exact public collector matches to write a private results file.",
+    )
+    if prepared.output_path is None:
+        raise EvalFixtureFailure("Expected public-source preparation to write results.")
+    saved = json.loads(prepared.output_path.read_text(encoding="utf-8"))
+    _expect_equal(
+        [result["company_name"] for result in saved["results"]],
+        ["Synthetic CollectCo"],
+        "Expected related public-source entities to be skipped from saved results.",
+    )
+    _expect(
+        "Related entity text" not in json.dumps(saved),
+        "Expected related-entity text not to appear in saved public-source results.",
+    )
+
+    bad_results_path = (work_dir / "bad-sec-source-results.json").resolve(strict=False)
+    bad_results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Synthetic CollectCo",
+                        "title": "Bad SEC source",
+                        "text": "Synthetic public result with the wrong host.",
+                        "retrieved_at": "2025-12-31T12:00:00Z",
+                        "source_url": "https://example.com/not-sec",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        prepare_public_research_results(
+            config=config,
+            company_names=["Synthetic CollectCo"],
+            sec_form_d_results_path=bad_results_path,
+            collected_at=BUILT_AT,
+        )
+    except ResearchCollectionError as exc:
+        _expect(
+            "invalid source_url" in str(exc) and "SEC website host" in str(exc),
+            "Expected bad provider URLs to fail with a provider-specific error.",
+            actual_error=str(exc),
+        )
+    else:
+        raise EvalFixtureFailure("Expected bad SEC provider source URLs to be rejected.")
+
+    no_result_client = _FakeUsaspendingAwardsClient(
+        {
+            ("Synthetic NoResultCo", 1): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Synthetic NoResultCo Federal",
+                        award_id="FAKE-FUZZY-NO-RESULT",
+                        generated_internal_id="CONT_AWD_FAKE_FUZZY_NO_RESULT",
+                    )
+                ]
+            )
+        }
+    )
+    no_result = collect_usaspending_awards(
+        config=config,
+        company_names=["Synthetic NoResultCo"],
+        limit=5,
+        client=no_result_client,
+        collected_at=BUILT_AT,
+    )
+    _expect_equal(
+        [(deal.company_name, deal.result_count) for deal in no_result.deals],
+        [("Synthetic NoResultCo", 0)],
+        "Expected no-result public API summaries to name the requested company.",
+    )
+    _expect_equal(
+        no_result.output_path,
+        None,
+        "Expected no-result public API runs not to write generated result files.",
+    )
+
+
+def run_meridian_workflow_guards_fixture(work_dir: Path) -> None:
+    config = AppConfig(data_dir=(work_dir / "data").resolve(strict=False))
+    unsafe_urls = [
+        "http://portal.angellist.com/m/synthetic-meridianco/invest",
+        "https://portal.angellist.com/m/synthetic-meridianco/invest?token=secret",
+        "https://user:token@portal.angellist.com/m/synthetic-meridianco/invest",
+    ]
+    for unsafe_url in unsafe_urls:
+        try:
+            prepare_meridian_workflow(
+                config=config,
+                company_name="Synthetic MeridianCo",
+                meridian_url=unsafe_url,
+                created_at=BUILT_AT,
+            )
+        except MeridianWorkflowError as exc:
+            _expect(
+                "Meridian URL" in str(exc),
+                "Expected unsafe Meridian URLs to fail with a plain Meridian URL error.",
+                unsafe_url=unsafe_url,
+                actual_error=str(exc),
+            )
+        else:
+            raise EvalFixtureFailure(
+                "Expected unsafe Meridian URLs to be rejected.",
+                {"unsafe_url": unsafe_url},
+            )
+
+    root = (work_dir / "pitch-decks").resolve(strict=False)
+    company = root / "Synthetic MeridianCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    summary = ingest_folder(root, config=config)
+    _expect_equal(
+        len(summary.deals),
+        1,
+        "Expected Meridian fixture setup to ingest one synthetic deal.",
+    )
+    deal = summary.deals[0]
+    _expect(
+        deal.evidence_store_path is not None,
+        "Expected Meridian fixture setup to write an evidence store.",
+    )
+    if deal.evidence_store_path is None:
+        raise EvalFixtureFailure("Expected Meridian fixture setup to write a store.")
+
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Synthetic MeridianCo",
+        meridian_url="https://portal.angellist.com/m/synthetic-meridianco/invest",
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    original_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+
+    source_only_payload = json.loads(json.dumps(original_payload))
+    source_only_payload["results"][0]["source_url"] = (
+        "https://portal.angellist.com/m/other-synthetic/invest"
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(source_only_payload),
+        encoding="utf-8",
+    )
+    try:
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+    except ResearchImportError as exc:
+        _expect(
+            "row 1" in str(exc) and "text" in str(exc),
+            "Expected source-only Meridian placeholder edits to fail validation.",
+            actual_error=str(exc),
+        )
+    else:
+        raise EvalFixtureFailure(
+            "Expected source-only Meridian placeholder edits to be rejected."
+        )
+
+    completed_bad_url_payload = json.loads(json.dumps(original_payload))
+    completed_bad_url_payload["results"][0].update(
+        {
+            "text": "Synthetic MeridianCo reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page excerpt",
+            "source_url": "https://portal.angellist.com/m/other-synthetic/invest",
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(completed_bad_url_payload),
+        encoding="utf-8",
+    )
+    try:
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+    except ResearchImportError as exc:
+        _expect(
+            "generated Meridian deal page URL" in str(exc),
+            "Expected completed Meridian placeholders to keep the generated source URL.",
+            actual_error=str(exc),
+        )
+    else:
+        raise EvalFixtureFailure(
+            "Expected completed Meridian placeholder URL edits to be rejected."
+        )
+
+    completed_payload = json.loads(json.dumps(original_payload))
+    completed_payload["results"][0].update(
+        {
+            "title": "Meridian deal page excerpt",
+            "text": "Synthetic MeridianCo reports revenue growth from customers.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page excerpt",
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(completed_payload),
+        encoding="utf-8",
+    )
+    imported = import_research_results(
+        config=config,
+        results_path=workflow.result_template_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    _expect_equal(
+        imported.imported_count,
+        1,
+        "Expected one completed Meridian placeholder row to import.",
+    )
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence = [
+        evidence
+        for evidence in saved_store.evidence
+        if evidence.provider_id == "meridian"
+    ]
+    _expect_equal(
+        len(meridian_evidence),
+        1,
+        "Expected one saved Meridian evidence record after import.",
+    )
+    licensing_notes = meridian_evidence[0].licensing_notes or ""
+    _expect(
+        "Generated by Hail Mary" not in licensing_notes
+        and "Generated Meridian placeholder" not in licensing_notes
+        and "Generated Meridian source URL" not in licensing_notes,
+        "Expected generated Meridian markers to be stripped before saving evidence.",
+        actual_licensing_notes=licensing_notes,
+    )
+    _expect(
+        "Do not bypass" in licensing_notes,
+        "Expected saved Meridian licensing notes to retain operator permissions text.",
+        actual_licensing_notes=licensing_notes,
+    )
+
+
 def run_prompt_injection_html_fixture(work_dir: Path) -> None:
     _run_prompt_injection_fixture(work_dir, file_type="html")
 
@@ -1251,6 +1614,118 @@ def run_borderline_score_fixture() -> None:
     )
 
 
+def run_score_calibration_guards_fixture() -> None:
+    missing_terms_evidence = [
+        _evidence("ev_terms", "Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    missing_terms_score = score_evidence_store(
+        _store(
+            evidence=missing_terms_evidence,
+            claims=[
+                _claim("discount", "20%", missing_terms_evidence[0]),
+                _claim("round size", "$1M", missing_terms_evidence[0]),
+            ],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+    _expect_equal(
+        missing_terms_score.recommendation,
+        Recommendation.PASS,
+        "Expected missing valuation or valuation-cap terms to force PASS.",
+    )
+    _expect(
+        any(
+            gate.name == "Missing key investment terms"
+            for gate in missing_terms_score.triggered_kill_gates
+        ),
+        "Expected missing key terms to trigger the investment-term kill gate.",
+    )
+
+    negated_traction_evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_negative_traction",
+            "The company is pre-revenue with no customers, usage, retention, or growth yet.",
+        ),
+    ]
+    negated_traction_score = score_evidence_store(
+        _store(
+            evidence=negated_traction_evidence,
+            claims=[
+                _claim("valuation cap", "$8M", negated_traction_evidence[0]),
+                _claim("discount", "20%", negated_traction_evidence[0]),
+                _claim("round size", "$1M", negated_traction_evidence[0]),
+            ],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+    _expect_equal(
+        negated_traction_score.pmf_level,
+        PMFLevel.UNKNOWN,
+        "Expected negated traction language not to count as product-market fit.",
+    )
+    _expect_equal(
+        _score_factor_evidence_ids(negated_traction_score, "Product-market fit evidence"),
+        [],
+        "Expected negated traction evidence not to be cited in score factors.",
+    )
+
+    negated_funding_evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_negative_funding", "There is no committed lead investor yet."),
+    ]
+    negated_funding_score = score_evidence_store(
+        _store(
+            evidence=negated_funding_evidence,
+            claims=[
+                _claim("valuation cap", "$8M", negated_funding_evidence[0]),
+                _claim("discount", "20%", negated_funding_evidence[0]),
+                _claim("round size", "$1M", negated_funding_evidence[0]),
+            ],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+    _expect_equal(
+        negated_funding_score.fundability_risk,
+        FundabilityRisk.MEDIUM,
+        "Expected negated lead-investor language not to lower fundability risk.",
+    )
+    _expect_equal(
+        _score_factor_evidence_ids(negated_funding_score, "Next-round fundability"),
+        [],
+        "Expected negated funding evidence not to be cited in score factors.",
+    )
+
+    strong_store = _strong_store()
+    strong_score = score_evidence_store(strong_store, config=AppConfig(data_dir=Path("data")))
+    stage_packet = build_agent_input_packet(
+        strong_store,
+        strong_score,
+        role=AgentRole.STAGE_NORMALIZER,
+        created_at=BUILT_AT,
+    )
+    return_packet = build_agent_input_packet(
+        strong_store,
+        strong_score,
+        role=AgentRole.RETURN_MATH,
+        created_at=BUILT_AT,
+    )
+    _expect(
+        any("company stage" in instruction for instruction in stage_packet.instructions),
+        "Expected stage-normalizer packets to keep stage-aware calibration instructions.",
+    )
+    _expect(
+        any(
+            "missing" in instruction and "numbers" in instruction
+            for instruction in return_packet.instructions
+        ),
+        "Expected return-math packets to ask agents to state missing numeric inputs.",
+    )
+
+
 def run_missing_data_fixture() -> None:
     scored = score_evidence_store(
         _store(evidence=[], claims=[]),
@@ -1428,6 +1903,173 @@ def run_memo_cited_conflict_evidence_fixture() -> None:
     _expect(
         "- ev_stale_conflict:" not in stale_conflict_memo,
         "Expected stale conflict evidence not to be pulled into memo evidence.",
+    )
+
+
+def run_memo_output_guards_fixture() -> None:
+    evidence = [
+        _evidence(f"ev_background_{index}", f"Background evidence {index}.")
+        for index in range(29)
+    ]
+    late_evidence = _evidence(
+        "ev_29",
+        "Valuation cap $8M. Evidence text with [bad](https://example.com) markup.",
+    ).model_copy(
+        update={
+            "document_path": Path("raw/[bad](memo).txt"),
+            "source_kind": SourceKind.WEB,
+            "document_type": DocumentType.WEB_PAGE,
+            "file_type": FileType.HTML,
+            "provider_name": "Provider|Name\n# Bad Provider",
+            "source_url": "https://example.com/source?x=[bad]|value",
+            "external_confidence": "high|confidence\n# Bad Confidence",
+            "licensing_notes": "Allowed notes with [bad](link)\n# Bad License",
+        }
+    )
+    evidence.append(late_evidence)
+    store = _store(evidence=evidence, claims=[_claim("valuation cap", "$8M", late_evidence)])
+    store = store.model_copy(update={"company_name": "Bad|Co\n# Fake Heading"})
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Reason with [bad](https://example.com)\n# bad reason",
+        evidence=[AgentEvidenceReference(evidence_id="ev_29", quote="$8M")],
+    )
+    final_output = AgentReviewOutput(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        summary=[
+            AgentSummaryPoint(
+                summary="Summary with | pipe\n# bad summary",
+                evidence=[AgentEvidenceReference(evidence_id="ev_29", quote="$8M")],
+            )
+        ],
+        recommendation=final_recommendation,
+    )
+    memo = render_final_evaluation_memo(
+        scored,
+        store,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+    )
+
+    _expect(
+        memo.startswith("# Hail Mary Final Evaluation: Bad\\|Co \\# Fake Heading\n\n## Decision"),
+        "Expected final evaluation memos to start with the title and decision section.",
+        actual_prefix=memo[:120],
+    )
+    _expect(
+        "- ev\\_29:" in memo,
+        "Expected final evaluation memos to include cited evidence beyond the first 25 records.",
+    )
+    forbidden_fragments = [
+        "\n# Fake Heading",
+        "\n# bad reason",
+        "\n# bad summary",
+        "\n# Bad Provider",
+        "\n# Bad Confidence",
+        "\n# Bad License",
+    ]
+    present_forbidden = [fragment for fragment in forbidden_fragments if fragment in memo]
+    _expect(
+        not present_forbidden,
+        "Expected final evaluation memos to escape untrusted Markdown headings.",
+        forbidden_fragments=", ".join(present_forbidden),
+    )
+    expected_escaped_fragments = [
+        "raw/\\[bad\\]\\(memo\\).txt",
+        "Provider\\|Name \\# Bad Provider",
+        "high\\|confidence \\# Bad Confidence",
+        "Allowed notes with \\[bad\\]\\(link\\) \\# Bad License",
+        "Reason with \\[bad\\]\\(https://example.com\\) \\# bad reason",
+        "Summary with \\| pipe \\# bad summary",
+    ]
+    missing_escaped = [fragment for fragment in expected_escaped_fragments if fragment not in memo]
+    _expect(
+        not missing_escaped,
+        "Expected final evaluation memos to contain escaped dynamic text.",
+        missing_fragments=", ".join(missing_escaped),
+    )
+
+
+def run_privacy_output_guards_fixture(work_dir: Path) -> None:
+    root = (work_dir / "pitch-decks").resolve(strict=False)
+    company = root / "Synthetic PrivacyCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M.",
+        encoding="utf-8",
+    )
+    data_dir = root / "data"
+    browser_profile_dir = data_dir / "browser-profiles" / "meridian"
+    browser_profile_dir.mkdir(parents=True)
+    local_state_sentinels = {
+        "COOKIE_SENTINEL_SHOULD_NOT_SCAN": browser_profile_dir / "cookies.txt",
+        "LOCAL_DB_SENTINEL_SHOULD_NOT_SCAN": data_dir / "local-database.txt",
+        "BROWSER_PROFILE_SENTINEL_SHOULD_NOT_SCAN": browser_profile_dir / "profile.txt",
+    }
+    (data_dir / "meridian-workflows").mkdir(parents=True)
+    local_state_sentinels["WORKFLOW_SENTINEL_SHOULD_NOT_SCAN"] = (
+        data_dir / "meridian-workflows" / "workflow.txt"
+    )
+    for sentinel, path in local_state_sentinels.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{sentinel} Valuation cap $999M.", encoding="utf-8")
+
+    config = AppConfig(
+        data_dir=data_dir,
+        meridian_profile_dir=browser_profile_dir,
+    )
+    summary = ingest_folder(root, config=config)
+    _expect_equal(
+        [(deal.company_name, deal.evidence_count) for deal in summary.deals],
+        [("Synthetic PrivacyCo", 1)],
+        "Expected ignored local-state folders not to become scanned deals.",
+    )
+    _expect_equal(
+        stat.S_IMODE(data_dir.stat().st_mode),
+        0o700,
+        "Expected generated data folders to use owner-only permissions.",
+    )
+    _expect_equal(
+        stat.S_IMODE((data_dir / "processed").stat().st_mode),
+        0o700,
+        "Expected generated processed folders to use owner-only permissions.",
+    )
+    deal = summary.deals[0]
+    _expect(
+        deal.evidence_store_path is not None and deal.evidence_store_path.exists(),
+        "Expected privacy fixture ingestion to write an evidence store.",
+    )
+    if deal.evidence_store_path is None:
+        raise EvalFixtureFailure("Expected privacy fixture ingestion to write a store.")
+    _expect_equal(
+        stat.S_IMODE(deal.evidence_store_path.stat().st_mode),
+        0o600,
+        "Expected generated evidence stores to use owner-only file permissions.",
+    )
+
+    generated_text = "\n".join(
+        [
+            summary.summary_path.read_text(encoding="utf-8"),
+            deal.evidence_store_path.read_text(encoding="utf-8"),
+            *[
+                document.output_path.read_text(encoding="utf-8")
+                for document in deal.documents
+            ],
+        ]
+    )
+    leaked_sentinels = [
+        sentinel for sentinel in local_state_sentinels if sentinel in generated_text
+    ]
+    _expect(
+        not leaked_sentinels,
+        "Expected browser profile, cookie, workflow, and local database sentinels "
+        "to stay out of generated outputs.",
+        leaked_sentinels=", ".join(leaked_sentinels),
     )
 
 
