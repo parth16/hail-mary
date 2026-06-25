@@ -575,6 +575,36 @@ def test_portfolio_scenario_env_overrides_saved_config(
     assert config.gross_return_multiple == Decimal("8")
 
 
+def test_env_reserve_percent_replaces_saved_reserve_dollars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("reserve_dollars: 1500\n", encoding="utf-8")
+    monkeypatch.setenv("HAILMARY_RESERVE_PERCENT", "10")
+
+    config = load_config()
+
+    assert config.reserve_percent == Decimal("10")
+    assert config.reserve_dollars == 0
+
+
+def test_env_reserve_dollars_replaces_saved_reserve_percent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("reserve_percent: 10\n", encoding="utf-8")
+    monkeypatch.setenv("HAILMARY_RESERVE_DOLLARS", "1500")
+
+    config = load_config()
+
+    assert config.reserve_percent == Decimal("0")
+    assert config.reserve_dollars == 1500
+
+
 def test_load_config_rejects_nested_yaml_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

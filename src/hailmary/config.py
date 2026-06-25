@@ -201,6 +201,8 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         if "HAILMARY_MOCK_LLM" in os.environ
         else _config_bool(saved_values, "mock_llm", True)
     )
+    env_reserve_percent = _env_setting_is_present("HAILMARY_RESERVE_PERCENT")
+    env_reserve_dollars = _env_setting_is_present("HAILMARY_RESERVE_DOLLARS")
 
     config = AppConfig(
         data_dir=resolved_data_dir,
@@ -224,17 +226,25 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             config_name="max_check",
             default=10_000,
         ),
-        reserve_percent=_setting_decimal(
-            env_name="HAILMARY_RESERVE_PERCENT",
-            config_values=saved_values,
-            config_name="reserve_percent",
-            default=Decimal("0"),
+        reserve_percent=(
+            Decimal("0")
+            if env_reserve_dollars and not env_reserve_percent
+            else _setting_decimal(
+                env_name="HAILMARY_RESERVE_PERCENT",
+                config_values=saved_values,
+                config_name="reserve_percent",
+                default=Decimal("0"),
+            )
         ),
-        reserve_dollars=_setting_int(
-            env_name="HAILMARY_RESERVE_DOLLARS",
-            config_values=saved_values,
-            config_name="reserve_dollars",
-            default=0,
+        reserve_dollars=(
+            0
+            if env_reserve_percent and not env_reserve_dollars
+            else _setting_int(
+                env_name="HAILMARY_RESERVE_DOLLARS",
+                config_values=saved_values,
+                config_name="reserve_dollars",
+                default=0,
+            )
         ),
         estimated_dilution_percent=_setting_decimal(
             env_name="HAILMARY_ESTIMATED_DILUTION_PERCENT",
@@ -270,6 +280,11 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         mock_llm=mock_llm,
     )
     return validate_investment_settings(config)
+
+
+def _env_setting_is_present(name: str) -> bool:
+    value = os.getenv(name)
+    return value is not None and value.strip() != ""
 
 
 def validate_investment_settings(config: AppConfig) -> AppConfig:
