@@ -59,6 +59,11 @@ from hailmary.research import (
     prepare_research_plan,
     prepare_research_results_template,
 )
+from hailmary.research.meridian import (
+    MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
+    MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
+    MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+)
 from hailmary.research.schemas import ResearchResultInput
 from hailmary.research.web import (
     WebFetchResponse,
@@ -2285,6 +2290,30 @@ def test_collect_sec_form_d_filings_dry_run_does_not_call_api(
     assert result.result_count == 0
 
 
+def test_collect_sec_form_d_filings_requires_sec_user_agent_for_live_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HAILMARY_SEC_USER_AGENT", raising=False)
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+
+    with pytest.raises(ResearchCollectionError, match="HAILMARY_SEC_USER_AGENT"):
+        collect_sec_form_d_filings(
+            config=config,
+            company_names=["Acme AI"],
+            collected_at=BUILT_AT,
+        )
+
+
+def test_sec_form_d_user_agent_requires_contact_email() -> None:
+    with pytest.raises(ResearchCollectionError, match="contact email"):
+        collection_module._validate_sec_form_d_user_agent("Hail Mary diligence")
+
+
 def test_collect_sec_form_d_filings_surfaces_api_failures(
     tmp_path: Path,
 ) -> None:
@@ -2386,12 +2415,110 @@ def test_sec_form_d_response_requires_pagination_metadata(
     )
 
     with pytest.raises(SecFormDApiError, match="missing pagination metadata"):
-        UrlLibSecFormDFilingsClient().search_filings(
+        UrlLibSecFormDFilingsClient(
+            user_agent="Hail Mary tests tests@example.com",
+            request_interval_seconds=0,
+        ).search_filings(
             "Acme AI",
             count=1,
             start=0,
             timeout_seconds=1.0,
         )
+
+
+def test_sec_form_d_atom_parser_skips_malformed_related_fuzzy_entry() -> None:
+    related_href = (
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/0001234567-26-000001-index.htm"
+    )
+    exact_href = (
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000002/0001234567-26-000002-index.htm"
+    )
+    xml_text = f"""
+    <feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+      <opensearch:totalResults>2</opensearch:totalResults>
+      <opensearch:startIndex>0</opensearch:startIndex>
+      <opensearch:itemsPerPage>2</opensearch:itemsPerPage>
+      <entry>
+        <title>D - Acme AI Holdings (0001234567)</title>
+        <category term="D" />
+        <link href="{related_href}" />
+      </entry>
+      <entry>
+        <title>D - Acme AI (0001234568)</title>
+        <category term="D" />
+        <link href="{exact_href}" />
+      </entry>
+    </feed>
+    """
+    fetched_urls: list[str] = []
+
+    def fake_fetch(source_url: str) -> dict[str, str | list[str] | None]:
+        fetched_urls.append(source_url)
+        return {"issuer_name": "Acme AI", "federal_exemptions": ["06b"]}
+
+    response = collection_module._parse_sec_form_d_atom_response(
+        xml_text,
+        requested_company_name="Acme AI",
+        source_api=collection_module._sec_form_d_atom_api_url(
+            "Acme AI",
+            count=2,
+            start=0,
+        ),
+        fetch_submission=fake_fetch,
+    )
+
+    assert fetched_urls == [
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000002/0001234567-26-000002.txt"
+    ]
+    assert len(response.results) == 1
+    assert response.results[0]["issuer_name"] == "Acme AI"
+
+
+def test_sec_form_d_atom_parser_fails_malformed_exact_entry() -> None:
+    exact_href = (
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000002/0001234567-26-000002-index.htm"
+    )
+    xml_text = f"""
+    <feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+      <opensearch:totalResults>1</opensearch:totalResults>
+      <opensearch:startIndex>0</opensearch:startIndex>
+      <opensearch:itemsPerPage>1</opensearch:itemsPerPage>
+      <entry>
+        <title>D - Acme AI (0001234568)</title>
+        <category term="D" />
+        <link href="{exact_href}" />
+      </entry>
+    </feed>
+    """
+
+    def fake_fetch(_source_url: str) -> dict[str, str | list[str] | None]:
+        raise SecFormDApiError("SEC Form D filing metadata could not be parsed as XML.")
+
+    with pytest.raises(SecFormDApiError, match="could not be parsed"):
+        collection_module._parse_sec_form_d_atom_response(
+            xml_text,
+            requested_company_name="Acme AI",
+            source_api=collection_module._sec_form_d_atom_api_url(
+                "Acme AI",
+                count=1,
+                start=0,
+            ),
+            fetch_submission=fake_fetch,
+        )
+
+
+def test_sec_form_d_complete_submission_url_keeps_dashed_accession_filename() -> None:
+    source_url = collection_module._sec_form_d_complete_submission_url(
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/0001234567-26-000001-index.htm",
+        accession_number="0001234567-26-000001",
+    )
+
+    assert source_url.endswith("/0001234567-26-000001.txt")
 
 
 def test_sec_form_d_redirect_handler_rejects_http_redirect() -> None:
@@ -2408,6 +2535,42 @@ def test_sec_form_d_redirect_handler_rejects_http_redirect() -> None:
             "Found",
             {},
             "http://www.sec.gov/cgi-bin/browse-edgar?action=getcompany",
+        )
+
+
+def test_sec_form_d_redirect_handler_rejects_atom_to_archive_redirect() -> None:
+    handler = collection_module._SecFormDRedirectHandler()
+    request = urllib.request.Request(
+        collection_module._sec_form_d_atom_api_url("Acme AI", count=1, start=0)
+    )
+
+    with pytest.raises(SecFormDApiError, match="expected public API endpoint"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://www.sec.gov/Archives/edgar/data/1234567890/"
+            "000123456726000001/0001234567-26-000001.txt",
+        )
+
+
+def test_sec_form_d_redirect_handler_rejects_detail_to_search_redirect() -> None:
+    handler = collection_module._SecFormDRedirectHandler()
+    request = urllib.request.Request(
+        "https://www.sec.gov/Archives/edgar/data/1234567890/"
+        "000123456726000001/0001234567-26-000001.txt"
+    )
+
+    with pytest.raises(SecFormDApiError, match="archive path"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            collection_module._sec_form_d_atom_api_url("Acme AI", count=1, start=0),
         )
 
 
@@ -2583,6 +2746,46 @@ def test_collect_github_repositories_dry_run_does_not_call_api(
     assert result.result_count == 0
 
 
+def test_collect_github_repositories_paginates_when_response_has_next(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    ingest_folder(root, config=config)
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response([], has_next=True),
+            ("Acme AI", 2): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai",
+                        full_name="synthetic/acme-ai",
+                        owner_login="synthetic",
+                    )
+                ]
+            ),
+        }
+    )
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == [("Acme AI", 5, 1), ("Acme AI", 5, 2)]
+    assert result.result_count == 1
+
+
 def test_collect_github_repositories_surfaces_api_failures(
     tmp_path: Path,
 ) -> None:
@@ -2696,6 +2899,74 @@ def test_github_response_requires_items(
         )
 
 
+def test_github_response_requires_pagination_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_github_resolved_public_endpoint",
+        lambda _url: None,
+    )
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module._github_repository_search_api_url(
+                "Acme AI",
+                per_page=1,
+                page=1,
+            )
+
+        def read(self, _size: int) -> bytes:
+            return b'{"items":[]}'
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(GitHubApiError, match="unexpected response"):
+        UrlLibGitHubRepositorySearchClient().search_repositories(
+            "Acme AI",
+            per_page=1,
+            page=1,
+            timeout_seconds=1.0,
+        )
+
+
+def test_github_repository_search_api_urls_include_owner_scopes() -> None:
+    urls = collection_module._github_repository_search_api_urls(
+        "Acme AI",
+        per_page=5,
+        page=1,
+    )
+
+    assert any("q=Acme+AI+in%3Aname+fork%3Afalse" in url for url in urls)
+    assert any("q=user%3Aacme-ai+fork%3Afalse" in url for url in urls)
+    assert any("q=org%3Aacme-ai+fork%3Afalse" in url for url in urls)
+
+
 def test_github_redirect_handler_rejects_outside_host() -> None:
     handler = collection_module._GitHubRedirectHandler()
     request = urllib.request.Request(
@@ -2714,6 +2985,27 @@ def test_github_redirect_handler_rejects_outside_host() -> None:
             "Found",
             {},
             "https://example.com/search/repositories",
+        )
+
+
+def test_github_redirect_handler_rejects_non_search_api_redirect() -> None:
+    handler = collection_module._GitHubRedirectHandler()
+    request = urllib.request.Request(
+        collection_module._github_repository_search_api_url(
+            "Acme AI",
+            per_page=1,
+            page=1,
+        )
+    )
+
+    with pytest.raises(GitHubApiError, match="expected public API endpoint"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://api.github.com/repos/synthetic/acme-ai",
         )
 
 
@@ -2800,6 +3092,7 @@ def test_collect_github_repositories_command_dry_run_reports_no_api_contact(
     output = _plain_cli_output(result.output)
     assert "GitHub repository preview" in output
     assert "would send 1 company to the GitHub public repository search API" in output
+    assert "repository-name, user-owner, and organization-owner searches" in output
     assert "up to 3 repository records per page for up to 5 pages" in output
     assert "No GitHub API requests were sent" in output
     assert not list((tmp_path / "data" / "research-results").glob("*.json"))
@@ -2920,11 +3213,12 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert stat.S_IMODE(result.result_template_path.stat().st_mode) == 0o600
 
     workflow = json.loads(result.output_path.read_text(encoding="utf-8"))
-    assert workflow["version"] == "2"
+    assert workflow["version"] == "3"
     assert workflow["company_name"] == "Acme AI"
     assert workflow["meridian_url"] == "https://portal.angellist.com/m/acme-ai/invest"
     assert workflow["result_template_path"] == str(result.result_template_path)
     assert "import-research-results" in workflow["import_command"]
+    assert workflow["dry_run_command"] == workflow["import_command"]
     assert shlex.split(workflow["import_command"]) == [
         "hailmary",
         "import-research-results",
@@ -2944,8 +3238,34 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert "valuation cap" in workflow["term_definitions"]
     assert "pre-money valuation" in workflow["term_definitions"]
     assert "lead investor" in workflow["term_definitions"]
+    assert "SAFE" in workflow["term_definitions"]
+    assert "convertible note" in workflow["term_definitions"]
+    assert "ARR" in workflow["term_definitions"]
+    assert "MRR" in workflow["term_definitions"]
+    assert "allocation" in workflow["term_definitions"]
+    assert "target raise" in workflow["term_definitions"]
+    assert "closing date" in workflow["term_definitions"]
+    assert set(workflow["required_when_visible_sections"]) == {
+        "deal_terms",
+        "traction_customer_evidence",
+        "revenue_evidence",
+        "founder_team_facts",
+        "risks_disclaimers",
+        "deadline_allocation",
+    }
+    assert set(workflow["optional_when_visible_sections"]) == {
+        "product",
+        "market",
+        "use_of_funds",
+    }
+    assert any("short allowed fact" in item for item in workflow["before_import_checklist"])
+    assert any("No screenshots" in item for item in workflow["before_import_checklist"])
+    assert any("source_url" in item for item in workflow["before_import_checklist"])
+    assert any("dry-run command" in item for item in workflow["before_import_checklist"])
     assert "Minimum investment" in workflow["recommended_facts"]
     assert "Revenue claims" in workflow["recommended_facts"]
+    assert "Product facts, if visible" in workflow["recommended_facts"]
+    assert "Use of funds, if visible" in workflow["recommended_facts"]
 
     template = json.loads(result.result_template_path.read_text(encoding="utf-8"))
     assert list(template) == ["results"]
@@ -2955,6 +3275,21 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert "Meridian: Valuation cap or pre-money valuation" in titles
     assert "Meridian: Closing date or allocation deadline, if visible" in titles
     row = template["results"][0]
+    assert set(row) == {
+        "deal_id",
+        "company_name",
+        "provider_id",
+        "provider_name",
+        "title",
+        "text",
+        "retrieved_at",
+        "source_url",
+        "source_api",
+        "confidence",
+        "licensing_notes",
+        "source_kind",
+        "document_type",
+    }
     assert row["company_name"] == "Acme AI"
     assert row["provider_id"] == "meridian"
     assert row["provider_name"] == "Meridian deal page"
@@ -2968,6 +3303,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert "Do not bypass" in row["licensing_notes"]
     assert "Generated by Hail Mary prepare-meridian-workflow" in row["licensing_notes"]
     assert "Generated Meridian placeholder" in row["licensing_notes"]
+    assert "Keep source_url unchanged" in row["licensing_notes"]
 
 
 @pytest.mark.parametrize(
@@ -2986,6 +3322,8 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "https://portal.angellist.com/m/acme-ai/session-token/invest",
         "https://user:token@portal.angellist.com/m/acme-ai/invest",
         "https://portal.angellist.com:bad/m/acme-ai/invest",
+        "https://portal.angellist.com:444/m/acme-ai/invest",
+        "https://portal.angellist.com:/m/acme-ai/invest",
         "https://portal.angellist.com/m/acme ai/invest",
         "https://portal.angellist.com/m/acme-ai;jsessionid=secret/invest",
         "https://portal.angellist.com/m/acme-ai/invest;jsessionid=secret",
@@ -3033,6 +3371,9 @@ def test_prepare_meridian_workflow_command_writes_files(
     assert "did not open Meridian, sign in, bypass access controls" in result.output
     assert "scrape pages" in result.output
     assert "short allowed evidence snippets" in result.output
+    assert "not screenshots, raw page dumps, hidden page data" in result.output
+    assert "browser profiles, cookies, tokens, signed URLs" in result.output
+    assert "before-import checklist" in result.output
     assert "import-research-results" in result.output
     assert (tmp_path / "data" / "meridian-workflows").is_dir()
     workflows = list((tmp_path / "data" / "meridian-workflows").glob("*.json"))
@@ -3082,6 +3423,7 @@ def test_prepare_meridian_workflow_quotes_space_containing_paths(
     )
 
     assert "Hail Mary Data" in result.workflow.import_command
+    assert result.workflow.dry_run_command == result.workflow.import_command
     assert shlex.split(result.workflow.import_command) == [
         "hailmary",
         "import-research-results",
@@ -4217,6 +4559,49 @@ def test_import_research_results_imports_edited_meridian_placeholder_in_dry_run(
     assert result.deal_count == 1
 
 
+def test_import_research_results_skips_legacy_meridian_placeholder_confidence(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+        }
+    )
+    template_payload["results"][1]["confidence"] = MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE
+    template_payload["results"][1]["licensing_notes"] = template_payload["results"][1][
+        "licensing_notes"
+    ].replace(
+        MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+        MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=workflow.result_template_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+        dry_run=True,
+    )
+
+    assert result.imported_count == 1
+    assert result.skipped_blank_template_row_count == len(template_payload["results"]) - 1
+
+
 def test_import_research_results_rejects_source_only_meridian_placeholder_edits(
     tmp_path: Path,
 ) -> None:
@@ -4379,6 +4764,40 @@ def test_import_research_results_rejects_meridian_placeholder_confidence(
         )
 
 
+def test_import_research_results_rejects_legacy_meridian_placeholder_confidence(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match="placeholder confidence"):
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
 def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
     tmp_path: Path,
 ) -> None:
@@ -4399,6 +4818,12 @@ def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
             "retrieved_at": "2026-01-01T12:00:00Z",
             "confidence": "high: exact page excerpt",
         }
+    )
+    template_payload["results"][0]["licensing_notes"] = template_payload["results"][0][
+        "licensing_notes"
+    ].replace(
+        MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+        MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
     )
     workflow.result_template_path.write_text(
         json.dumps(template_payload),
@@ -4449,6 +4874,34 @@ def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
         (
             "https://portal.angellist.com/m/example/invest?token=secret",
             "extra text after",
+        ),
+        (
+            "https://portal.angellist.com/m/example/invest#details",
+            "extra text after",
+        ),
+        (
+            "https://portal.angellist.com//m/example/invest",
+            "Meridian deal page",
+        ),
+        (
+            "https://portal.angellist.com/m/example/invest/",
+            "Meridian deal page",
+        ),
+        (
+            "https://portal.angellist.com/m/example%3Ftoken=secret/invest",
+            "deal URL can include only",
+        ),
+        (
+            "https://user:token@portal.angellist.com/m/example/invest",
+            "username or password",
+        ),
+        (
+            "https://portal.angellist.com:444/m/example/invest",
+            "cannot include a port",
+        ),
+        (
+            "https://portal.angellist.com:/m/example/invest",
+            "cannot include a port",
         ),
         (
             "https://example.com/m/example/invest",
@@ -5542,11 +5995,14 @@ def _github_repository_response(
     results: list[dict[str, object]],
     *,
     incomplete_results: bool = False,
+    has_next: bool = False,
+    total_count: int | None = None,
 ) -> GitHubRepositorySearchResponse:
     return GitHubRepositorySearchResponse.model_validate(
         {
-            "total_count": len(results),
+            "total_count": len(results) if total_count is None else total_count,
             "incomplete_results": incomplete_results,
+            "has_next": has_next,
             "items": results,
         }
     )
@@ -5633,6 +6089,8 @@ def _sec_form_d_filing(
     total_offering_amount: str | None = None,
 ) -> SecFormDFilingRecord:
     accession_digits = accession_number.replace("-", "")
+    accession_filename = collection_module._sec_accession_filename(accession_number)
+    assert accession_filename is not None
     return SecFormDFilingRecord.model_validate(
         {
             "issuer_name": issuer_name,
@@ -5640,7 +6098,7 @@ def _sec_form_d_filing(
             "accession_number": accession_number,
             "source_url": (
                 "https://www.sec.gov/Archives/edgar/data/1234567890/"
-                f"{accession_digits}/{accession_digits}.txt"
+                f"{accession_digits}/{accession_filename}.txt"
             ),
             "source_api": collection_module._sec_form_d_atom_api_url(
                 issuer_name,

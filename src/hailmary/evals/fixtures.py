@@ -1265,6 +1265,7 @@ def _github_repository_response(
         {
             "total_count": len(results),
             "incomplete_results": False,
+            "has_next": False,
             "items": results,
         }
     )
@@ -1295,6 +1296,13 @@ def _sec_form_d_filing(
     total_offering_amount: str | None = None,
 ) -> SecFormDFilingRecord:
     accession_digits = accession_number.replace("-", "")
+    if "-" in accession_number:
+        accession_filename = accession_number
+    else:
+        accession_filename = (
+            f"{accession_digits[:10]}-{accession_digits[10:12]}-"
+            f"{accession_digits[12:]}"
+        )
     return SecFormDFilingRecord.model_validate(
         {
             "issuer_name": issuer_name,
@@ -1302,7 +1310,7 @@ def _sec_form_d_filing(
             "accession_number": accession_number,
             "source_url": (
                 "https://www.sec.gov/Archives/edgar/data/1234567890/"
-                f"{accession_digits}/{accession_digits}.txt"
+                f"{accession_digits}/{accession_filename}.txt"
             ),
             "source_api": (
                 "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"

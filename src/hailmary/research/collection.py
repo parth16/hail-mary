@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -49,6 +50,8 @@ class SecFormDApiError(RuntimeError):
 USASPENDING_AWARDS_ENDPOINT = "https://api.usaspending.gov/api/v2/search/spending_by_award/"
 SEC_FORM_D_ATOM_ENDPOINT = "https://www.sec.gov/cgi-bin/browse-edgar"
 SEC_FORM_D_MAX_PAGES = 20
+SEC_FORM_D_REQUEST_INTERVAL_SECONDS = 0.11
+SEC_FORM_D_USER_AGENT_ENV_VAR = "HAILMARY_SEC_USER_AGENT"
 PUBLIC_API_MAX_BYTES = 2_000_000
 USASPENDING_AWARD_FIELDS = [
     "Award ID",
@@ -517,6 +520,7 @@ class SecFormDFilingsResponse(BaseModel):
 
     results: list[dict[str, Any]]
     has_next: bool = False
+    warnings: list[str] = Field(default_factory=list)
 
 
 class GitHubRepositoryRecord(BaseModel):
@@ -614,8 +618,9 @@ class GitHubRepositorySearchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     results: list[dict[str, Any]] = Field(alias="items")
-    incomplete_results: bool = False
-    total_count: int | None = None
+    incomplete_results: bool
+    total_count: int
+    has_next: bool = False
 
     @property
     def result_count(self) -> int:
@@ -1019,7 +1024,8 @@ def _build_sbir_api_opener() -> urllib.request.OpenerDirector:
 
 @dataclass(frozen=True)
 class UrlLibSecFormDFilingsClient:
-    user_agent: str = "HailMary/0.1 SEC Form D public research"
+    user_agent: str | None = None
+    request_interval_seconds: float = SEC_FORM_D_REQUEST_INTERVAL_SECONDS
 
     def search_filings(
         self,
@@ -1039,7 +1045,7 @@ class UrlLibSecFormDFilingsClient:
         request = urllib.request.Request(
             request_url,
             headers={
-                "User-Agent": self.user_agent,
+                "User-Agent": self._user_agent(),
                 "Accept": "application/atom+xml, application/xml;q=0.9, text/xml;q=0.8",
             },
         )
@@ -1069,6 +1075,7 @@ class UrlLibSecFormDFilingsClient:
         )
         return _parse_sec_form_d_atom_response(
             decoded_text,
+            requested_company_name=company_name,
             source_api=request_url,
             fetch_submission=lambda source_url: self._fetch_submission_details(
                 source_url,
@@ -1082,12 +1089,14 @@ class UrlLibSecFormDFilingsClient:
         *,
         timeout_seconds: float,
     ) -> dict[str, str | list[str] | None]:
-        _validate_sec_form_d_public_url(source_url, field_name="SEC Form D source URL")
+        _validate_sec_form_d_archive_url(source_url, field_name="SEC Form D source URL")
         _ensure_sec_form_d_resolved_public_endpoint(source_url)
+        if self.request_interval_seconds > 0:
+            time.sleep(self.request_interval_seconds)
         request = urllib.request.Request(
             source_url,
             headers={
-                "User-Agent": self.user_agent,
+                "User-Agent": self._user_agent(),
                 "Accept": "text/plain, application/xml;q=0.9, text/xml;q=0.8",
             },
         )
@@ -1096,7 +1105,7 @@ class UrlLibSecFormDFilingsClient:
             with opener.open(request, timeout=timeout_seconds) as response:
                 status_code = int(getattr(response, "status", 200))
                 final_url = response.geturl()
-                _validate_sec_form_d_public_url(
+                _validate_sec_form_d_archive_url(
                     final_url,
                     field_name="SEC Form D source URL",
                 )
@@ -1120,6 +1129,11 @@ class UrlLibSecFormDFilingsClient:
         )
         return _sec_form_d_details_from_submission(decoded_text, source_url=final_url)
 
+    def _user_agent(self) -> str:
+        if self.user_agent is None:
+            return _sec_form_d_user_agent_from_env()
+        return _validate_sec_form_d_user_agent(self.user_agent)
+
 
 class _SecFormDRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(
@@ -1131,7 +1145,11 @@ class _SecFormDRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Any,
         newurl: str,
     ) -> urllib.request.Request | None:
-        _validate_sec_form_d_public_url(newurl, field_name="SEC redirect URL")
+        request_url = req.full_url
+        if _sec_form_d_url_is_atom_endpoint(request_url):
+            _validate_sec_form_d_atom_url(newurl)
+        else:
+            _validate_sec_form_d_archive_url(newurl, field_name="SEC redirect URL")
         _ensure_sec_form_d_resolved_public_endpoint(newurl)
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is not None and not isinstance(redirected, urllib.request.Request):
@@ -1160,11 +1178,41 @@ class UrlLibGitHubRepositorySearchClient:
         page: int,
         timeout_seconds: float,
     ) -> GitHubRepositorySearchResponse:
-        request_url = _github_repository_search_api_url(
-            company_name,
-            per_page=per_page,
-            page=page,
+        responses = [
+            self._search_repository_url(
+                request_url,
+                per_page=per_page,
+                page=page,
+                timeout_seconds=timeout_seconds,
+            )
+            for request_url in _github_repository_search_api_urls(
+                company_name,
+                per_page=per_page,
+                page=page,
+            )
+        ]
+        combined_results: list[dict[str, Any]] = []
+        for response in responses:
+            combined_results.extend(response.results)
+        return GitHubRepositorySearchResponse.model_validate(
+            {
+                "items": combined_results,
+                "incomplete_results": any(
+                    response.incomplete_results for response in responses
+                ),
+                "total_count": sum(response.total_count for response in responses),
+                "has_next": any(response.has_next for response in responses),
+            }
         )
+
+    def _search_repository_url(
+        self,
+        request_url: str,
+        *,
+        per_page: int,
+        page: int,
+        timeout_seconds: float,
+    ) -> GitHubRepositorySearchResponse:
         _validate_github_repository_search_url(request_url)
         _ensure_github_resolved_public_endpoint(request_url)
         request = urllib.request.Request(
@@ -1205,6 +1253,20 @@ class UrlLibGitHubRepositorySearchClient:
             raise GitHubApiError(
                 "GitHub returned a response that was not valid JSON."
             ) from exc
+        if not isinstance(response_payload, dict):
+            raise GitHubApiError(
+                "GitHub returned an unexpected response: response was not a JSON object."
+            )
+        try:
+            parsed_response = GitHubRepositorySearchResponse.model_validate(
+                response_payload
+            )
+        except ValidationError as exc:
+            detail = _first_validation_detail(exc)
+            raise GitHubApiError(
+                f"GitHub returned an unexpected response: {detail}"
+            ) from exc
+        response_payload["has_next"] = page * per_page < parsed_response.total_count
         try:
             return GitHubRepositorySearchResponse.model_validate(response_payload)
         except ValidationError as exc:
@@ -1224,7 +1286,7 @@ class _GitHubRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Any,
         newurl: str,
     ) -> urllib.request.Request | None:
-        _validate_github_public_url(newurl, field_name="GitHub redirect URL")
+        _validate_github_repository_search_url(newurl, field_name="GitHub redirect URL")
         _ensure_github_resolved_public_endpoint(newurl)
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is not None and not isinstance(redirected, urllib.request.Request):
@@ -1686,7 +1748,9 @@ def collect_sec_form_d_filings(
             ],
         )
 
-    filings_client = client or UrlLibSecFormDFilingsClient()
+    filings_client = client or UrlLibSecFormDFilingsClient(
+        user_agent=_sec_form_d_user_agent_from_env()
+    )
     results: list[ResearchResultInput] = []
     run_warnings: list[str] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
@@ -1703,6 +1767,7 @@ def collect_sec_form_d_filings(
                     start=start,
                     timeout_seconds=timeout_seconds,
                 )
+                run_warnings.extend(filings_response.warnings)
                 for raw_filing in filings_response.results:
                     issuer_name = _sec_form_d_raw_issuer_name(raw_filing)
                     if issuer_name is None:
@@ -1878,7 +1943,7 @@ def collect_github_repositories(
                         "more GitHub results may exist."
                     )
                     break
-                if len(deal_results) >= limit or repositories_response.result_count < limit:
+                if len(deal_results) >= limit or not repositories_response.has_next:
                     break
                 if page >= GITHUB_MAX_PAGES:
                     match_count = len(deal_results)
@@ -2086,6 +2151,27 @@ def _validate_github_repository_limit(limit: int) -> None:
         )
 
 
+def _sec_form_d_user_agent_from_env() -> str:
+    value = os.environ.get(SEC_FORM_D_USER_AGENT_ENV_VAR, "").strip()
+    return _validate_sec_form_d_user_agent(value)
+
+
+def _validate_sec_form_d_user_agent(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ResearchCollectionError(
+            f"Set {SEC_FORM_D_USER_AGENT_ENV_VAR} before live SEC Form D collection. "
+            "SEC EDGAR asks automated clients to send a User-Agent that includes "
+            "an application or company name and a contact email address."
+        )
+    if not re.search(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+        raise ResearchCollectionError(
+            f"{SEC_FORM_D_USER_AGENT_ENV_VAR} must include a contact email address "
+            "for SEC EDGAR fair-access identification."
+        )
+    return value
+
+
 def _validate_usaspending_api_url(url: str) -> None:
     try:
         validate_provider_source_url(
@@ -2135,12 +2221,30 @@ def _validate_sec_form_d_public_url(url: str, *, field_name: str) -> None:
 
 def _validate_sec_form_d_atom_url(url: str) -> None:
     _validate_sec_form_d_public_url(url, field_name="SEC EDGAR API URL")
+    if not _sec_form_d_url_is_atom_endpoint(url):
+        raise SecFormDApiError(
+            "SEC EDGAR redirected the request away from the expected public API endpoint."
+        )
+
+
+def _sec_form_d_url_is_atom_endpoint(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").casefold()
     path = parsed.path.rstrip("/")
-    if host != "www.sec.gov" or path != "/cgi-bin/browse-edgar":
+    return (
+        parsed.scheme == "https"
+        and host == "www.sec.gov"
+        and path == "/cgi-bin/browse-edgar"
+    )
+
+
+def _validate_sec_form_d_archive_url(url: str, *, field_name: str) -> None:
+    _validate_sec_form_d_public_url(url, field_name=field_name)
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold()
+    if host != "www.sec.gov" or not parsed.path.startswith("/Archives/edgar/data/"):
         raise SecFormDApiError(
-            "SEC EDGAR redirected the request away from the expected public API endpoint."
+            f"{field_name} must stay under the SEC EDGAR archive path."
         )
 
 
@@ -2154,8 +2258,12 @@ def _validate_github_public_url(url: str, *, field_name: str) -> None:
         raise GitHubApiError(f"{field_name} must stay on HTTPS.")
 
 
-def _validate_github_repository_search_url(url: str) -> None:
-    _validate_github_public_url(url, field_name="GitHub API URL")
+def _validate_github_repository_search_url(
+    url: str,
+    *,
+    field_name: str = "GitHub API URL",
+) -> None:
+    _validate_github_public_url(url, field_name=field_name)
     parsed = urlparse(url)
     host = (parsed.hostname or "").casefold()
     path = parsed.path.rstrip("/")
@@ -2264,10 +2372,11 @@ def _github_repository_search_api_url(
     *,
     per_page: int,
     page: int,
+    query: str | None = None,
 ) -> str:
     query = urlencode(
         {
-            "q": f"{company_name} in:name fork:false",
+            "q": query or f"{company_name} in:name fork:false",
             "sort": "stars",
             "order": "desc",
             "per_page": per_page,
@@ -2275,6 +2384,32 @@ def _github_repository_search_api_url(
         }
     )
     return f"{GITHUB_REPOSITORY_SEARCH_ENDPOINT}?{query}"
+
+
+def _github_repository_search_api_urls(
+    company_name: str,
+    *,
+    per_page: int,
+    page: int,
+) -> list[str]:
+    requested_slug = _normalize_company_slug(company_name)
+    queries = [f"{company_name} in:name fork:false"]
+    if requested_slug:
+        queries.extend(
+            [
+                f"user:{requested_slug} fork:false",
+                f"org:{requested_slug} fork:false",
+            ]
+        )
+    return [
+        _github_repository_search_api_url(
+            company_name,
+            per_page=per_page,
+            page=page,
+            query=query,
+        )
+        for query in queries
+    ]
 
 
 def _validate_sbir_awards_response(response_payload: object) -> SbirAwardsResponse:
@@ -2740,6 +2875,7 @@ def _decode_public_api_text(
 def _parse_sec_form_d_atom_response(
     xml_text: str,
     *,
+    requested_company_name: str,
     source_api: str,
     fetch_submission: Callable[[str], dict[str, str | list[str] | None]],
 ) -> SecFormDFilingsResponse:
@@ -2755,17 +2891,37 @@ def _parse_sec_form_d_atom_response(
     has_next = start_index + items_per_page < total_results
 
     results: list[dict[str, Any]] = []
+    warnings: list[str] = []
     for entry in _sec_atom_entries(root):
         filing_type = _sec_form_d_entry_filing_type(entry)
         if filing_type not in {"D", "D/A"}:
             continue
+        entry_issuer_name = _sec_form_d_entry_issuer_name(entry)
+        is_exact_entry = (
+            entry_issuer_name is not None
+            and _exact_company_name_match(requested_company_name, entry_issuer_name)
+        )
+        if entry_issuer_name is not None and not is_exact_entry:
+            continue
         filing_href = _sec_form_d_entry_filing_href(entry)
         accession_number = _sec_form_d_entry_accession_number(entry, filing_href)
         if filing_href is None:
+            if not is_exact_entry:
+                warnings.append(
+                    "SEC EDGAR returned a fuzzy Form D result without a filing URL; "
+                    "Hail Mary skipped it before preparing evidence."
+                )
+                continue
             raise SecFormDApiError(
                 "SEC EDGAR returned a Form D result without a filing URL."
             )
         if accession_number is None:
+            if not is_exact_entry:
+                warnings.append(
+                    "SEC EDGAR returned a fuzzy Form D result without an accession "
+                    "number; Hail Mary skipped it before preparing evidence."
+                )
+                continue
             raise SecFormDApiError(
                 "SEC EDGAR returned a Form D result without an accession number."
             )
@@ -2773,7 +2929,16 @@ def _parse_sec_form_d_atom_response(
             filing_href,
             accession_number=accession_number,
         )
-        filing_details = fetch_submission(source_url)
+        try:
+            filing_details = fetch_submission(source_url)
+        except SecFormDApiError as exc:
+            if is_exact_entry:
+                raise
+            warnings.append(
+                "SEC EDGAR returned a fuzzy Form D result whose filing metadata "
+                f"could not be parsed; Hail Mary skipped it. Reason: {exc}"
+            )
+            continue
         results.append(
             {
                 **filing_details,
@@ -2787,7 +2952,7 @@ def _parse_sec_form_d_atom_response(
         )
     try:
         return SecFormDFilingsResponse.model_validate(
-            {"results": results, "has_next": has_next}
+            {"results": results, "has_next": has_next, "warnings": warnings}
         )
     except ValidationError as exc:
         detail = _first_validation_detail(exc)
@@ -2850,6 +3015,19 @@ def _sec_form_d_entry_filing_href(entry: ET.Element) -> str | None:
     return None
 
 
+def _sec_form_d_entry_issuer_name(entry: ET.Element) -> str | None:
+    for local_name in ("company-name", "companyName", "issuer-name", "issuerName"):
+        value = _sec_form_d_entry_text(entry, local_name)
+        if value:
+            return value
+    title = _sec_form_d_entry_text(entry, "title")
+    if title is None:
+        return None
+    title_without_type = re.sub(r"^\s*D(?:/A)?\s*-\s*", "", title, flags=re.IGNORECASE)
+    title_without_cik = re.sub(r"\s*\(\d{1,10}\).*$", "", title_without_type)
+    return _collapse_sec_text(title_without_cik)
+
+
 def _sec_form_d_entry_accession_number(
     entry: ET.Element,
     filing_href: str | None,
@@ -2886,24 +3064,37 @@ def _sec_form_d_complete_submission_url(
     path = parsed.path
     if path.endswith(".txt"):
         source_url = f"https://{parsed.netloc}{path}"
-        _validate_sec_form_d_public_url(
+        _validate_sec_form_d_archive_url(
             source_url,
             field_name="SEC Form D source URL",
         )
         return source_url
-    if "/Archives/edgar/data/" not in path:
-        raise SecFormDApiError(
-            "SEC EDGAR returned a Form D filing URL outside the expected archive path."
-        )
-    accession_digits = re.sub(r"[^0-9]", "", accession_number)
-    if not accession_digits:
+    _validate_sec_form_d_archive_url(
+        filing_href,
+        field_name="SEC Form D filing URL",
+    )
+    accession_filename = _sec_accession_filename(accession_number)
+    if accession_filename is None:
         raise SecFormDApiError(
             "SEC EDGAR returned a Form D result with an unusable accession number."
         )
     folder_path = path.rsplit("/", 1)[0]
-    source_url = f"https://{parsed.netloc}{folder_path}/{accession_digits}.txt"
-    _validate_sec_form_d_public_url(source_url, field_name="SEC Form D source URL")
+    source_url = f"https://{parsed.netloc}{folder_path}/{accession_filename}.txt"
+    _validate_sec_form_d_archive_url(source_url, field_name="SEC Form D source URL")
     return source_url
+
+
+def _sec_accession_filename(accession_number: str) -> str | None:
+    stripped = accession_number.strip()
+    if re.fullmatch(r"\d{10}-\d{2}-\d{6}", stripped):
+        return stripped
+    accession_digits = re.sub(r"[^0-9]", "", stripped)
+    if re.fullmatch(r"\d{18}", accession_digits):
+        return (
+            f"{accession_digits[:10]}-{accession_digits[10:12]}-"
+            f"{accession_digits[12:]}"
+        )
+    return None
 
 
 def _sec_form_d_details_from_submission(
