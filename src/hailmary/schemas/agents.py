@@ -54,6 +54,8 @@ class AgentEvidenceItem(BaseModel):
     source_freshness: SourceFreshness
     page_number: int | None = None
     table_index: int | None = None
+    ocr_applied: bool = False
+    ocr_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     truncated: bool = False
 
 

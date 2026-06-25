@@ -554,7 +554,20 @@ def _external_source_details(evidence: EvidenceRecord) -> str:
         details.append(f"confidence: {_memo_metadata_value(evidence.external_confidence)}")
     if evidence.licensing_notes:
         details.append(f"licensing: {_memo_metadata_value(evidence.licensing_notes)}")
+    if evidence.ocr_applied:
+        details.append(
+            "text source: image-based text reading (OCR; OCR means reading text from images)"
+        )
+        if evidence.ocr_confidence is not None:
+            ocr_confidence = _format_ocr_confidence(evidence.ocr_confidence)
+            details.append(
+                f"OCR confidence: {_memo_metadata_value(ocr_confidence)}"
+            )
     return "; ".join(details)
+
+
+def _format_ocr_confidence(confidence: float) -> str:
+    return f"{confidence:.0%}"
 
 
 def _memo_metadata_value(value: str) -> str:

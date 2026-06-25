@@ -14,7 +14,35 @@ from docx import Document
 from hailmary.config import AppConfig
 from hailmary.ingest import folder_loader
 from hailmary.ingest.folder_loader import IngestionError, ingest_folder
+from hailmary.ingest.ocr import LocalOcrError, LocalOcrResult
 from hailmary.schemas.documents import DocumentType, ExtractionQuality, FileType
+from hailmary.schemas.evidence import EvidenceKind
+
+
+class ImageOcrEngine:
+    def __init__(
+        self,
+        result: LocalOcrResult | None = None,
+        error: LocalOcrError | None = None,
+    ) -> None:
+        self.result = result or LocalOcrResult(text="")
+        self.error = error
+
+    def image_to_text(
+        self,
+        path: Path,
+        *,
+        page_number: int | None = None,
+    ) -> LocalOcrResult:
+        del path
+        assert page_number == 1
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def pdf_page_to_text(self, path: Path, *, page_number: int) -> LocalOcrResult:
+        del path, page_number
+        return LocalOcrResult(text="")
 
 
 def _deal_id(deal_name: str) -> str:
@@ -273,6 +301,127 @@ def test_images_are_ingested_as_vision_needed_documents(tmp_path: Path) -> None:
     assert saved_document["source"]["ocr_recommended"]
     assert saved_document["source"]["vision_recommended"]
     assert saved_document["pages"][0]["needs_ocr"]
+
+
+def test_image_ocr_text_creates_source_linked_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "OcrCo"
+    company.mkdir(parents=True)
+    (company / "scan.png").write_bytes(b"synthetic image placeholder")
+    engine = ImageOcrEngine(
+        LocalOcrResult(
+            text="Valuation cap $8M. Minimum investment $1,000.",
+            confidence=0.93,
+        )
+    )
+
+    summary = ingest_folder(
+        root,
+        config=AppConfig(data_dir=tmp_path / "data"),
+        ocr_engine=engine,
+    )
+
+    assert summary.document_count == 1
+    deal = summary.deals[0]
+    assert deal.evidence_count == 1
+    assert deal.claim_count == 2
+    document = deal.documents[0]
+    assert document.source.ocr_applied
+    assert document.source.ocr_confidence == 0.93
+    assert not document.source.ocr_recommended
+    assert document.source.sha256 is not None
+    assert document.pages[0].page_number == 1
+    assert document.pages[0].ocr_applied
+    assert document.pages[0].ocr_confidence == 0.93
+    assert document.pages[0].source_span_start == 0
+    assert document.pages[0].source_span_end == len(document.pages[0].raw_text)
+
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    evidence = saved_store["evidence"][0]
+    assert evidence["evidence_kind"] == EvidenceKind.PAGE_TEXT
+    assert evidence["document_id"] == document.source.id
+    assert evidence["document_path"] == "OcrCo/scan.png"
+    assert evidence["page_number"] == 1
+    assert evidence["ocr_applied"]
+    assert evidence["ocr_confidence"] == 0.93
+    assert evidence["text"] == "Valuation cap $8M. Minimum investment $1,000."
+
+    saved_document = json.loads(document.output_path.read_text(encoding="utf-8"))
+    assert saved_document["source"]["ocr_applied"]
+    assert saved_document["pages"][0]["ocr_applied"]
+
+
+def test_image_ocr_missing_tool_stays_evidence_less_and_warns(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "MissingOcrCo"
+    company.mkdir(parents=True)
+    (company / "scan.jpg").write_bytes(b"synthetic image placeholder")
+    engine = ImageOcrEngine(
+        error=LocalOcrError(
+            "Image-based text reading (OCR) needs the local `tesseract` command. "
+            "OCR means reading text from images."
+        )
+    )
+
+    summary = ingest_folder(
+        root,
+        config=AppConfig(data_dir=tmp_path / "data"),
+        ocr_engine=engine,
+    )
+
+    assert summary.document_count == 1
+    deal = summary.deals[0]
+    assert deal.evidence_count == 0
+    document = deal.documents[0]
+    assert document.source.ocr_recommended
+    assert document.source.vision_recommended
+    assert not document.source.ocr_applied
+    assert document.source.notes is not None
+    assert "tesseract" in document.source.notes
+    assert document.pages[0].needs_ocr
+    assert not document.pages[0].ocr_applied
+
+
+def test_low_confidence_image_ocr_does_not_create_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "LowConfidenceOcrCo"
+    company.mkdir(parents=True)
+    (company / "scan.png").write_bytes(b"synthetic image placeholder")
+    engine = ImageOcrEngine(
+        LocalOcrResult(
+            text="Valuation cap $8M. Minimum investment $1,000.",
+            confidence=0.21,
+        )
+    )
+
+    summary = ingest_folder(
+        root,
+        config=AppConfig(data_dir=tmp_path / "data"),
+        ocr_engine=engine,
+    )
+
+    deal = summary.deals[0]
+    assert deal.evidence_count == 0
+    assert deal.claim_count == 0
+    document = deal.documents[0]
+    assert document.source.ocr_applied
+    assert document.source.ocr_confidence == 0.21
+    assert document.source.ocr_recommended
+    assert document.source.notes is not None
+    assert "low confidence" in document.source.notes
+    assert document.pages[0].ocr_applied
+    assert document.pages[0].needs_ocr
+    assert document.pages[0].clean_text == ""
+    assert document.pages[0].raw_text == "Valuation cap $8M. Minimum investment $1,000."
+
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    assert saved_store["evidence"] == []
+    assert any(
+        "No usable extracted text was available" in note
+        for note in saved_store["notes"]
+    )
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")

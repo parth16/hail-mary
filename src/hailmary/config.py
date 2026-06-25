@@ -30,6 +30,7 @@ class AppConfig(BaseModel):
     min_check: int = 1_000
     max_check: int = 10_000
     meridian_profile_dir: Path = Field(default=Path("./data/browser-profiles/meridian"))
+    enable_ocr: bool = False
     enable_web_research: bool = False
     mock_llm: bool = True
 
@@ -137,6 +138,11 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         if "HAILMARY_ENABLE_WEB_RESEARCH" in os.environ
         else _config_bool(saved_values, "enable_web_research", False)
     )
+    enable_ocr = (
+        _env_bool("HAILMARY_ENABLE_OCR", False)
+        if "HAILMARY_ENABLE_OCR" in os.environ
+        else _config_bool(saved_values, "enable_ocr", False)
+    )
     if local_only:
         enable_web_research = False
     mock_llm = (
@@ -172,6 +178,7 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             saved_values,
             data_dir_was_overridden=data_dir_was_overridden,
         ),
+        enable_ocr=enable_ocr,
         enable_web_research=enable_web_research,
         mock_llm=mock_llm,
     )
@@ -754,6 +761,7 @@ def _local_git_exclude_path(git_root: Path) -> Path | None:
 
 def _default_config_text(config: AppConfig) -> str:
     local_only = "true" if config.local_only else "false"
+    enable_ocr = "true" if config.enable_ocr else "false"
     web_research = "true" if config.enable_web_research else "false"
     mock_llm = "true" if config.mock_llm else "false"
 
@@ -765,6 +773,7 @@ capital_budget: {config.capital_budget}
 min_check: {config.min_check}
 max_check: {config.max_check}
 meridian_profile_dir: {_yaml_string(config.meridian_profile_dir.as_posix())}
+enable_ocr: {enable_ocr}
 enable_web_research: {web_research}
 mock_llm: {mock_llm}
 """

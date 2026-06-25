@@ -95,6 +95,11 @@ STAGE_NEGATED_PATTERNS = (
         rf"(?:for|toward|towards)\s+(?:a\s+|an\s+|the\s+)?{STAGE_NEGATED_SIGNAL}\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"\b{STAGE_NEGATED_SIGNAL}\s+"
+        rf"(?:investors?|funds?|backers?)\b(?:\s+\w+){{0,4}}",
+        re.IGNORECASE,
+    ),
 )
 RETURN_INPUT_PATTERNS = {
     "dilution": re.compile(
@@ -110,6 +115,11 @@ RETURN_INPUT_PATTERNS = {
     ),
     "carry": re.compile(
         r"\bcarry\b\s*(?:is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
+        re.IGNORECASE,
+    ),
+    "combined_fees_and_carry": re.compile(
+        r"\b(?:total\s+)?(?:fees?\s+(?:and|&|/)\s+carry|carry\s+(?:and|&|/)\s+fees?)\b"
+        r"\s*(?:are|is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
         re.IGNORECASE,
     ),
     "gross_exit_value": re.compile(
@@ -653,7 +663,7 @@ def _stage_pmf_factor(
     }
     pmf_evidence = _pmf_evidence(store.evidence, pmf_level)
     stage_evidence = _stage_evidence(store.evidence, company_stage)
-    evidence_ids = _dedupe_evidence_ids([*pmf_evidence, *stage_evidence])
+    evidence_ids = _stage_pmf_evidence_ids(stage_evidence, pmf_evidence)
     missing_inputs = []
     if company_stage == CompanyStage.UNKNOWN:
         missing_inputs.append("explicit company stage")
@@ -1035,6 +1045,7 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
     dilution_percent: float | None = None
     fees_percent: float | None = None
     carry_percent: float | None = None
+    combined_fees_and_carry_percent: float | None = None
     gross_exit_value: int | None = None
     evidence_ids: list[str] = []
     for record in evidence:
@@ -1050,15 +1061,21 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
         if carry_percent is None and carry_match:
             carry_percent = _float_text(carry_match.group("value"))
             evidence_ids.append(record.id)
+        combined_match = RETURN_INPUT_PATTERNS["combined_fees_and_carry"].search(record.text)
+        if combined_fees_and_carry_percent is None and combined_match:
+            combined_fees_and_carry_percent = _float_text(combined_match.group("value"))
+            evidence_ids.append(record.id)
         exit_match = RETURN_INPUT_PATTERNS["gross_exit_value"].search(record.text)
         if gross_exit_value is None and exit_match:
             gross_exit_value = _money_text_to_dollars(exit_match.group("value"))
             evidence_ids.append(record.id)
     fees_and_carry: float | None
-    if fees_percent is None and carry_percent is None:
-        fees_and_carry = None
+    if combined_fees_and_carry_percent is not None:
+        fees_and_carry = combined_fees_and_carry_percent
+    elif fees_percent is not None and carry_percent is not None:
+        fees_and_carry = fees_percent + carry_percent
     else:
-        fees_and_carry = (fees_percent or 0) + (carry_percent or 0)
+        fees_and_carry = None
     return _ReturnInputs(
         dilution_percent=dilution_percent,
         fees_and_carry_percent=fees_and_carry,
@@ -1542,6 +1559,20 @@ def _dedupe_evidence_ids(evidence: list[EvidenceRecord]) -> list[str]:
         if record.id not in evidence_ids:
             evidence_ids.append(record.id)
     return evidence_ids[:5]
+
+
+def _stage_pmf_evidence_ids(
+    stage_evidence: list[EvidenceRecord],
+    pmf_evidence: list[EvidenceRecord],
+) -> list[str]:
+    ordered: list[EvidenceRecord] = []
+    if stage_evidence:
+        ordered.append(stage_evidence[0])
+    if pmf_evidence:
+        ordered.append(pmf_evidence[0])
+    ordered.extend(stage_evidence[1:])
+    ordered.extend(pmf_evidence[1:])
+    return _dedupe_evidence_ids(ordered)
 
 
 def _format_dollars(value: int) -> str:

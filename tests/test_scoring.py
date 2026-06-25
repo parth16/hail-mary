@@ -312,6 +312,33 @@ def test_stage_classification_ignores_future_and_negated_category_mentions(
     )
 
 
+def test_stage_classification_prefers_current_stage_over_series_a_investor_reference() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Seed stage; Series A investors are interested. Valuation cap $80M. "
+            "Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$80M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.company_stage == CompanyStage.SEED
+    assert scored.valuation_risk == ValuationRisk.HIGH
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_score_evidence_store_gates_valuation_far_ahead_of_evidence() -> None:
     evidence = [
         _evidence(
@@ -476,6 +503,26 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
     assert _score_factor(scored, "Valuation and net return").score == 20
 
 
+def test_net_return_math_requires_complete_fees_and_carry_inputs() -> None:
+    evidence = [
+        _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_return", "Estimated dilution 20%. Carry 20%. Exit value $1B."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.net_return_multiple is None
+    assert "fees or carry" in scored.net_return.missing_inputs
+
+
 def test_net_return_math_adds_round_size_to_pre_money_valuation() -> None:
     evidence = [
         _evidence("ev_valuation", "Pre-money valuation $40M."),
@@ -606,6 +653,28 @@ def test_stage_pmf_factor_marks_partial_support_needs_diligence() -> None:
     assert stage_factor.missing_inputs == [
         "customer, revenue, retention, usage, pilot, or design-partner proof"
     ]
+
+
+def test_stage_pmf_factor_preserves_stage_evidence_with_many_pmf_records() -> None:
+    evidence = [
+        *[
+            _evidence(
+                f"ev_pmf_{index}",
+                f"ARR revenue growth with paid customers and retention cohort {index}.",
+            )
+            for index in range(6)
+        ],
+        _evidence("ev_stage", "Seed stage."),
+    ]
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=[]),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    stage_factor = _score_factor(scored, "Stage and product-market fit")
+    assert stage_factor.support_status == ScoreSupportStatus.VERIFIED
+    assert "ev_stage" in stage_factor.evidence_ids
+    assert "ev_pmf_0" in stage_factor.evidence_ids
 
 
 def test_evidence_authority_with_unknown_freshness_needs_diligence() -> None:
@@ -1370,6 +1439,28 @@ def test_render_markdown_memo_escapes_untrusted_document_paths() -> None:
     assert "\n- ev_fake:" not in markdown
 
 
+def test_render_markdown_memo_includes_ocr_lineage_for_cited_evidence() -> None:
+    evidence = [
+        _evidence("ev_ocr", "Valuation cap $8M.").model_copy(
+            update={
+                "file_type": FileType.PNG,
+                "document_path": Path("scan.png"),
+                "ocr_applied": True,
+                "ocr_confidence": 0.86,
+            }
+        )
+    ]
+    claim = _claim("valuation cap", "$8M", "ev_ocr")
+    store = _store(evidence=evidence, claims=[claim])
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert "image-based text reading (OCR" in markdown
+    assert "OCR means reading text from images" in markdown
+    assert "OCR confidence: 86%" in markdown
+
+
 def test_render_markdown_memo_includes_cited_evidence_beyond_first_25() -> None:
     evidence = [
         _evidence(f"ev_{index}", f"Background evidence {index}.")
@@ -1715,7 +1806,7 @@ def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> 
     )
 
     assert "VERIFIED: Stage and product-market fit scored" in report
-    assert "Evidence: ev\\_traction, ev\\_funding." in report
+    assert "Evidence: ev\\_funding, ev\\_traction." in report
     assert "NEEDS_DILIGENCE: No usable source-linked evidence" in report
     assert (
         "NEEDS_DILIGENCE: Find concrete customer, revenue, retention, or usage evidence"
