@@ -148,12 +148,12 @@ def test_pitch_deck_markers_must_be_words() -> None:
     assert classify_document(Path("Deckard/customer.pdf")) == DocumentType.UNKNOWN
 
 
-def test_images_are_recognized_but_not_supported_for_ingestion() -> None:
+def test_images_are_recognized_and_supported_for_vision_needed_ingestion() -> None:
     assert classify_file_type(Path("scan.png")) == FileType.PNG
     assert classify_file_type(Path("photo.jpg")) == FileType.JPG
-    assert ".png" not in SUPPORTED_SUFFIXES
-    assert ".jpg" not in SUPPORTED_SUFFIXES
-    assert ".jpeg" not in SUPPORTED_SUFFIXES
+    assert ".png" in SUPPORTED_SUFFIXES
+    assert ".jpg" in SUPPORTED_SUFFIXES
+    assert ".jpeg" in SUPPORTED_SUFFIXES
 
 
 def test_classifies_customer_diligence_documents() -> None:
