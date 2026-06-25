@@ -353,7 +353,7 @@ def _deal_review(
         claim_count=store.claim_count,
         conflict_count=store.conflict_count,
         source_documents=_source_document_summaries(store.evidence),
-        claim_statuses=_claim_status_summaries(store.claims),
+        claim_statuses=_claim_status_summaries(store),
         conflicts=_conflict_summaries(store),
         issues=_issue_summaries(store),
         evidence_records=evidence_records,
@@ -400,8 +400,12 @@ def _source_document_summaries(
     )
 
 
-def _claim_status_summaries(claims: list[ClaimRecord]) -> list[ClaimStatusSummary]:
-    counts = Counter((claim.label, claim.verification_status) for claim in claims)
+def _claim_status_summaries(store: EvidenceStore) -> list[ClaimStatusSummary]:
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    counts = Counter(
+        (claim.label, _claim_review_status(claim, evidence_by_id))
+        for claim in store.claims
+    )
     return [
         ClaimStatusSummary(label=label, verification_status=status, count=count)
         for (label, status), count in sorted(
@@ -409,6 +413,23 @@ def _claim_status_summaries(claims: list[ClaimRecord]) -> list[ClaimStatusSummar
             key=lambda item: (item[0][0].casefold(), item[0][1].value),
         )
     ]
+
+
+def _claim_review_status(
+    claim: ClaimRecord,
+    evidence_by_id: dict[str, EvidenceRecord],
+) -> VerificationStatus:
+    if not claim.citations:
+        return VerificationStatus.MISSING_CITATION
+    for citation in claim.citations:
+        if citation.verification_status != VerificationStatus.VERIFIED:
+            return citation.verification_status
+        live_status = verify_citation(citation, evidence_by_id)
+        if live_status != VerificationStatus.VERIFIED:
+            return live_status
+    if claim.verification_status == VerificationStatus.CONFLICTED:
+        return VerificationStatus.CONFLICTED
+    return VerificationStatus.VERIFIED
 
 
 def _conflict_summaries(store: EvidenceStore) -> list[ConflictReviewSummary]:

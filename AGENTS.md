@@ -104,3 +104,4 @@ Rules for all future Codex runs:
 - PR #52 loop 1: Final-decision committee context should include successful specialist limitations, deterministic no-evidence memos must not describe skipped model review as model advice, and capped agent packets should omit conflicts unless every conflict side is visible in selected evidence.
 - PR #51: Evidence review CLIs should stay read-only, avoid local-state validators that mutate Git exclude files, and keep evidence text hidden by default behind explicit bounded excerpts.
 - PR #51 loop 1: Evidence review commands must reject symlinked data directories before resolving paths, flag empty evidence stores as review issues, and treat negative or zero-length source spans as missing lineage.
+- PR #51 loop 2: Review summaries should recompute claim status from live citation validation and include table indexes when table evidence also has a page number.

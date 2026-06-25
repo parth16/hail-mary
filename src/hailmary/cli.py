@@ -695,10 +695,12 @@ def _evidence_record_review_table(
 def _evidence_location(evidence: object) -> str:
     page_number = getattr(evidence, "page_number", None)
     table_index = getattr(evidence, "table_index", None)
-    if page_number is not None:
-        return f"page {page_number}"
+    if page_number is not None and table_index is not None:
+        return f"page {page_number}, table {table_index}"
     if table_index is not None:
         return f"table {table_index}"
+    if page_number is not None:
+        return f"page {page_number}"
     return "document"
 
 

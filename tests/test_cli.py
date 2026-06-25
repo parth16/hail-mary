@@ -758,9 +758,36 @@ def test_review_evidence_summarizes_review_issues_and_conflicts(tmp_path: Path) 
     assert "Missing source spans" in normalized_output
     assert "Missing claim citations" in normalized_output
     assert "Invalid claim citations" in normalized_output
+    assert "quote_mismatch" in normalized_output
     assert "Low-confidence claims" in normalized_output
     assert "External evidence missing" in normalized_output
     assert "confidence notes" in normalized_output
+
+
+def test_review_evidence_shows_table_index_with_page_number(tmp_path: Path) -> None:
+    evidence = _review_evidence_record(
+        "ev_table",
+        "Valuation cap | $8M",
+        deal_id="deal_table",
+    ).model_copy(
+        update={
+            "evidence_kind": EvidenceKind.TABLE_TEXT,
+            "page_number": 2,
+            "table_index": 3,
+        }
+    )
+    store = _review_store(
+        deal_id="deal_table",
+        company_name="TableLocationCo",
+        evidence=[evidence],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "page 2, table 3" in normalized_output
 
 
 def _review_evidence_record(
