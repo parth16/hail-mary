@@ -4,12 +4,15 @@ import json
 import os
 import re
 import secrets
+import urllib.error
+import urllib.request
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, Self
+from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -22,6 +25,52 @@ from .source_urls import validate_http_url, validate_provider_source_url
 
 class ResearchCollectionError(RuntimeError):
     """Public research results could not be prepared safely."""
+
+
+class UsaspendingApiError(RuntimeError):
+    """USAspending public API results could not be collected safely."""
+
+
+USASPENDING_AWARDS_ENDPOINT = "https://api.usaspending.gov/api/v2/search/spending_by_award/"
+USASPENDING_AWARD_FIELDS = [
+    "Award ID",
+    "Recipient Name",
+    "Recipient UEI",
+    "Start Date",
+    "End Date",
+    "Award Amount",
+    "Award Type",
+    "Awarding Agency",
+    "Awarding Sub Agency",
+    "Funding Agency",
+    "Funding Sub Agency",
+    "Description",
+    "generated_internal_id",
+]
+USASPENDING_AWARD_TYPE_CODES = [
+    "02",
+    "03",
+    "04",
+    "05",
+    "06",
+    "07",
+    "08",
+    "09",
+    "10",
+    "11",
+    "A",
+    "B",
+    "C",
+    "D",
+    "IDV_A",
+    "IDV_B",
+    "IDV_B_A",
+    "IDV_B_B",
+    "IDV_B_C",
+    "IDV_C",
+    "IDV_D",
+    "IDV_E",
+]
 
 
 class PublicSourceSearchResult(BaseModel):
@@ -80,6 +129,76 @@ class PublicSourceSearchResultsFile(BaseModel):
     results: list[PublicSourceSearchResult]
 
 
+class UsaspendingAwardRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    award_id: str = Field(alias="Award ID")
+    recipient_name: str = Field(alias="Recipient Name")
+    generated_internal_id: str
+    award_amount: float | None = Field(default=None, alias="Award Amount")
+    award_type: str | None = Field(default=None, alias="Award Type")
+    awarding_agency: str | None = Field(default=None, alias="Awarding Agency")
+    awarding_sub_agency: str | None = Field(default=None, alias="Awarding Sub Agency")
+    funding_agency: str | None = Field(default=None, alias="Funding Agency")
+    funding_sub_agency: str | None = Field(default=None, alias="Funding Sub Agency")
+    start_date: str | None = Field(default=None, alias="Start Date")
+    end_date: str | None = Field(default=None, alias="End Date")
+    description: str | None = Field(default=None, alias="Description")
+    recipient_uei: str | None = Field(default=None, alias="Recipient UEI")
+
+    @field_validator(
+        "award_id",
+        "recipient_name",
+        "generated_internal_id",
+        "award_type",
+        "awarding_agency",
+        "awarding_sub_agency",
+        "funding_agency",
+        "funding_sub_agency",
+        "start_date",
+        "end_date",
+        "description",
+        "recipient_uei",
+        mode="before",
+    )
+    @classmethod
+    def blank_optional_text_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator(
+        "award_id",
+        "recipient_name",
+        "generated_internal_id",
+        "award_type",
+        "awarding_agency",
+        "awarding_sub_agency",
+        "funding_agency",
+        "funding_sub_agency",
+        "start_date",
+        "end_date",
+        "description",
+        "recipient_uei",
+    )
+    @classmethod
+    def strip_text(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+    @field_validator("award_id", "recipient_name", "generated_internal_id")
+    @classmethod
+    def require_nonblank_text(cls, value: str | None) -> str:
+        if value is None or not value:
+            raise ValueError("must not be blank")
+        return value
+
+
+class UsaspendingAwardsResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    results: list[UsaspendingAwardRecord] = Field(default_factory=list)
+
+
 SecFormDSearchResultsFile = PublicSourceSearchResultsFile
 
 
@@ -103,6 +222,22 @@ class ResearchCollectionRunSummary(BaseModel):
         return sum(deal.result_count for deal in self.deals)
 
 
+class UsaspendingCollectionRunSummary(BaseModel):
+    output_path: Path | None = None
+    collected_at: datetime
+    dry_run: bool = False
+    endpoint: str = USASPENDING_AWARDS_ENDPOINT
+    deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
+
+    @property
+    def deal_count(self) -> int:
+        return len(self.deals)
+
+    @property
+    def result_count(self) -> int:
+        return sum(deal.result_count for deal in self.deals)
+
+
 @dataclass(frozen=True)
 class ResearchCollectionDeal:
     company_name: str
@@ -111,6 +246,17 @@ class ResearchCollectionDeal:
 class PublicSourceSearchClient(Protocol):
     def search(self, company_name: str) -> Iterable[PublicSourceSearchResult]:
         """Return locally available public-source results for one company."""
+
+
+class UsaspendingAwardsClient(Protocol):
+    def search_awards(
+        self,
+        company_name: str,
+        *,
+        limit: int,
+        timeout_seconds: float,
+    ) -> Iterable[UsaspendingAwardRecord]:
+        """Return USAspending public API award records for one company."""
 
 
 @dataclass(frozen=True)
@@ -169,6 +315,68 @@ class PublicSourceFileAdapter:
 SecFormDSearchClient = PublicSourceSearchClient
 LocalSecFormDSearchClient = LocalPublicSourceSearchClient
 SecFormDPublicAdapter = PublicSourceFileAdapter
+
+
+@dataclass(frozen=True)
+class UrlLibUsaspendingAwardsClient:
+    user_agent: str = "HailMary/0.1 USAspending public API research"
+
+    def search_awards(
+        self,
+        company_name: str,
+        *,
+        limit: int,
+        timeout_seconds: float,
+    ) -> Iterable[UsaspendingAwardRecord]:
+        payload = _usaspending_awards_payload(company_name, limit=limit)
+        request = urllib.request.Request(
+            USASPENDING_AWARDS_ENDPOINT,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "User-Agent": self.user_agent,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=timeout_seconds) as response:
+                status_code = int(getattr(response, "status", 200))
+                final_url = response.geturl()
+                _validate_usaspending_api_url(final_url)
+                raw_content = response.read(2_000_001)
+                if len(raw_content) > 2_000_000:
+                    raise UsaspendingApiError(
+                        "The USAspending response was larger than Hail Mary's limit."
+                    )
+                charset = response.headers.get_content_charset() or "utf-8"
+        except urllib.error.HTTPError as exc:
+            raise UsaspendingApiError(
+                f"USAspending returned HTTP {exc.code}."
+            ) from exc
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            raise UsaspendingApiError(f"Could not reach USAspending: {exc}") from exc
+        if status_code != 200:
+            raise UsaspendingApiError(f"USAspending returned HTTP {status_code}.")
+        try:
+            decoded_text = raw_content.decode(charset, errors="replace")
+        except LookupError:
+            decoded_text = raw_content.decode("utf-8", errors="replace")
+        try:
+            response_payload = json.loads(decoded_text)
+        except json.JSONDecodeError as exc:
+            raise UsaspendingApiError(
+                "USAspending returned a response that was not valid JSON."
+            ) from exc
+        try:
+            parsed_response = UsaspendingAwardsResponse.model_validate(response_payload)
+        except ValidationError as exc:
+            detail = _first_validation_detail(exc)
+            raise UsaspendingApiError(
+                f"USAspending returned an unexpected response: {detail}"
+            ) from exc
+        return parsed_response.results
 
 
 @dataclass(frozen=True)
@@ -287,6 +495,109 @@ def prepare_public_research_results(
     )
 
 
+def collect_usaspending_awards(
+    *,
+    config: AppConfig,
+    company_names: list[str] | None = None,
+    limit: int = 10,
+    dry_run: bool = False,
+    client: UsaspendingAwardsClient | None = None,
+    collected_at: datetime | None = None,
+    timeout_seconds: float = 20.0,
+) -> UsaspendingCollectionRunSummary:
+    try:
+        config = validate_local_state(config)
+    except ConfigError as exc:
+        raise ResearchCollectionError(str(exc)) from exc
+    _ensure_live_public_research_enabled(config)
+    collected_at = _as_utc(collected_at or datetime.now(UTC))
+    companies = _clean_company_names(company_names or [])
+    if not companies:
+        raise ResearchCollectionError(
+            "Pass at least one --company value. Hail Mary will only send company "
+            "names you list to USAspending."
+        )
+    _validate_usaspending_limit(limit)
+    provider = _provider_by_id("usaspending")
+    deals = [ResearchCollectionDeal(company_name=company_name) for company_name in companies]
+    if dry_run:
+        return UsaspendingCollectionRunSummary(
+            collected_at=collected_at,
+            dry_run=True,
+            deals=[
+                ResearchCollectionDealSummary(company_name=deal.company_name)
+                for deal in deals
+            ],
+        )
+
+    awards_client = client or UrlLibUsaspendingAwardsClient()
+    results: list[ResearchResultInput] = []
+    deal_summaries: list[ResearchCollectionDealSummary] = []
+    for deal in deals:
+        try:
+            award_records = list(
+                awards_client.search_awards(
+                    deal.company_name,
+                    limit=limit,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
+        except UsaspendingApiError as exc:
+            raise ResearchCollectionError(str(exc)) from exc
+        deal_results = [
+            _research_result_from_usaspending_award(
+                deal,
+                award,
+                provider=provider,
+                collected_at=collected_at,
+            )
+            for award in award_records
+            if _exact_company_name_match(deal.company_name, award.recipient_name)
+        ]
+        results.extend(deal_results)
+        deal_summaries.append(
+            ResearchCollectionDealSummary(
+                company_name=deal.company_name,
+                result_count=len(deal_results),
+            )
+        )
+
+    if not results:
+        return UsaspendingCollectionRunSummary(
+            output_path=None,
+            collected_at=collected_at,
+            deals=deal_summaries,
+        )
+
+    try:
+        results_file = ResearchResultsFile.model_validate({"results": results})
+    except ValidationError as exc:
+        detail = _first_validation_detail(exc)
+        raise ResearchCollectionError(
+            f"Collected USAspending results did not pass validation: {detail}"
+        ) from exc
+
+    output_dir = config.data_dir / "research-results"
+    _ensure_private_directory(output_dir, private_root=config.data_dir)
+    output_path = _unique_usaspending_results_path(output_dir, collected_at)
+    payload = {
+        "results": [
+            result.model_dump(mode="json", exclude_none=True)
+            for result in results_file.results
+        ]
+    }
+    _write_private_json(
+        output_path,
+        json.dumps(payload, indent=2),
+        description="USAspending research results",
+    )
+    return UsaspendingCollectionRunSummary(
+        output_path=output_path,
+        collected_at=collected_at,
+        deals=deal_summaries,
+    )
+
+
 def _public_source_files(
     *,
     sec_form_d_results_path: Path | None,
@@ -364,6 +675,125 @@ def _load_sec_form_d_search_results(path: Path) -> SecFormDSearchResultsFile:
         provider_id="sec_form_d",
         description="SEC Form D results",
     )
+
+
+def _ensure_live_public_research_enabled(config: AppConfig) -> None:
+    if config.local_only:
+        raise ResearchCollectionError(
+            "Local-only mode is on. Set HAILMARY_LOCAL_ONLY=false before collecting "
+            "USAspending results."
+        )
+    if not config.enable_web_research:
+        raise ResearchCollectionError(
+            "Web research is disabled. Set HAILMARY_ENABLE_WEB_RESEARCH=true before "
+            "collecting USAspending results."
+        )
+
+
+def _validate_usaspending_limit(limit: int) -> None:
+    if limit < 1 or limit > 25:
+        raise ResearchCollectionError(
+            "USAspending result limit must be between 1 and 25 per company."
+        )
+
+
+def _validate_usaspending_api_url(url: str) -> None:
+    validate_provider_source_url(
+        "usaspending",
+        url,
+        field_name="USAspending API URL",
+    )
+    if url != USASPENDING_AWARDS_ENDPOINT:
+        raise UsaspendingApiError(
+            "USAspending redirected the request away from the expected public API endpoint."
+        )
+
+
+def _usaspending_awards_payload(company_name: str, *, limit: int) -> dict[str, object]:
+    return {
+        "subawards": False,
+        "limit": limit,
+        "page": 1,
+        "sort": "Award Amount",
+        "order": "desc",
+        "filters": {
+            "recipient_search_text": [company_name],
+            "award_type_codes": USASPENDING_AWARD_TYPE_CODES,
+        },
+        "fields": USASPENDING_AWARD_FIELDS,
+    }
+
+
+def _research_result_from_usaspending_award(
+    deal: ResearchCollectionDeal,
+    award: UsaspendingAwardRecord,
+    *,
+    provider: ResearchProvider,
+    collected_at: datetime,
+) -> ResearchResultInput:
+    source_url = _usaspending_award_url(award.generated_internal_id)
+    validate_provider_source_url(provider.id, source_url)
+    try:
+        return ResearchResultInput(
+            company_name=deal.company_name,
+            provider_id=provider.id,
+            provider_name=provider.name,
+            title=f"USAspending award {award.award_id} for {award.recipient_name}",
+            text=_usaspending_award_text(award),
+            retrieved_at=collected_at,
+            source_url=source_url,
+            confidence=(
+                "medium: exact recipient name match from the USAspending public API; "
+                "Hail Mary did not verify entity identity"
+            ),
+            licensing_notes=(
+                f"{provider.licensing_notes} Automatically fetched from the public "
+                "USAspending API. Confirm recipient identity before relying on it."
+            ),
+            source_kind=provider.source_kind,
+        )
+    except ValidationError as exc:
+        detail = _first_validation_detail(exc)
+        raise ResearchCollectionError(
+            f"USAspending result for {deal.company_name} is incomplete: {detail}"
+        ) from exc
+
+
+def _usaspending_award_url(generated_internal_id: str) -> str:
+    return f"https://www.usaspending.gov/award/{quote(generated_internal_id, safe='')}"
+
+
+def _usaspending_award_text(award: UsaspendingAwardRecord) -> str:
+    parts = [
+        f"Award ID: {award.award_id}.",
+        f"Recipient: {award.recipient_name}.",
+    ]
+    if award.recipient_uei:
+        parts.append(f"Recipient UEI: {award.recipient_uei}.")
+    if award.award_amount is not None:
+        parts.append(f"Award amount: {_format_money(award.award_amount)}.")
+    if award.award_type:
+        parts.append(f"Award type: {award.award_type}.")
+    if award.start_date or award.end_date:
+        date_range = " to ".join(
+            date for date in [award.start_date, award.end_date] if date
+        )
+        parts.append(f"Period: {date_range}.")
+    if award.awarding_agency:
+        parts.append(f"Awarding agency: {award.awarding_agency}.")
+    if award.awarding_sub_agency:
+        parts.append(f"Awarding sub-agency: {award.awarding_sub_agency}.")
+    if award.funding_agency:
+        parts.append(f"Funding agency: {award.funding_agency}.")
+    if award.funding_sub_agency:
+        parts.append(f"Funding sub-agency: {award.funding_sub_agency}.")
+    if award.description:
+        parts.append(f"Description: {award.description}.")
+    return " ".join(parts)
+
+
+def _format_money(value: float) -> str:
+    return f"${value:,.2f}"
 
 
 def _clean_company_names(company_names: list[str]) -> list[str]:
@@ -450,6 +880,16 @@ def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
 
 def _unique_results_path(output_dir: Path, collected_at: datetime) -> Path:
     base_name = f"public-research-results-{collected_at.strftime('%Y%m%d-%H%M%S')}"
+    candidate = output_dir / f"{base_name}.json"
+    suffix = 2
+    while candidate.exists():
+        candidate = output_dir / f"{base_name}-{suffix}.json"
+        suffix += 1
+    return candidate
+
+
+def _unique_usaspending_results_path(output_dir: Path, collected_at: datetime) -> Path:
+    base_name = f"usaspending-results-{collected_at.strftime('%Y%m%d-%H%M%S')}"
     candidate = output_dir / f"{base_name}.json"
     suffix = 2
     while candidate.exists():

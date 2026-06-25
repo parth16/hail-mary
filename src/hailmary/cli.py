@@ -46,6 +46,7 @@ from hailmary.research import (
     ResearchTemplateError,
     WebResearchError,
     builtin_research_providers,
+    collect_usaspending_awards,
     collect_web_research,
     import_research_results,
     prepare_meridian_workflow,
@@ -1022,6 +1023,117 @@ def prepare_public_research_results_command(
         )
     )
     _print_section("Public research results prepared", result_lines, style="green")
+
+
+@app.command("collect-usaspending-awards")
+def collect_usaspending_awards_command(
+    company: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--company",
+            help=(
+                "Company to search for in USAspending. Use more than once for "
+                "multiple companies."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=25,
+            help="Maximum USAspending award records to request per company.",
+        ),
+    ] = 10,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show what would be sent to USAspending without contacting the API.",
+        ),
+    ] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should write the private results file.",
+        ),
+    ] = None,
+) -> None:
+    """Collect public USAspending award evidence for exact recipient-name matches."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = collect_usaspending_awards(
+            config=config,
+            company_names=company or [],
+            limit=limit,
+            dry_run=dry_run,
+        )
+    except ResearchCollectionError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    company_word = "company" if result.deal_count == 1 else "companies"
+    result_word = "result" if result.result_count == 1 else "results"
+    if result.dry_run:
+        _print_section(
+            "USAspending preview",
+            [
+                _plain(
+                    f"Dry run: Hail Mary would send {result.deal_count} "
+                    f"{company_word} to the USAspending public API."
+                ),
+                _plain(f"At most {limit} award records would be requested per company."),
+                _plain("No API requests were sent and no results file was saved."),
+            ],
+            style="yellow",
+        )
+        return
+
+    if result.output_path is None:
+        _print_section(
+            "USAspending results",
+            [
+                _plain(
+                    f"No exact recipient-name USAspending {result_word} were found "
+                    f"for {result.deal_count} {company_word}."
+                ),
+                _plain("No results file was saved."),
+            ],
+            style="yellow",
+        )
+        return
+
+    data_dir_option = (
+        f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
+    )
+    next_command = (
+        f"`hailmary import-research-results {shlex.quote(str(result.output_path))}"
+        f"{data_dir_option} --dry-run`."
+    )
+    lines = [
+        _plain(
+            f"Collected {result.result_count} USAspending {result_word} for "
+            f"{result.deal_count} {company_word}."
+        ),
+        _plain(f"Saved the private JSON results file to {result.output_path}."),
+        _plain(
+            "Only exact recipient-name matches were prepared. Confirm entity identity "
+            "before relying on the evidence."
+        ),
+        _plain(f"Next, run {next_command}"),
+    ]
+    zero_result_companies = [deal.company_name for deal in result.deals if deal.result_count == 0]
+    if zero_result_companies:
+        lines.append(
+            _plain(
+                f"No exact USAspending matches were prepared for: "
+                f"{', '.join(zero_result_companies)}."
+            )
+        )
+    _print_section("USAspending results collected", lines, style="green")
 
 
 @app.command("prepare-meridian-workflow")
