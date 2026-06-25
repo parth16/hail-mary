@@ -255,6 +255,33 @@ def test_research_workflow_command_creates_artifacts_and_reports_status(
     assert len(list((data_dir / "meridian-workflows").glob("*.json"))) == 1
 
 
+def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+
+    result = runner.invoke(
+        app,
+        [
+            "research-workflow",
+            "--company",
+            "Acme AI",
+            "--meridian-url",
+            "https://portal.angellist.com/m/example/invest?token=secret",
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+    output = _plain_cli_output(result.output)
+    assert "Meridian URL cannot include extra text" in output
+    assert not (data_dir / "research-plans").exists()
+    assert "token=secret" not in output
+
+
 def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled(
     tmp_path: Path,
 ) -> None:
@@ -338,6 +365,43 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
     assert result.blocking_issue_count == 0
     assert result.no_prepared_result_companies == []
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
+
+
+def test_run_research_workflow_treats_live_collection_failures_as_blocking(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    web_client = _FailingWebResearchClient("Could not fetch the public page.")
+    sec_client = _FakeSecFormDFilingsClient(
+        {},
+        error=SecFormDApiError("SEC User-Agent must include a contact email."),
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com/acme",
+        created_at=BUILT_AT,
+        web_client=web_client,
+        sec_form_d_client=sec_client,
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    assert web_client.calls == ["https://example.com/acme"]
+    assert result.blocking_issue_count == 2
+    error_messages = [issue.message for issue in result.issues if issue.severity == "error"]
+    assert any("Could not fetch the public page." in message for message in error_messages)
+    assert any("SEC User-Agent" in message for message in error_messages)
 
 
 def test_run_research_workflow_reports_local_public_skips_and_no_results(
@@ -5324,6 +5388,33 @@ def test_import_research_results_reports_original_template_row_number(
         )
 
 
+def test_import_research_results_reports_malformed_retrieved_at_as_invalid(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "malformed-retrieved-at-results.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                retrieved_at="not a timestamp",
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError) as exc_info:
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+    message = str(exc_info.value)
+    assert "retrieved_at is invalid" in message
+    assert "retrieved_at is required" not in message
+
+
 def test_import_research_results_does_not_skip_incomplete_handwritten_rows(
     tmp_path: Path,
 ) -> None:
@@ -6123,6 +6214,24 @@ class _FakeWebResearchClient:
         _ = (provider_id, timeout_seconds, max_bytes)
         self.calls.append(url)
         return self.responses[url]
+
+
+class _FailingWebResearchClient:
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls: list[str] = []
+
+    def fetch(
+        self,
+        url: str,
+        *,
+        provider_id: str,
+        timeout_seconds: float,
+        max_bytes: int,
+    ) -> WebFetchResponse:
+        _ = (provider_id, timeout_seconds, max_bytes)
+        self.calls.append(url)
+        raise WebResearchFetchError(self.message)
 
 
 class _FakeHeaders:

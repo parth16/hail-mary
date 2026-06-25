@@ -21,7 +21,7 @@ from .collection import (
     prepare_public_research_results,
 )
 from .importer import ResearchImportError, import_research_results
-from .meridian import prepare_meridian_workflow
+from .meridian import clean_meridian_url, prepare_meridian_workflow
 from .planner import prepare_research_plan
 from .schemas import (
     ResearchImportDealSummary,
@@ -204,11 +204,14 @@ def run_research_workflow(
 ) -> ResearchWorkflowRunSummary:
     created_at = _as_utc(created_at or datetime.now(UTC))
     try:
+        cleaned_meridian_url = (
+            clean_meridian_url(meridian_url) if meridian_url is not None else None
+        )
         plan_result = prepare_research_plan(
             config=config,
             company_names=company_names or [],
             website_url=website_url,
-            meridian_url=meridian_url,
+            meridian_url=cleaned_meridian_url,
             include_paid=include_paid,
             created_at=created_at,
         )
@@ -226,12 +229,12 @@ def run_research_workflow(
     meridian_workflow_path: Path | None = None
     meridian_result_template_path: Path | None = None
 
-    if meridian_url is not None:
+    if cleaned_meridian_url is not None:
         try:
             meridian_result = prepare_meridian_workflow(
                 config=config,
                 company_name=plan_result.plan.deals[0].company_name,
-                meridian_url=meridian_url,
+                meridian_url=cleaned_meridian_url,
                 created_at=created_at,
             )
             meridian_workflow_path = meridian_result.output_path
@@ -289,10 +292,19 @@ def run_research_workflow(
             if collection.error is not None:
                 issues.append(
                     ResearchWorkflowIssue(
-                        severity="warning",
+                        severity="error",
                         source=collection.source_name,
                         message=collection.error,
                     )
+                )
+            if collection.kind == "web":
+                issues.extend(
+                    ResearchWorkflowIssue(
+                        severity="error",
+                        source=collection.source_name,
+                        message=warning,
+                    )
+                    for warning in collection.warnings
                 )
     else:
         issues.append(
