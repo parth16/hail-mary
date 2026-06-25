@@ -246,7 +246,7 @@ def test_spreadsheets_are_recorded_with_extracted_text(tmp_path: Path) -> None:
     assert saved_document["tables"]
 
 
-def test_images_are_skipped_until_ocr_exists(tmp_path: Path) -> None:
+def test_images_are_ingested_as_vision_needed_documents(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "ImageCo"
     company.mkdir(parents=True)
@@ -255,8 +255,24 @@ def test_images_are_skipped_until_ocr_exists(tmp_path: Path) -> None:
 
     summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
 
-    assert summary.document_count == 0
-    assert summary.skipped_files == ["ImageCo/photo.jpg", "ImageCo/scan.png"]
+    assert summary.document_count == 2
+    assert summary.skipped_files == []
+    assert summary.deals[0].evidence_count == 0
+    documents = summary.deals[0].documents
+    assert {document.source.file_type for document in documents} == {FileType.JPG, FileType.PNG}
+    assert all(
+        document.source.extraction_quality == ExtractionQuality.LOW
+        for document in documents
+    )
+    assert all(document.source.ocr_recommended for document in documents)
+    assert all(document.source.vision_recommended for document in documents)
+    assert all(document.pages[0].needs_ocr for document in documents)
+    assert all(document.pages[0].vision_recommended for document in documents)
+
+    saved_document = json.loads(documents[0].output_path.read_text(encoding="utf-8"))
+    assert saved_document["source"]["ocr_recommended"]
+    assert saved_document["source"]["vision_recommended"]
+    assert saved_document["pages"][0]["needs_ocr"]
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
