@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 
 from hailmary.config import CHECK_SIZE_TIERS, AppConfig
 from hailmary.schemas.evidence import (
@@ -42,7 +42,7 @@ TRACTION_NEGATED_SIGNAL = (
     r"(?:customers?|revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)"
 )
 TRACTION_NEGATED_QUALIFIERS = (
-    r"(?:(?:meaningful|material|measurable|real|recurring|commercial|signed|"
+    r"(?:(?:any|actual|customer|meaningful|material|measurable|real|recurring|commercial|signed|"
     r"active|current|clear|validated|paying|paid|confirmed|contracted|"
     r"production|live)\s+){0,3}"
 )
@@ -60,6 +60,14 @@ NEGATED_TRACTION_PATTERNS = (
     re.compile(
         rf"\bwithout\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
         rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\black(?:s|ing)?\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
+        rf"(?:(?:(?:\s*,\s*(?:(?:or|and)\s+)?)|\s+(?:or|and)\s+)"
+        rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b))*",
         re.IGNORECASE,
     ),
     re.compile(r"\bnot\s+(?:yet\s+)?(?:generating\s+)?revenue\b", re.IGNORECASE),
@@ -80,6 +88,27 @@ NEGATED_FUNDING_PATTERNS = (
     re.compile(
         r"\bwithout\s+(?:a\s+)?(?:(?:committed|identified|confirmed|named|"
         r"signed|secured|current|active)\s+)?lead\s+investor\b"
+        rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\black(?:s|ing)?\s+(?:a\s+|any\s+)?(?:(?:committed|identified|"
+        r"confirmed|named|signed|secured|current|active)\s+)?lead\s+investor\b"
+        rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\black(?:s|ing)?\s+(?:any\s+)?institutional(?:\s+investors?)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bhas\s+not\s+(?:secured|identified|confirmed|named|signed)\s+"
+        r"(?:a\s+)?lead\s+investor\b"
+        rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:does|do|did)\s+not\s+have\s+(?:a\s+)?lead\s+investor\b"
         rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
         re.IGNORECASE,
     ),
@@ -626,10 +655,17 @@ def _claim_money_value(claim: ClaimRecord) -> int | None:
     normalized_prefix = "usd_cents:"
     if claim.normalized_value.startswith(normalized_prefix):
         try:
-            return int(claim.normalized_value.removeprefix(normalized_prefix)) // 100
+            cents = int(claim.normalized_value.removeprefix(normalized_prefix))
         except ValueError:
             return None
+        return _ceil_cents_to_dollars(cents)
     return _money_text_to_dollars(claim.value)
+
+
+def _ceil_cents_to_dollars(cents: int) -> int:
+    if cents > 0:
+        return (cents + 99) // 100
+    return cents // 100
 
 
 def _money_text_to_dollars(raw_value: str) -> int | None:
@@ -649,7 +685,11 @@ def _money_text_to_dollars(raw_value: str) -> int | None:
             multiplier = suffix_multiplier
             break
     try:
-        return int((Decimal(normalized) * multiplier).to_integral_value())
+        return int(
+            (Decimal(normalized) * multiplier).to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        )
     except InvalidOperation:
         return None
 

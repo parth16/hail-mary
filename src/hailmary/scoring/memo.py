@@ -121,8 +121,10 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
 
 def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
     verified_claims = _verified_claims(store)
+    round_summary = _memo_metadata_value(_round_summary(verified_claims))
+    valuation_summary = _memo_metadata_value(_valuation_summary(verified_claims))
     lines = [
-        f"# Hail Mary Investment Memo: {scored_deal.company_name}",
+        f"# Hail Mary Investment Memo: {_memo_metadata_value(scored_deal.company_name)}",
         "",
         "## Decision",
         "",
@@ -130,33 +132,37 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         f"**Suggested check:** {_format_check_size(scored_deal.check_size)}",
         f"**Score:** {scored_deal.total_score}/{scored_deal.max_score}",
         f"**Confidence:** {scored_deal.confidence}",
-        f"**One-line reason:** {scored_deal.one_line_reason}",
+        f"**One-line reason:** {_memo_metadata_value(scored_deal.one_line_reason)}",
         "**Deadline:** unknown",
-        f"**Round / Instrument:** {_round_summary(verified_claims)} / unknown",
-        f"**Valuation / Cap:** {_valuation_summary(verified_claims)}",
+        f"**Round / Instrument:** {round_summary} / unknown",
+        f"**Valuation / Cap:** {valuation_summary}",
         "",
         "## Kill Gates",
     ]
     for gate in scored_deal.kill_gates:
         status = "TRIGGERED" if gate.triggered else "Clear"
-        lines.append(f"- {status}: {gate.name}. {gate.reason}")
+        lines.append(
+            f"- {status}: {_memo_metadata_value(gate.name)}. "
+            f"{_memo_metadata_value(gate.reason)}"
+        )
 
     lines.extend(["", "## Score Factors"])
     for factor in scored_deal.score_factors:
         evidence_text = _evidence_reference_text(factor.evidence_ids)
         lines.append(
-            f"- {factor.name}: {factor.score}/{factor.max_score}. "
-            f"{factor.explanation}{evidence_text}"
+            f"- {_memo_metadata_value(factor.name)}: {factor.score}/{factor.max_score}. "
+            f"{_memo_metadata_value(factor.explanation)}{evidence_text}"
         )
 
     lines.extend(["", "## Verified Deal Terms"])
     if verified_claims:
         for claim in verified_claims:
             citation_ids = ", ".join(
-                citation.evidence_id for citation in claim.citations
+                _memo_metadata_value(citation.evidence_id)
+                for citation in claim.citations
             )
             lines.append(
-                f"- {claim.label}: {claim.value} "
+                f"- {_memo_metadata_value(claim.label)}: {_memo_metadata_value(claim.value)} "
                 f"(evidence: {citation_ids or 'none'})."
             )
     else:
@@ -165,8 +171,8 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
     lines.extend(["", "## Diligence Questions"])
     for question in scored_deal.diligence_questions:
         lines.append(
-            f"{question.priority}. {question.question} "
-            f"Reason: {question.reason}"
+            f"{question.priority}. {_memo_metadata_value(question.question)} "
+            f"Reason: {_memo_metadata_value(question.reason)}"
         )
 
     lines.extend(["", "## Evidence Used"])
@@ -593,7 +599,10 @@ def _first_claim_value(
 def _evidence_reference_text(evidence_ids: list[str]) -> str:
     if not evidence_ids:
         return ""
-    return f" Evidence: {', '.join(evidence_ids)}."
+    formatted_ids = ", ".join(
+        _memo_metadata_value(evidence_id) for evidence_id in evidence_ids
+    )
+    return f" Evidence: {formatted_ids}."
 
 
 def _format_check_size(check_size: int) -> str:
