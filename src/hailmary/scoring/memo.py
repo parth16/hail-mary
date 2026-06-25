@@ -75,11 +75,7 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
     scored_by_index: dict[int, ScoredDeal] = {}
     ranked_inputs = sorted(
         enumerate(scoring_inputs),
-        key=lambda item: (
-            item[1][1].recommendation == Recommendation.INVEST,
-            item[1][1].total_score,
-        ),
-        reverse=True,
+        key=lambda item: _portfolio_rank_key(item[1][1]),
     )
     for index, (store, _, _) in ranked_inputs:
         scored_deal = score_evidence_store(
@@ -283,10 +279,11 @@ def _portfolio_rank_key(deal: ScoredDeal) -> tuple[int, int, int, int, str, str]
 
 
 def _check_tier_text(config: AppConfig) -> str:
+    maximum_nonzero_check = min(config.max_check, config.capital_budget)
     allowed_tiers = [
         tier
         for tier in CHECK_SIZE_TIERS
-        if tier == 0 or config.min_check <= tier <= config.max_check
+        if tier == 0 or config.min_check <= tier <= maximum_nonzero_check
     ]
     return ", ".join(_format_check_size(tier) for tier in allowed_tiers)
 

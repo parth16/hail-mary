@@ -1062,9 +1062,7 @@ def test_score_latest_ingestion_writes_private_portfolio_report(tmp_path: Path) 
     ]
     _write_ingestion_summary(tmp_path, stores)
 
-    result = score_latest_ingestion(
-        config=AppConfig(data_dir=tmp_path / "data", capital_budget=2_500)
-    )
+    result = score_latest_ingestion(config=AppConfig(data_dir=tmp_path / "data"))
 
     portfolio_report_path = result.portfolio_report_path
     assert portfolio_report_path == tmp_path / "data" / "reports" / (
@@ -1110,6 +1108,39 @@ def test_render_portfolio_report_ranks_final_scored_deals_deterministically(
     assert "No available check size" in report
 
 
+def test_score_latest_ingestion_allocates_tied_deals_in_report_rank_order(
+    tmp_path: Path,
+) -> None:
+    later_company_store = _strong_store(
+        deal_id="deal_zeta",
+        company_name="Zeta Score",
+    )
+    earlier_company_store = _strong_store(
+        deal_id="deal_alpha",
+        company_name="Alpha Score",
+    )
+    _write_ingestion_summary(tmp_path, [later_company_store, earlier_company_store])
+
+    result = score_latest_ingestion(
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=2_500)
+    )
+
+    scored_by_company = {deal.company_name: deal for deal in result.scored_deals}
+    assert scored_by_company["Alpha Score"].recommendation == Recommendation.INVEST
+    assert scored_by_company["Alpha Score"].check_size == 2_500
+    assert scored_by_company["Zeta Score"].recommendation == Recommendation.PASS
+    assert scored_by_company["Zeta Score"].check_size == 0
+
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    alpha_row = "| 1 | Alpha Score | INVEST | $2.5K |"
+    zeta_row = "| 2 | Zeta Score | PASS | $0 |"
+    assert alpha_row in report
+    assert zeta_row in report
+    assert report.index(alpha_row) < report.index(zeta_row)
+    assert "| $2.5K | $0 |" in report
+
+
 def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> None:
     strong_scored = score_evidence_store(
         _strong_store(deal_id="deal_strong", company_name="StrongCo"),
@@ -1150,6 +1181,26 @@ def test_render_portfolio_report_filters_allowed_check_sizes_by_config() -> None
     )
     assert allowed_line == "- Allowed check sizes: $0, $2.5K, $5K"
     assert "$1K" not in allowed_line
+    assert "$7.5K" not in allowed_line
+    assert "$10K" not in allowed_line
+
+
+def test_render_portfolio_report_caps_allowed_check_sizes_by_capital_budget() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_strong", company_name="StrongCo"),
+        config=AppConfig(data_dir=Path("data"), capital_budget=2_500),
+    )
+
+    report = render_portfolio_report(
+        [scored],
+        config=AppConfig(data_dir=Path("data"), capital_budget=2_500),
+    )
+
+    allowed_line = next(
+        line for line in report.splitlines() if line.startswith("- Allowed check sizes:")
+    )
+    assert allowed_line == "- Allowed check sizes: $0, $1K, $2.5K"
+    assert "$5K" not in allowed_line
     assert "$7.5K" not in allowed_line
     assert "$10K" not in allowed_line
 
