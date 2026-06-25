@@ -100,3 +100,4 @@ Rules for all future Codex runs:
 - PR #49: PDF OCR merging must preserve useful existing page text without turning low-text OCR fragments into evidence, and duplicate removal should use bounded or line-level matching instead of broad substring checks so short labels are not dropped.
 - PR #49 loop 3: OCR merge duplicate checks must preserve repeated line counts, because repeated values such as identical valuation and round-size amounts can be separate evidence and should not be dropped when OCR misses one occurrence.
 - PR #49 loop 4: Evidence source spans should survive OCR merge whitespace normalization when the evidence text is the full cleaned page; drop spans only when boilerplate, table removal, or partial evidence changes the mapped text.
+- PR #49 loop 5: OCR merge dedupe should recognize terms wrapped across existing PDF lines before appending one-line OCR text, otherwise repeated deal terms can create duplicate evidence and claims.

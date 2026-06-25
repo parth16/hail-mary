@@ -616,7 +616,18 @@ def _merge_existing_page_text_with_ocr(*, existing_text: str, ocr_text: str) -> 
         if remaining_existing_counts[normalized_line] > 0:
             remaining_existing_counts[normalized_line] -= 1
             continue
-        merged_lines.append(clean_line)
+        suffix = _ocr_line_suffix_after_existing_wrapped_prefix(
+            clean_line,
+            existing_lines=merged_lines,
+        )
+        if suffix is None:
+            merged_lines.append(clean_line)
+        elif suffix:
+            normalized_suffix = _normalize_text_for_merge(suffix)
+            if remaining_existing_counts[normalized_suffix] > 0:
+                remaining_existing_counts[normalized_suffix] -= 1
+            else:
+                merged_lines.append(suffix)
     return "\n\n".join(merged_lines)
 
 
@@ -630,6 +641,53 @@ def _normalized_nonblank_lines(text: str) -> list[str]:
 
 def _normalize_text_for_merge(text: str) -> str:
     return re.sub(r"\s+", " ", text.casefold()).strip()
+
+
+def _ocr_line_suffix_after_existing_wrapped_prefix(
+    ocr_line: str,
+    *,
+    existing_lines: list[str],
+) -> str | None:
+    ocr_tokens = _normalized_token_spans(ocr_line)
+    if len(ocr_tokens) < 2:
+        return None
+
+    existing_tokens = [
+        (token, line_index)
+        for line_index, line in enumerate(existing_lines)
+        for token, _, _ in _normalized_token_spans(line)
+    ]
+    best_match_length = 0
+    for start_index in range(len(existing_tokens)):
+        line_indexes: set[int] = set()
+        match_length = 0
+        while (
+            match_length < len(ocr_tokens)
+            and start_index + match_length < len(existing_tokens)
+            and existing_tokens[start_index + match_length][0]
+            == ocr_tokens[match_length][0]
+        ):
+            line_indexes.add(existing_tokens[start_index + match_length][1])
+            match_length += 1
+
+        if len(line_indexes) >= 2 and match_length > best_match_length:
+            best_match_length = match_length
+
+    if best_match_length == 0:
+        return None
+    if best_match_length == len(ocr_tokens):
+        return ""
+    suffix_start = ocr_tokens[best_match_length - 1][2]
+    return ocr_line[suffix_start:].lstrip(" \t\r\n.,;:-")
+
+
+def _normalized_token_spans(text: str) -> list[tuple[str, int, int]]:
+    spans: list[tuple[str, int, int]] = []
+    for match in re.finditer(r"\S+", text):
+        token = _normalize_text_for_merge(match.group(0)).strip(".,;:!?()[]{}")
+        if token:
+            spans.append((token, match.start(), match.end()))
+    return spans
 
 
 def _refresh_page_source_spans(pages: list[ExtractedPage]) -> None:
