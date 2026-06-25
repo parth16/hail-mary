@@ -20,7 +20,9 @@ from hailmary.schemas.documents import (
     ExtractionQuality,
     FileType,
     IngestedDeal,
+    IngestedDocument,
     IngestionSummary,
+    SourceDocument,
     SourceKind,
 )
 from hailmary.schemas.evidence import (
@@ -790,6 +792,78 @@ def test_review_evidence_shows_table_index_with_page_number(tmp_path: Path) -> N
     assert "page 2, table 3" in normalized_output
 
 
+def test_review_evidence_flags_documents_without_evidence_and_ocr_needed(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_readable",
+        "Valuation cap $8M.",
+        deal_id="deal_mixed_docs",
+        document_id="doc_readable",
+        document_path=Path("readable-memo.txt"),
+    )
+    store = _review_store(
+        deal_id="deal_mixed_docs",
+        company_name="MixedDocsCo",
+        evidence=[evidence],
+    )
+    documents = [
+        _review_ingested_document(
+            deal_id="deal_mixed_docs",
+            document_id="doc_readable",
+            path=Path("readable-memo.txt"),
+        ),
+        _review_ingested_document(
+            deal_id="deal_mixed_docs",
+            document_id="doc_scan",
+            path=Path("scan-only.png"),
+            file_type=FileType.PNG,
+            extraction_quality=ExtractionQuality.LOW,
+            ocr_recommended=True,
+            vision_recommended=True,
+        ),
+    ]
+    data_dir = _write_review_ingestion_summary(
+        tmp_path,
+        [store],
+        documents_by_deal_id={"deal_mixed_docs": documents},
+    )
+
+    result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
+    normalized_output = " ".join(result.output.split())
+
+    assert result.exit_code == 0, result.output
+    assert "scan-only.png" in normalized_output
+    assert "Documents with no usable evidence" in normalized_output
+    assert "Documents needing OCR review" in normalized_output
+    assert "No review issues found" not in normalized_output
+
+
+def test_review_evidence_shows_exact_external_source_reference(tmp_path: Path) -> None:
+    source_url = "https://www.sec.gov/Archives/edgar/data/example"
+    evidence = _review_evidence_record(
+        "ev_external_lineage",
+        "ExampleCo filed a Form D.",
+        deal_id="deal_external_lineage",
+        document_id="external_doc",
+        document_path=Path("external-research/sec/example.json"),
+        source_kind=SourceKind.WEB,
+        source_url=source_url,
+    )
+    store = _review_store(
+        deal_id="deal_external_lineage",
+        company_name="ExternalLineageCo",
+        evidence=[evidence],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "Exact source" in result.output
+    assert source_url in result.output
+
+
 def _review_evidence_record(
     evidence_id: str,
     text: str,
@@ -803,6 +877,8 @@ def _review_evidence_record(
     ocr_applied: bool = False,
     ocr_confidence: float | None = None,
     external_confidence: str | None = "high: exact synthetic source",
+    source_url: str | None = None,
+    source_api: str | None = None,
 ) -> EvidenceRecord:
     return EvidenceRecord(
         id=evidence_id,
@@ -821,6 +897,8 @@ def _review_evidence_record(
         ocr_confidence=ocr_confidence,
         source_freshness=source_freshness,
         external_confidence=external_confidence if source_kind != SourceKind.LOCAL_FILE else None,
+        source_url=source_url,
+        source_api=source_api,
     )
 
 
@@ -907,6 +985,8 @@ def _review_store(
 def _write_review_ingestion_summary(
     tmp_path: Path,
     stores: list[EvidenceStore],
+    *,
+    documents_by_deal_id: dict[str, list[IngestedDocument]] | None = None,
 ) -> Path:
     data_dir = tmp_path / "data"
     processed_dir = data_dir / "processed"
@@ -921,7 +1001,7 @@ def _write_review_ingestion_summary(
             IngestedDeal(
                 id=store.deal_id,
                 company_name=store.company_name,
-                documents=[],
+                documents=(documents_by_deal_id or {}).get(store.deal_id, []),
                 evidence_store_path=store_path,
                 evidence_count=store.evidence_count,
                 claim_count=store.claim_count,
@@ -937,3 +1017,34 @@ def _write_review_ingestion_summary(
     )
     summary.summary_path.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
     return data_dir
+
+
+def _review_ingested_document(
+    *,
+    deal_id: str,
+    document_id: str,
+    path: Path,
+    file_type: FileType = FileType.TXT,
+    extraction_quality: ExtractionQuality = ExtractionQuality.HIGH,
+    ocr_recommended: bool = False,
+    vision_recommended: bool = False,
+) -> IngestedDocument:
+    return IngestedDocument(
+        source=SourceDocument(
+            id=document_id,
+            deal_id=deal_id,
+            path=path,
+            source_kind=SourceKind.LOCAL_FILE,
+            document_type=DocumentType.MEMO,
+            file_type=file_type,
+            title=path.name,
+            ingested_at=datetime(2026, 1, 1, tzinfo=UTC),
+            sha256="synthetic-test-sha",
+            extraction_quality=extraction_quality,
+            ocr_recommended=ocr_recommended,
+            vision_recommended=vision_recommended,
+        ),
+        pages=[],
+        tables=[],
+        output_path=Path("processed") / f"{document_id}.json",
+    )

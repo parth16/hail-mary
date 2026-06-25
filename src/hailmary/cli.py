@@ -60,6 +60,7 @@ from hailmary.research import (
     prepare_research_plan,
     prepare_research_results_template,
 )
+from hailmary.schemas.documents import SourceKind
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 
 app = typer.Typer(
@@ -510,6 +511,9 @@ def _print_deal_evidence_review(
     console.print(Rule(deal_review.company_name, style="cyan"))
     console.print(_deal_review_summary_table(deal_review))
     console.print(_source_document_review_table(deal_review))
+    external_sources_table = _external_source_review_table(deal_review)
+    if external_sources_table is not None:
+        console.print(external_sources_table)
     console.print(_claim_review_table(deal_review))
     console.print(_conflict_review_table(deal_review))
     console.print(_issue_review_table(deal_review))
@@ -535,7 +539,7 @@ def _source_document_review_table(deal_review: DealEvidenceReview) -> Table:
         show_edge=False,
         pad_edge=False,
     )
-    table.add_column("Source document", style="bold cyan")
+    table.add_column("Source document", style="bold cyan", overflow="fold")
     table.add_column("Source")
     table.add_column("Evidence", justify="right")
     table.add_column("Missing source spans", justify="right")
@@ -561,6 +565,32 @@ def _source_document_review_table(deal_review: DealEvidenceReview) -> Table:
             _plain(str(summary.missing_source_span_count)),
             _plain(str(summary.ocr_applied_count)),
             _plain(str(freshness_issues)),
+        )
+    return table
+
+
+def _external_source_review_table(deal_review: DealEvidenceReview) -> Table | None:
+    external_records = [
+        evidence
+        for evidence in deal_review.evidence_records
+        if evidence.source_kind != SourceKind.LOCAL_FILE
+    ]
+    if not external_records:
+        return None
+
+    table = Table(
+        title="Exact external sources",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Evidence ID", style="bold cyan", no_wrap=True)
+    table.add_column("Exact source", overflow="fold")
+    for evidence in external_records:
+        table.add_row(
+            _plain(evidence.id),
+            _plain(_evidence_source_reference(evidence)),
         )
     return table
 
@@ -660,7 +690,7 @@ def _evidence_record_review_table(
     )
     table.add_column("Evidence ID", style="bold cyan")
     table.add_column("Source document")
-    table.add_column("Location")
+    table.add_column("Location", no_wrap=True)
     table.add_column("Freshness")
     table.add_column("Flags")
     if excerpt_limit is not None:
@@ -690,6 +720,19 @@ def _evidence_record_review_table(
             row.append(_plain(_bounded_excerpt(evidence.text, excerpt_limit)))
         table.add_row(*row)
     return table
+
+
+def _evidence_source_reference(evidence: object) -> str:
+    source_url = getattr(evidence, "source_url", None)
+    source_api = getattr(evidence, "source_api", None)
+    source_kind = getattr(evidence, "source_kind", None)
+    if isinstance(source_url, str) and source_url.strip():
+        return source_url.strip()
+    if isinstance(source_api, str) and source_api.strip():
+        return source_api.strip()
+    if source_kind is not None and str(source_kind) != str(SourceKind.LOCAL_FILE):
+        return "not recorded"
+    return ""
 
 
 def _evidence_location(evidence: object) -> str:

@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from hailmary.config import AppConfig
 from hailmary.evidence.store import verify_citation
 from hailmary.ingest.ocr import LOW_OCR_CONFIDENCE_THRESHOLD
-from hailmary.schemas.documents import IngestedDeal, IngestionSummary, SourceKind
+from hailmary.schemas.documents import IngestedDeal, IngestedDocument, IngestionSummary, SourceKind
 from hailmary.schemas.evidence import (
     ClaimConflict,
     ClaimRecord,
@@ -33,6 +33,7 @@ class SourceDocumentEvidenceSummary:
     document_id: str
     document_path: Path
     source_kind: SourceKind
+    source_reference: str | None
     evidence_count: int
     missing_source_span_count: int
     ocr_applied_count: int
@@ -132,6 +133,7 @@ def review_evidence(
             evidence_id_found = True
         deal_reviews.append(
             _deal_review(
+                deal,
                 store,
                 evidence_store_path=store_path,
                 evidence_id=evidence_id,
@@ -337,6 +339,7 @@ def _resolve_saved_path(path: Path, *, data_dir: Path, summary_path: Path) -> Pa
 
 
 def _deal_review(
+    deal: IngestedDeal,
     store: EvidenceStore,
     *,
     evidence_store_path: Path,
@@ -352,28 +355,37 @@ def _deal_review(
         evidence_count=store.evidence_count,
         claim_count=store.claim_count,
         conflict_count=store.conflict_count,
-        source_documents=_source_document_summaries(store.evidence),
+        source_documents=_source_document_summaries(store.evidence, deal.documents),
         claim_statuses=_claim_status_summaries(store),
         conflicts=_conflict_summaries(store),
-        issues=_issue_summaries(store),
+        issues=_issue_summaries(store, deal.documents),
         evidence_records=evidence_records,
     )
 
 
 def _source_document_summaries(
     evidence_records: list[EvidenceRecord],
+    documents: list[IngestedDocument],
 ) -> list[SourceDocumentEvidenceSummary]:
     grouped: dict[str, list[EvidenceRecord]] = {}
     for evidence in evidence_records:
         grouped.setdefault(evidence.document_id, []).append(evidence)
 
     summaries = []
+    documents_by_id = {document.source.id: document for document in documents}
     for document_id, records in grouped.items():
+        document = documents_by_id.get(document_id)
         summaries.append(
             SourceDocumentEvidenceSummary(
                 document_id=document_id,
-                document_path=records[0].document_path,
-                source_kind=records[0].source_kind,
+                document_path=(
+                    document.source.path if document is not None else records[0].document_path
+                ),
+                source_kind=document.source.source_kind
+                if document is not None
+                else records[0].source_kind,
+                source_reference=_source_reference_for_records(records)
+                or _source_reference_for_document(document),
                 evidence_count=len(records),
                 missing_source_span_count=sum(
                     1 for evidence in records if _missing_source_span(evidence)
@@ -389,6 +401,22 @@ def _source_document_summaries(
                     for evidence in records
                     if evidence.source_freshness == SourceFreshness.UNKNOWN
                 ),
+            )
+        )
+    for document in documents:
+        if document.source.id in grouped:
+            continue
+        summaries.append(
+            SourceDocumentEvidenceSummary(
+                document_id=document.source.id,
+                document_path=document.source.path,
+                source_kind=document.source.source_kind,
+                source_reference=_source_reference_for_document(document),
+                evidence_count=0,
+                missing_source_span_count=0,
+                ocr_applied_count=0,
+                stale_count=0,
+                unknown_freshness_count=0,
             )
         )
     return sorted(
@@ -475,13 +503,32 @@ def _conflict_guidance(conflict: ClaimConflict, *, active: bool) -> str:
     )
 
 
-def _issue_summaries(store: EvidenceStore) -> list[ReviewIssueSummary]:
+def _issue_summaries(
+    store: EvidenceStore,
+    documents: list[IngestedDocument],
+) -> list[ReviewIssueSummary]:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    document_ids_with_evidence = {evidence.document_id for evidence in store.evidence}
     issues = [
         _issue(
             "No usable evidence",
             1 if not store.evidence else 0,
             "Re-run ingestion after adding readable source documents or enabling needed OCR.",
+        ),
+        _issue(
+            "Documents with no usable evidence",
+            sum(
+                1
+                for document in documents
+                if document.source.id not in document_ids_with_evidence
+            ),
+            "Review those source documents, add readable files, or enable OCR before scoring.",
+        ),
+        _issue(
+            "Documents needing OCR review",
+            sum(1 for document in documents if _document_needs_image_text_review(document)),
+            "Use image-based text reading (OCR) or manual review before relying on "
+            "missing content.",
         ),
         _issue(
             "OCR-applied evidence",
@@ -557,6 +604,37 @@ def _issue_summaries(store: EvidenceStore) -> list[ReviewIssueSummary]:
         ),
     ]
     return [issue for issue in issues if issue.count > 0]
+
+
+def _source_reference_for_records(records: list[EvidenceRecord]) -> str | None:
+    for evidence in records:
+        reference = _source_reference_for_evidence(evidence)
+        if reference is not None:
+            return reference
+    return None
+
+
+def _source_reference_for_evidence(evidence: EvidenceRecord) -> str | None:
+    reference = evidence.source_url or evidence.source_api
+    if reference is None:
+        return None
+    reference = reference.strip()
+    return reference or None
+
+
+def _source_reference_for_document(document: IngestedDocument | None) -> str | None:
+    if document is None or document.source.source_url is None:
+        return None
+    reference = document.source.source_url.strip()
+    return reference or None
+
+
+def _document_needs_image_text_review(document: IngestedDocument) -> bool:
+    return (
+        document.source.ocr_recommended
+        or document.source.vision_recommended
+        or any(page.needs_ocr or page.vision_recommended for page in document.pages)
+    )
 
 
 def _issue(issue: str, count: int, guidance: str) -> ReviewIssueSummary:
