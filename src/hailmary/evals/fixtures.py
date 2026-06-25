@@ -136,11 +136,16 @@ def run_ocr_low_text_documents_fixture(work_dir: Path) -> None:
 
         def pdf_page_to_text(self, path: Path, *, page_number: int) -> LocalOcrResult:
             del path
-            _expect_equal(
-                page_number,
-                1,
-                "Expected PDF OCR to preserve the 1-based page number.",
+            _expect(
+                page_number in {1, 2, 3},
+                "Expected PDF OCR to preserve a valid 1-based page number.",
+                actual_page=str(page_number),
             )
+            if page_number != 1:
+                return LocalOcrResult(
+                    text=f"Customer traction evidence from OCR page {page_number}.",
+                    confidence=0.9,
+                )
             return LocalOcrResult(
                 text="Valuation cap $8M. Minimum investment $1,000.",
                 confidence=0.9,
@@ -193,6 +198,17 @@ def run_ocr_low_text_documents_fixture(work_dir: Path) -> None:
         [page.needs_ocr for page in repeated_result.pages],
         [True, True, True],
         "Expected every repeated short page to be marked for OCR.",
+    )
+    repeated_ocr_result = extract_document(repeated_pdf, ocr_engine=FixtureOcrEngine())
+    _expect(
+        repeated_ocr_result.ocr_applied,
+        "Expected useful fake OCR to apply to repeated short PDF pages.",
+    )
+    _expect(
+        "Customer logo slide" in repeated_ocr_result.pages[0].clean_text
+        and "Valuation cap $8M" in repeated_ocr_result.pages[0].clean_text,
+        "Expected useful PDF OCR to preserve existing page text and add OCR text.",
+        actual_text=repeated_ocr_result.pages[0].clean_text,
     )
 
     empty_pdf = pdf_dir / "empty-cover.pdf"

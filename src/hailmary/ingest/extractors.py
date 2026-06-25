@@ -4,6 +4,7 @@ import csv
 import io
 import re
 import zipfile
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,9 @@ OCR_ATTEMPTED_NOTE = (
 OCR_LOW_TEXT_NOTE = (
     "Image-based text reading (OCR) found only a small amount of text. "
     "Review the source image because most content may still be unreadable."
+)
+OCR_PRESERVED_TEXT_NOTE = (
+    "Existing PDF text was preserved while image-based text reading (OCR) was used."
 )
 
 
@@ -517,6 +521,7 @@ def _apply_ocr_result_to_page(
     clean_text = updated_page.clean_text
     word_count = updated_page.word_count
     notes = updated_page.notes
+    ocr_text_is_insufficient = updated_page.needs_ocr
     if updated_page.needs_ocr:
         if page.clean_text.strip():
             page.needs_ocr = True
@@ -531,6 +536,26 @@ def _apply_ocr_result_to_page(
         clean_text = ""
         word_count = 0
         notes = _append_note(notes, OCR_LOW_TEXT_NOTE)
+    merged_raw_text = _merge_existing_page_text_with_ocr(
+        existing_text=page.raw_text,
+        ocr_text=updated_page.raw_text,
+    )
+    if merged_raw_text != updated_page.raw_text:
+        updated_page = _make_page(
+            merged_raw_text,
+            page_number=page.page_number,
+            needs_ocr=updated_page.needs_ocr,
+            vision_recommended=updated_page.vision_recommended,
+            source_span_start=page.source_span_start,
+            notes=_append_note(notes, OCR_PRESERVED_TEXT_NOTE),
+        )
+        if ocr_text_is_insufficient:
+            clean_text = ""
+            word_count = 0
+        else:
+            clean_text = updated_page.clean_text
+            word_count = updated_page.word_count
+        notes = updated_page.notes
     page.ocr_applied = True
     page.raw_text = updated_page.raw_text
     page.clean_text = clean_text
@@ -560,6 +585,109 @@ def _ocr_page_notes(ocr_result: LocalOcrResult, *, applied: bool = True) -> str:
     if ocr_result.notes:
         notes = _append_note(notes, ocr_result.notes)
     return notes
+
+
+def _merge_existing_page_text_with_ocr(*, existing_text: str, ocr_text: str) -> str:
+    existing = existing_text.strip()
+    ocr = ocr_text.strip()
+    if not existing:
+        return ocr
+    if not ocr:
+        return existing
+
+    existing_lines = _normalized_nonblank_lines(existing)
+    ocr_lines = _normalized_nonblank_lines(ocr)
+    if existing_lines == ocr_lines:
+        return existing
+    existing_line_counts = Counter(existing_lines)
+    ocr_line_counts = Counter(ocr_lines)
+    if existing_lines and existing_line_counts <= ocr_line_counts:
+        return ocr
+    if ocr_lines and ocr_line_counts <= existing_line_counts:
+        return existing
+
+    merged_lines = [line.strip() for line in existing.splitlines() if line.strip()]
+    remaining_existing_counts = Counter(existing_lines)
+    for line in ocr.splitlines():
+        clean_line = line.strip()
+        normalized_line = _normalize_text_for_merge(clean_line)
+        if not clean_line or not normalized_line:
+            continue
+        if remaining_existing_counts[normalized_line] > 0:
+            remaining_existing_counts[normalized_line] -= 1
+            continue
+        suffix = _ocr_line_suffix_after_existing_wrapped_prefix(
+            clean_line,
+            existing_lines=merged_lines,
+        )
+        if suffix is None:
+            merged_lines.append(clean_line)
+        elif suffix:
+            normalized_suffix = _normalize_text_for_merge(suffix)
+            if remaining_existing_counts[normalized_suffix] > 0:
+                remaining_existing_counts[normalized_suffix] -= 1
+            else:
+                merged_lines.append(suffix)
+    return "\n\n".join(merged_lines)
+
+
+def _normalized_nonblank_lines(text: str) -> list[str]:
+    return [
+        normalized_line
+        for line in text.splitlines()
+        if (normalized_line := _normalize_text_for_merge(line))
+    ]
+
+
+def _normalize_text_for_merge(text: str) -> str:
+    return re.sub(r"\s+", " ", text.casefold()).strip()
+
+
+def _ocr_line_suffix_after_existing_wrapped_prefix(
+    ocr_line: str,
+    *,
+    existing_lines: list[str],
+) -> str | None:
+    ocr_tokens = _normalized_token_spans(ocr_line)
+    if len(ocr_tokens) < 2:
+        return None
+
+    existing_tokens = [
+        (token, line_index)
+        for line_index, line in enumerate(existing_lines)
+        for token, _, _ in _normalized_token_spans(line)
+    ]
+    best_match_length = 0
+    for start_index in range(len(existing_tokens)):
+        line_indexes: set[int] = set()
+        match_length = 0
+        while (
+            match_length < len(ocr_tokens)
+            and start_index + match_length < len(existing_tokens)
+            and existing_tokens[start_index + match_length][0]
+            == ocr_tokens[match_length][0]
+        ):
+            line_indexes.add(existing_tokens[start_index + match_length][1])
+            match_length += 1
+
+        if len(line_indexes) >= 2 and match_length > best_match_length:
+            best_match_length = match_length
+
+    if best_match_length == 0:
+        return None
+    if best_match_length == len(ocr_tokens):
+        return ""
+    suffix_start = ocr_tokens[best_match_length - 1][2]
+    return ocr_line[suffix_start:].lstrip(" \t\r\n.,;:-")
+
+
+def _normalized_token_spans(text: str) -> list[tuple[str, int, int]]:
+    spans: list[tuple[str, int, int]] = []
+    for match in re.finditer(r"\S+", text):
+        token = _normalize_text_for_merge(match.group(0)).strip(".,;:!?()[]{}")
+        if token:
+            spans.append((token, match.start(), match.end()))
+    return spans
 
 
 def _refresh_page_source_spans(pages: list[ExtractedPage]) -> None:

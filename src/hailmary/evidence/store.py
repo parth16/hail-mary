@@ -20,6 +20,7 @@ from hailmary.schemas.evidence import (
     VerificationStatus,
 )
 from hailmary.utils.slug import slugify
+from hailmary.utils.text_cleaning import clean_extracted_text_with_metadata
 
 STALE_SOURCE_DAYS = 365
 MONEY_PATTERN = (
@@ -273,13 +274,20 @@ def _safe_clean_page_span(
     text: str,
     source_span_start: int | None,
 ) -> tuple[int | None, int | None]:
-    if text != page_raw_text.strip():
-        return None, None
     if source_span_start is None:
         return None, None
     local_start = len(page_raw_text) - len(page_raw_text.lstrip())
+    if text == page_raw_text.strip():
+        start = source_span_start + local_start
+        return start, start + len(text)
+
+    cleaning = clean_extracted_text_with_metadata(page_raw_text)
+    if text != cleaning.clean_text or cleaning.removed_boilerplate_lines:
+        return None, None
+
     start = source_span_start + local_start
-    return start, start + len(text)
+    end = source_span_start + len(page_raw_text.rstrip())
+    return start, end
 
 
 def _source_freshness(source: SourceDocument, *, now: datetime) -> SourceFreshness:
