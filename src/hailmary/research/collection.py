@@ -54,6 +54,7 @@ USASPENDING_AWARD_FIELDS = [
     "generated_internal_id",
 ]
 USASPENDING_AWARD_TYPE_CODES = [
+    "-1",
     "02",
     "03",
     "04",
@@ -139,9 +140,9 @@ class PublicSourceSearchResultsFile(BaseModel):
 class UsaspendingAwardRecord(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    award_id: str = Field(alias="Award ID")
+    award_id: str | None = Field(default=None, alias="Award ID")
     recipient_name: str = Field(alias="Recipient Name")
-    generated_internal_id: str
+    generated_internal_id: str | None = None
     award_amount: float | None = Field(default=None, alias="Award Amount")
     award_type: str | None = Field(default=None, alias="Award Type")
     awarding_agency: str | None = Field(default=None, alias="Awarding Agency")
@@ -192,7 +193,7 @@ class UsaspendingAwardRecord(BaseModel):
     def strip_text(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
 
-    @field_validator("award_id", "recipient_name", "generated_internal_id")
+    @field_validator("recipient_name")
     @classmethod
     def require_nonblank_text(cls, value: str | None) -> str:
         if value is None or not value:
@@ -204,18 +205,18 @@ class UsaspendingPageMetadata(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     page: int | None = None
-    has_next: bool = Field(default=False, alias="hasNext")
+    has_next: bool = Field(alias="hasNext")
 
 
 class UsaspendingAwardsResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     results: list[UsaspendingAwardRecord]
-    page_metadata: UsaspendingPageMetadata | None = None
+    page_metadata: UsaspendingPageMetadata
 
     @property
     def has_next_page(self) -> bool:
-        return self.page_metadata is not None and self.page_metadata.has_next
+        return self.page_metadata.has_next
 
 
 SecFormDSearchResultsFile = PublicSourceSearchResultsFile
@@ -378,7 +379,7 @@ class UrlLibUsaspendingAwardsClient:
             raise UsaspendingApiError(
                 f"USAspending returned HTTP {exc.code}."
             ) from exc
-        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        except (OSError, TimeoutError, urllib.error.URLError, WebResearchFetchError) as exc:
             raise UsaspendingApiError(f"Could not reach USAspending: {exc}") from exc
         if status_code != 200:
             raise UsaspendingApiError(f"USAspending returned HTTP {status_code}.")
@@ -596,11 +597,13 @@ def collect_usaspending_awards(
                     timeout_seconds=timeout_seconds,
                 )
                 for award in awards_response.results:
-                    if award.generated_internal_id in seen_awards:
-                        continue
-                    seen_awards.add(award.generated_internal_id)
                     if not _exact_company_name_match(deal.company_name, award.recipient_name):
                         continue
+                    dedupe_key = award.generated_internal_id or award.award_id
+                    if dedupe_key is not None:
+                        if dedupe_key in seen_awards:
+                            continue
+                        seen_awards.add(dedupe_key)
                     deal_results.append(
                         _research_result_from_usaspending_award(
                             deal,
@@ -818,14 +821,28 @@ def _research_result_from_usaspending_award(
     provider: ResearchProvider,
     collected_at: datetime,
 ) -> ResearchResultInput:
-    source_url = _usaspending_award_url(award.generated_internal_id)
+    award_id = award.award_id
+    generated_internal_id = award.generated_internal_id
+    if not award_id or not generated_internal_id:
+        missing_fields = []
+        if not award_id:
+            missing_fields.append("Award ID")
+        if not generated_internal_id:
+            missing_fields.append("generated_internal_id")
+        raise ResearchCollectionError(
+            "An exact USAspending result for "
+            f"{deal.company_name} is missing {', '.join(missing_fields)}. "
+            "Hail Mary cannot save it as evidence until USAspending returns the "
+            "award identifier fields."
+        )
+    source_url = _usaspending_award_url(generated_internal_id)
     validate_provider_source_url(provider.id, source_url)
     try:
         return ResearchResultInput(
             company_name=deal.company_name,
             provider_id=provider.id,
             provider_name=provider.name,
-            title=f"USAspending award {award.award_id} for {award.recipient_name}",
+            title=f"USAspending award {award_id} for {award.recipient_name}",
             text=_usaspending_award_text(award),
             retrieved_at=collected_at,
             source_url=source_url,
