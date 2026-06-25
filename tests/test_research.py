@@ -48,7 +48,11 @@ from hailmary.research import (
     prepare_research_plan,
     prepare_research_results_template,
 )
-from hailmary.research.meridian import MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE
+from hailmary.research.meridian import (
+    MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
+    MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
+    MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+)
 from hailmary.research.schemas import ResearchResultInput
 from hailmary.research.web import (
     WebFetchResponse,
@@ -2259,6 +2263,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "https://portal.angellist.com/m/acme-ai/session-token/invest",
         "https://user:token@portal.angellist.com/m/acme-ai/invest",
         "https://portal.angellist.com:bad/m/acme-ai/invest",
+        "https://portal.angellist.com:444/m/acme-ai/invest",
         "https://portal.angellist.com/m/acme ai/invest",
         "https://portal.angellist.com/m/acme-ai;jsessionid=secret/invest",
         "https://portal.angellist.com/m/acme-ai/invest;jsessionid=secret",
@@ -3515,6 +3520,12 @@ def test_import_research_results_skips_legacy_meridian_placeholder_confidence(
         }
     )
     template_payload["results"][1]["confidence"] = MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE
+    template_payload["results"][1]["licensing_notes"] = template_payload["results"][1][
+        "licensing_notes"
+    ].replace(
+        MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+        MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
+    )
     workflow.result_template_path.write_text(
         json.dumps(template_payload),
         encoding="utf-8",
@@ -3748,6 +3759,12 @@ def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
             "confidence": "high: exact page excerpt",
         }
     )
+    template_payload["results"][0]["licensing_notes"] = template_payload["results"][0][
+        "licensing_notes"
+    ].replace(
+        MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+        MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
+    )
     workflow.result_template_path.write_text(
         json.dumps(template_payload),
         encoding="utf-8",
@@ -3817,6 +3834,10 @@ def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
         (
             "https://user:token@portal.angellist.com/m/example/invest",
             "username or password",
+        ),
+        (
+            "https://portal.angellist.com:444/m/example/invest",
+            "cannot include a port",
         ),
         (
             "https://example.com/m/example/invest",

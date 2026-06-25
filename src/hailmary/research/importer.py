@@ -32,6 +32,7 @@ from hailmary.utils.slug import slugify
 
 from .meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
+    MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
     MERIDIAN_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_RECOMMENDED_FACTS,
     MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
@@ -318,7 +319,7 @@ def _is_untouched_meridian_placeholder_result(result: dict[str, object]) -> bool
     licensing_notes = result.get("licensing_notes")
     if not isinstance(licensing_notes, str):
         return False
-    if MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER not in licensing_notes:
+    if not _has_meridian_placeholder_marker(licensing_notes):
         return False
     if MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes:
         return False
@@ -343,6 +344,13 @@ def _is_meridian_placeholder_confidence(value: object) -> bool:
         MERIDIAN_PLACEHOLDER_CONFIDENCE,
         MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
     }
+
+
+def _has_meridian_placeholder_marker(value: str) -> bool:
+    return (
+        MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER in value
+        or MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER in value
+    )
 
 
 def _is_meridian_placeholder_title(value: object) -> bool:
@@ -773,13 +781,14 @@ def _evidence_record_for_result(
 def _saved_licensing_notes(licensing_notes: str) -> str:
     if (
         MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes
-        and MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER not in licensing_notes
+        and not _has_meridian_placeholder_marker(licensing_notes)
         and MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX not in licensing_notes
     ):
         return licensing_notes
     cleaned = licensing_notes
     cleaned = cleaned.replace(MERIDIAN_WORKFLOW_TEMPLATE_MARKER, "")
     cleaned = cleaned.replace(MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER, "")
+    cleaned = cleaned.replace(MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER, "")
     cleaned = re.sub(
         rf"{re.escape(MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX)}\S+",
         "",

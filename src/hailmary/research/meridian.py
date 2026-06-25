@@ -26,6 +26,10 @@ MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER = (
     "confidence, and licensing notes before import. Keep source_url unchanged. "
     "If you do not collect this fact, leave the row untouched."
 )
+MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER = (
+    "Generated Meridian placeholder. Replace the evidence text, time viewed, "
+    "confidence, and licensing notes before import."
+)
 MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX = "Generated Meridian source URL: "
 MERIDIAN_PLACEHOLDER_CONFIDENCE = (
     "Replace with confidence, such as high: exact short page excerpt; medium: "
@@ -186,9 +190,11 @@ def clean_meridian_url(url: str) -> str:
     if not parsed.netloc or host is None:
         raise MeridianWorkflowError("The Meridian URL must include a website host.")
     try:
-        _port = parsed.port
+        port = parsed.port
     except ValueError as exc:
         raise MeridianWorkflowError("The Meridian URL has an invalid port.") from exc
+    if port is not None:
+        raise MeridianWorkflowError("The Meridian URL cannot include a port.")
     if parsed.username is not None or parsed.password is not None:
         raise MeridianWorkflowError(
             "The Meridian URL cannot include a username or password."
