@@ -44,6 +44,7 @@ def test_local_state_uses_owner_only_permissions(
     assert stat.S_IMODE((tmp_path / "local-data").stat().st_mode) == 0o700
     assert (tmp_path / "local-data" / "research-plans").is_dir()
     assert (tmp_path / "local-data" / "research-results").is_dir()
+    assert (tmp_path / "local-data" / "meridian-workflows").is_dir()
     assert (tmp_path / "local-data" / "browser-profiles" / "meridian").is_dir()
     assert (
         tmp_path / "local-data" / "browser-profiles" / "meridian" / MERIDIAN_PROFILE_MARKER
@@ -57,11 +58,13 @@ def test_local_state_accepts_research_results_templates_folder(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "local-data"
+    (data_dir / "meridian-workflows").mkdir(parents=True)
     (data_dir / "research-results").mkdir(parents=True)
     (data_dir / "research-results-templates").mkdir(parents=True)
 
     create_local_state(AppConfig(data_dir=data_dir), force=True)
 
+    assert (data_dir / "meridian-workflows").is_dir()
     assert (data_dir / "research-results").is_dir()
     assert (data_dir / "research-results-templates").is_dir()
 
@@ -623,6 +626,7 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
         Path("local-data/research-plans"),
         Path("local-data/research-results"),
         Path("local-data/research-results-templates"),
+        Path("local-data/meridian-workflows"),
     ]:
         with pytest.raises(ConfigError, match="Meridian browser profile directory cannot"):
             create_local_state(

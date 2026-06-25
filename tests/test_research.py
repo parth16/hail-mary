@@ -13,6 +13,7 @@ from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.research import (
+    MeridianWorkflowError,
     ResearchImportError,
     ResearchPlanError,
     ResearchProviderCategory,
@@ -20,6 +21,7 @@ from hailmary.research import (
     ResearchTemplateError,
     builtin_research_providers,
     import_research_results,
+    prepare_meridian_workflow,
     prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
@@ -191,6 +193,132 @@ def test_prepare_research_plan_adds_meridian_manual_task(tmp_path: Path) -> None
     assert meridian_task.url == "https://portal.angellist.com/m/example/invest"
     assert meridian_task.status == ResearchTaskStatus.NEEDS_OPERATOR
     assert "Do not bypass" in meridian_task.licensing_notes
+
+
+def test_prepare_meridian_workflow_writes_private_workflow_and_template(
+    tmp_path: Path,
+) -> None:
+    result = prepare_meridian_workflow(
+        config=AppConfig(data_dir=tmp_path / "data"),
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/acme-ai/invest",
+        created_at=BUILT_AT,
+    )
+
+    assert result.output_path.parent == tmp_path / "data" / "meridian-workflows"
+    assert result.result_template_path.parent == (
+        tmp_path / "data" / "research-results-templates"
+    )
+    assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
+    assert stat.S_IMODE(result.output_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(result.result_template_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(result.result_template_path.stat().st_mode) == 0o600
+
+    workflow = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert workflow["company_name"] == "Acme AI"
+    assert workflow["meridian_url"] == "https://portal.angellist.com/m/acme-ai/invest"
+    assert workflow["result_template_path"] == str(result.result_template_path)
+    assert "import-research-results" in workflow["import_command"]
+    assert any("Do not bypass" in rule for rule in workflow["safety_rules"])
+    assert any("normal sign-in" in step for step in workflow["manual_steps"])
+
+    template = json.loads(result.result_template_path.read_text(encoding="utf-8"))
+    assert list(template) == ["results"]
+    assert len(template["results"]) == 1
+    row = template["results"][0]
+    assert row["company_name"] == "Acme AI"
+    assert row["provider_id"] == "meridian"
+    assert row["provider_name"] == "Meridian deal page"
+    assert row["source_url"] == ""
+    assert row["retrieved_at"] == ""
+    assert row["source_kind"] == "meridian"
+    assert row["document_type"] == "platform_deal_page"
+    assert "Do not bypass" in row["licensing_notes"]
+
+
+@pytest.mark.parametrize(
+    "meridian_url",
+    [
+        "",
+        "mailto:founder@example.com",
+        "https://example.com/m/acme-ai/invest",
+        "https://portal.angellist.com/not-m/acme-ai/invest",
+        "https://portal.angellist.com/m/acme-ai/profile",
+        "https://user:token@portal.angellist.com/m/acme-ai/invest",
+        "https://portal.angellist.com:bad/m/acme-ai/invest",
+        "https://portal.angellist.com/m/acme ai/invest",
+        "https://portal.angellist.com/m/acme-ai/invest?token=secret",
+        "https://portal.angellist.com/m/acme-ai/invest#details",
+    ],
+)
+def test_prepare_meridian_workflow_rejects_malformed_meridian_url(
+    tmp_path: Path,
+    meridian_url: str,
+) -> None:
+    with pytest.raises(MeridianWorkflowError):
+        prepare_meridian_workflow(
+            config=AppConfig(data_dir=tmp_path / "data"),
+            company_name="Acme AI",
+            meridian_url=meridian_url,
+            created_at=BUILT_AT,
+        )
+
+
+def test_prepare_meridian_workflow_command_writes_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-meridian-workflow",
+            "--company",
+            "Acme AI",
+            "--meridian-url",
+            "https://portal.angellist.com/m/acme-ai/invest",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Prepared a Meridian manual workflow for Acme AI" in result.output
+    assert "did not open Meridian, sign in, bypass access controls" in result.output
+    assert "import-research-results" in result.output
+    assert (tmp_path / "data" / "meridian-workflows").is_dir()
+    workflows = list((tmp_path / "data" / "meridian-workflows").glob("*.json"))
+    templates = list((tmp_path / "data" / "research-results-templates").glob("*.json"))
+    assert len(workflows) == 1
+    assert len(templates) == 1
+    assert workflows[0].name in result.output.replace("\n", "")
+    assert templates[0].name in result.output.replace("\n", "")
+
+
+def test_prepare_meridian_workflow_command_has_plain_english_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-meridian-workflow",
+            "--company",
+            "Acme AI",
+            "--meridian-url",
+            "https://example.com/m/acme-ai/invest",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "portal.angellist.com" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_prepare_research_plan_uses_latest_ingestion_summary(tmp_path: Path) -> None:

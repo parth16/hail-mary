@@ -28,6 +28,7 @@ from hailmary.ingest.folder_loader import (
     ingest_folder as ingest_folder_path,
 )
 from hailmary.research import (
+    MeridianWorkflowError,
     ResearchCollectionError,
     ResearchImportError,
     ResearchPlanError,
@@ -37,6 +38,7 @@ from hailmary.research import (
     ResearchTemplateError,
     builtin_research_providers,
     import_research_results,
+    prepare_meridian_workflow,
     prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
@@ -590,6 +592,65 @@ def prepare_public_research_results_command(
     console.print(
         "After ingesting the matching deal folders, run "
         f"`hailmary import-research-results {result.output_path}{data_dir_option} --dry-run`."
+    )
+
+
+@app.command("prepare-meridian-workflow")
+def prepare_meridian_workflow_command(
+    company: Annotated[
+        str,
+        typer.Option(
+            "--company",
+            help="Company to prepare a Meridian manual workflow for.",
+        ),
+    ],
+    meridian_url: Annotated[
+        str,
+        typer.Option(
+            "--meridian-url",
+            help=(
+                "Authenticated Meridian deal URL. Hail Mary records it for manual use "
+                "and does not open it."
+            ),
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should write private Meridian workflow files.",
+        ),
+    ] = None,
+) -> None:
+    """Prepare a private manual workflow for a Meridian deal page."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = prepare_meridian_workflow(
+            config=config,
+            company_name=company,
+            meridian_url=meridian_url,
+        )
+    except MeridianWorkflowError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(1) from None
+
+    console.print(f"Prepared a Meridian manual workflow for {result.workflow.company_name}.")
+    console.print(f"Saved the private workflow to {result.output_path}.")
+    console.print(f"Saved the fillable results template to {result.result_template_path}.")
+    console.print(
+        "Hail Mary did not open Meridian, sign in, bypass access controls, "
+        "or save portal content."
+    )
+    console.print(
+        "Use normal authenticated access and paste only allowed facts tied to page "
+        "text into the template."
+    )
+    data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
+    console.print(
+        "After filling the template, run "
+        f"`hailmary import-research-results {result.result_template_path}"
+        f"{data_dir_option} --dry-run`."
     )
 
 

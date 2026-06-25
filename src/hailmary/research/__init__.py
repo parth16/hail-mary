@@ -7,6 +7,12 @@ from hailmary.research.collection import (
     prepare_public_research_results,
 )
 from hailmary.research.importer import ResearchImportError, import_research_results
+from hailmary.research.meridian import (
+    MeridianWorkflow,
+    MeridianWorkflowError,
+    MeridianWorkflowRunSummary,
+    prepare_meridian_workflow,
+)
 from hailmary.research.planner import ResearchPlanError, prepare_research_plan
 from hailmary.research.providers import (
     builtin_provider_adapters,
@@ -34,6 +40,9 @@ from hailmary.research.templates import (
 
 __all__ = [
     "ResearchAccessMode",
+    "MeridianWorkflow",
+    "MeridianWorkflowError",
+    "MeridianWorkflowRunSummary",
     "ResearchCollectionDealSummary",
     "ResearchCollectionError",
     "ResearchCollectionRunSummary",
@@ -57,6 +66,7 @@ __all__ = [
     "builtin_provider_adapters",
     "builtin_research_providers",
     "import_research_results",
+    "prepare_meridian_workflow",
     "prepare_public_research_results",
     "prepare_research_plan",
     "prepare_research_results_template",
