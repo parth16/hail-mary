@@ -331,6 +331,7 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
             )
         if result.source_kind == SourceKind.MERIDIAN:
             _validate_meridian_result_source(result, index=display_index)
+            _validate_saved_meridian_licensing_notes(result, index=display_index)
         if result.source_api is not None:
             _validate_source_api(result.source_api, index=display_index)
         _validate_known_provider_source_kind(result, index=display_index)
@@ -406,6 +407,19 @@ def _validate_meridian_result_source(
             f"Research result {index} source_url is not a safe Meridian deal page URL: "
             f"{exc}"
         ) from exc
+
+
+def _validate_saved_meridian_licensing_notes(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    if _saved_licensing_notes(result.licensing_notes):
+        return
+    raise ResearchImportError(
+        f"Research result {index} uses Meridian evidence, so licensing_notes must "
+        "explain the source permissions after the generated template marker is removed."
+    )
 
 
 def _source_api_looks_like_url(source_api: str) -> bool:
