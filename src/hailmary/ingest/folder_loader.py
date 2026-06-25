@@ -14,6 +14,7 @@ from hailmary.ingest.document_classifier import (
     is_ignored_path,
 )
 from hailmary.ingest.extractors import ExtractionResult, extract_document
+from hailmary.ingest.ocr import LocalOcrEngine, SubprocessLocalOcrEngine
 from hailmary.schemas.documents import (
     IngestedDeal,
     IngestedDocument,
@@ -29,10 +30,18 @@ class IngestionError(RuntimeError):
     """The scan could not safely write generated ingestion output."""
 
 
-def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
+def ingest_folder(
+    root_path: Path,
+    *,
+    config: AppConfig,
+    ocr_engine: LocalOcrEngine | None = None,
+) -> IngestionSummary:
     """Scan a local folder and store extracted document metadata."""
 
     root_path = _resolve_scan_root(root_path)
+    active_ocr_engine = ocr_engine
+    if active_ocr_engine is None and config.enable_ocr:
+        active_ocr_engine = SubprocessLocalOcrEngine()
     allow_private_raw_root = _is_private_raw_root(root_path, config)
     is_private_raw_collection_root = _is_private_raw_collection_root(root_path, config)
     use_collection_subfolders = _uses_collection_subfolders(
@@ -81,7 +90,7 @@ def ingest_folder(root_path: Path, *, config: AppConfig) -> IngestionSummary:
 
     for path, deal_name in candidate_files:
         deal_id = deal_ids_by_name[deal_name]
-        extraction = extract_document(path)
+        extraction = extract_document(path, ocr_engine=active_ocr_engine)
         document = _build_document(
             path,
             root_path,
@@ -266,6 +275,8 @@ def _build_document(
         confidentiality_detected=_has_confidentiality_marker(confidentiality_text),
         extraction_quality=extraction.extraction_quality,
         ocr_recommended=extraction.ocr_recommended,
+        ocr_applied=extraction.ocr_applied,
+        ocr_confidence=extraction.ocr_confidence,
         vision_recommended=extraction.vision_recommended,
         notes=_join_notes(extraction.notes, hash_note, timestamp_note),
     )

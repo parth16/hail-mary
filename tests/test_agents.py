@@ -127,6 +127,31 @@ def test_build_agent_input_packet_keeps_cited_quote_when_truncating() -> None:
     assert len(packet.evidence[0].text) <= 80
 
 
+def test_build_agent_input_packet_carries_ocr_lineage() -> None:
+    evidence = [
+        _evidence(
+            "ev_ocr",
+            "Valuation cap $8M. Customer traction is growing.",
+        ).model_copy(
+            update={
+                "ocr_applied": True,
+                "ocr_confidence": 0.86,
+            }
+        )
+    ]
+    store = _store(evidence=evidence, claims=[_claim("valuation cap", "$8M", "ev_ocr")])
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.GROUNDING_AUDITOR,
+    )
+
+    assert packet.evidence[0].ocr_applied
+    assert packet.evidence[0].ocr_confidence == 0.86
+
+
 def test_build_agent_input_packet_keeps_all_selected_claim_quotes_when_truncating() -> None:
     long_prefix = "Background. " * 40
     evidence = [

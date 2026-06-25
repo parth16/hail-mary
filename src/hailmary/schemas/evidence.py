@@ -58,6 +58,8 @@ class EvidenceRecord(BaseModel):
     table_index: int | None = None
     source_span_start: int | None = None
     source_span_end: int | None = None
+    ocr_applied: bool = False
+    ocr_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     source_freshness: SourceFreshness = SourceFreshness.UNKNOWN
     provider_id: str | None = None
     provider_name: str | None = None
