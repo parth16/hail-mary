@@ -145,6 +145,44 @@ def test_build_agent_input_packet_carries_v2_context_without_provider_metadata()
     assert "Use SEC EDGAR public filings" not in packet_json
 
 
+def test_build_agent_input_packet_omits_partial_conflicts_when_capped() -> None:
+    evidence_a = _evidence("ev_cap_a", "Valuation cap $8M.")
+    evidence_b = _evidence("ev_cap_b", "Valuation cap $10M.")
+    claim_a = _claim("valuation cap", "$8M", "ev_cap_a").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    claim_b = _claim("valuation cap", "$10M", "ev_cap_b").model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    conflict = ClaimConflict(
+        id="conflict_valuation",
+        deal_id="deal_test",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["valuation cap:$8M", "valuation cap:$10M"],
+        claim_ids=[claim_a.id, claim_b.id],
+        notes="Synthetic conflict.",
+    )
+    store = _store(
+        evidence=[evidence_a, evidence_b],
+        claims=[claim_a, claim_b],
+        conflicts=[conflict],
+    )
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.FINANCING_NEXT_ROUND_RISK,
+        max_evidence_records=1,
+    )
+    packet_json = packet.model_dump_json()
+
+    assert packet.allowed_evidence_ids == ["ev_cap_a"]
+    assert packet.conflicts == []
+    assert "$10M" not in packet_json
+
+
 def test_build_agent_input_packet_truncates_long_evidence_text() -> None:
     evidence = [
         _evidence(

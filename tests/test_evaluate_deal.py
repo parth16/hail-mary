@@ -312,6 +312,7 @@ def test_evaluate_deal_committee_context_excludes_unsupported_findings(
     context_payload = json.loads(committee_context)
     assert "supported_specialist_findings" in context_payload
     assert "Supported traction" in committee_context
+    assert "Missing customer cohort evidence" in committee_context
     assert "Unsupported hype" not in committee_context
     assert "Unsupported risk" not in committee_context
 
@@ -550,6 +551,7 @@ def test_evaluate_deal_no_evidence_writes_pass_memo_without_model_calls(
     assert "**Recommendation:** PASS" in memo_text
     assert "NEEDS\\_DILIGENCE: No usable source-linked evidence was available" in memo_text
     assert "skipped model committee review" in memo_text
+    assert "Model recommendation before guardrails" not in memo_text
 
 
 def test_evaluate_deal_renders_final_decision_findings(
@@ -932,6 +934,7 @@ def _mixed_committee_output_json(packet: AgentInputPacket) -> str:
                 unsupported=True,
             ),
         ],
+        limitations=["Missing customer cohort evidence should reach final context."],
     ).model_dump_json()
 
 

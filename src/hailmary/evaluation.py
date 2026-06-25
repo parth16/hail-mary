@@ -270,11 +270,13 @@ def evaluate_deal_folder(
             )
         final_output = final_result.output
         guarded_decision = _guard_final_decision(scored_deal, store, final_output)
+        final_review_was_model = True
     else:
         _stage(stage_callback, "specialist committee review")
         specialist_results = []
         _stage(stage_callback, "final decision review")
         final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
+        final_review_was_model = False
 
     _stage(stage_callback, "final memo write")
     report_dir = config.data_dir / "reports"
@@ -293,6 +295,7 @@ def evaluate_deal_folder(
             final_output=final_output,
             final_recommendation=guarded_decision.recommendation,
             warnings=warnings,
+            final_review_was_model=final_review_was_model,
         ),
         description="final evaluation memo",
     )
@@ -364,6 +367,7 @@ def render_final_evaluation_memo(
     final_output: AgentReviewOutput,
     final_recommendation: AgentRecommendationRationale,
     warnings: Sequence[str] = (),
+    final_review_was_model: bool = True,
 ) -> str:
     verified_claims = validated_verified_claims(store)
     lines = [
@@ -424,7 +428,7 @@ def render_final_evaluation_memo(
         lines.append("- No specialist output passed validation.")
 
     lines.extend(["", "## Final Recommendation"])
-    if final_output.recommendation is not None:
+    if final_review_was_model and final_output.recommendation is not None:
         lines.append(
             "- Model recommendation before guardrails: "
             f"{final_output.recommendation.recommendation}; check size: "
@@ -434,7 +438,7 @@ def render_final_evaluation_memo(
         f"- Recommendation: {final_recommendation.recommendation}; "
         f"check size: {_format_check_size(final_recommendation.check_size)}."
     )
-    if final_output.recommendation is not None and (
+    if final_review_was_model and final_output.recommendation is not None and (
         final_output.recommendation.recommendation != final_recommendation.recommendation
         or final_output.recommendation.check_size != final_recommendation.check_size
     ):
@@ -766,6 +770,7 @@ def _supported_committee_output(result: RoleReviewResult) -> dict[str, object]:
             "summary": [],
             "findings": [],
             "diligence_questions": [],
+            "limitations": [],
         }
     return {
         "role": result.role,
@@ -783,6 +788,7 @@ def _supported_committee_output(result: RoleReviewResult) -> dict[str, object]:
             question.model_dump(mode="json")
             for question in output.diligence_questions
         ],
+        "limitations": list(output.limitations),
     }
 
 

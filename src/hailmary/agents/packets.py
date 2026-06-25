@@ -364,17 +364,19 @@ def _conflict_items(
     items: list[AgentConflictItem] = []
     for conflict in validated_conflicts(store):
         evidence_ids: list[str] = []
+        complete_conflict = True
         for claim_id in conflict.claim_ids:
             claim = claims_by_id.get(claim_id)
-            if claim is None:
+            if claim is None or not claim.citations:
+                complete_conflict = False
                 continue
             for citation in claim.citations:
-                if (
-                    citation.evidence_id in allowed_evidence_ids
-                    and citation.evidence_id not in evidence_ids
-                ):
+                if citation.evidence_id not in allowed_evidence_ids:
+                    complete_conflict = False
+                    continue
+                if citation.evidence_id not in evidence_ids:
                     evidence_ids.append(citation.evidence_id)
-        if not evidence_ids:
+        if not complete_conflict or not evidence_ids:
             continue
         items.append(
             AgentConflictItem(
