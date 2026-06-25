@@ -734,6 +734,8 @@ def collect_web_research_command(
             )
 
     _print_panel(title, lines, border_style=border_style)
+    if result.failed_count:
+        raise typer.Exit(1)
 
 
 @app.command("prepare-research-results-template")

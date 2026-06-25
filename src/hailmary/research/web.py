@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import errno
+import http.client
 import ipaddress
 import json
 import os
 import re
 import secrets
 import socket
+import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,6 +47,20 @@ class WebResearchFetchError(RuntimeError):
 MAX_FETCH_BYTES = 2_000_000
 MAX_TEXT_CHARS = 40_000
 DEFAULT_TIMEOUT_SECONDS = 10.0
+GENERATED_SEARCH_PAGE_PREFIXES: dict[str, tuple[str, ...]] = {
+    "sec_form_d": ("https://www.sec.gov/edgar/search/",),
+    "sam_gov": ("https://sam.gov/search/", "https://www.sam.gov/search/"),
+    "usaspending": (
+        "https://www.usaspending.gov/search/",
+        "https://usaspending.gov/search/",
+    ),
+    "sbir": ("https://www.sbir.gov/award?", "https://sbir.gov/award?"),
+    "uspto": (
+        "https://tmsearch.uspto.gov/search/search-results?",
+        "https://www.tmsearch.uspto.gov/search/search-results?",
+    ),
+    "github": ("https://github.com/search?",),
+}
 
 
 class WebFetchResponse(BaseModel):
@@ -118,7 +136,7 @@ class UrlLibWebResearchClient:
                 "Accept": "text/html,text/plain,application/xhtml+xml",
             },
         )
-        opener = urllib.request.build_opener(_SafeRedirectHandler(provider_id))
+        opener = _build_guarded_opener(provider_id)
         try:
             with opener.open(request, timeout=timeout_seconds) as response:
                 status_code = int(getattr(response, "status", 200))
@@ -172,6 +190,112 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
+class _GuardedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, provider_id: str) -> None:
+        super().__init__()
+        self.provider_id = provider_id
+
+    def http_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(_connection_factory(self.provider_id, secure=False), req)
+
+
+class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, provider_id: str) -> None:
+        super().__init__()
+        self.provider_id = provider_id
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(_connection_factory(self.provider_id, secure=True), req)
+
+
+class _ConnectionWithSocketFactory(Protocol):
+    host: str
+    port: int
+    timeout: float | None
+    source_address: object
+    _create_connection: Callable[[tuple[str, int], float | None, object], socket.socket]
+
+
+class _BoundHTTPConnection(http.client.HTTPConnection):
+    _create_connection: Callable[[tuple[str, int], float | None, object], socket.socket]
+    source_address: object
+
+    def __init__(
+        self,
+        host: str,
+        port: int | None = None,
+        *,
+        provider_id: str,
+        **kwargs: Any,
+    ) -> None:
+        self._provider_id = provider_id
+        super().__init__(host, port=port, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = _open_vetted_socket(self)
+
+
+class _BoundHTTPSConnection(http.client.HTTPSConnection):
+    _context: Any
+    _create_connection: Callable[[tuple[str, int], float | None, object], socket.socket]
+    source_address: object
+
+    def __init__(
+        self,
+        host: str,
+        port: int | None = None,
+        *,
+        provider_id: str,
+        **kwargs: Any,
+    ) -> None:
+        self._provider_id = provider_id
+        super().__init__(host, port=port, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = _open_vetted_socket(self)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _build_guarded_opener(provider_id: str) -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _GuardedHTTPHandler(provider_id),
+        _GuardedHTTPSHandler(provider_id),
+        _SafeRedirectHandler(provider_id),
+    )
+
+
+def _connection_factory(
+    provider_id: str,
+    *,
+    secure: bool,
+) -> Any:
+    connection_class = _BoundHTTPSConnection if secure else _BoundHTTPConnection
+
+    def factory(host: str, **kwargs: Any) -> http.client.HTTPConnection:
+        return connection_class(host, provider_id=provider_id, **kwargs)
+
+    return factory
+
+
+def _open_vetted_socket(
+    connection: _ConnectionWithSocketFactory,
+) -> socket.socket:
+    vetted_address = _resolve_public_host_address(connection.host, connection.port)
+    sys.audit("http.client.connect", connection, connection.host, connection.port)
+    opened_socket = connection._create_connection(
+        (vetted_address, connection.port),
+        connection.timeout,
+        connection.source_address,
+    )
+    try:
+        opened_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError as exc:
+        if exc.errno != errno.ENOPROTOOPT:
+            raise
+    return opened_socket
+
+
 def collect_web_research(
     *,
     config: AppConfig,
@@ -194,6 +318,10 @@ def collect_web_research(
     provider_filter = {provider_id.strip() for provider_id in provider_ids or []}
     if any(not provider_id for provider_id in provider_filter):
         raise WebResearchError("Provider IDs cannot be blank.")
+    _ensure_provider_filter_matches_plan(provider_filter, plan)
+    ingested_deal_ids = {
+        deal.deal_id for deal in plan.deals if deal.from_ingestion
+    }
     web_client = client or UrlLibWebResearchClient()
 
     summaries: list[WebResearchTaskSummary] = []
@@ -233,6 +361,7 @@ def collect_web_research(
                 task,
                 page=page,
                 collected_at=collected_at,
+                ingested_deal_ids=ingested_deal_ids,
             )
         except (ValidationError, ValueError, WebResearchFetchError) as exc:
             summaries.append(_task_summary(task, status="failed", reason=str(exc)))
@@ -314,6 +443,11 @@ def _task_fetch_eligibility(task: ResearchTask) -> str | None:
         return "Skipped because this task is marked for manual action."
     if task.url is None:
         return "Skipped because the research plan does not include a direct URL."
+    if _is_generated_search_page(task):
+        return (
+            "Skipped because this generated search page is only a starting point. "
+            "Import an exact source page instead."
+        )
     return None
 
 
@@ -362,9 +496,10 @@ def _research_result_for_task(
     *,
     page: _FetchedPage,
     collected_at: datetime,
+    ingested_deal_ids: set[str],
 ) -> ResearchResultInput:
     return ResearchResultInput(
-        deal_id=task.deal_id,
+        deal_id=task.deal_id if task.deal_id in ingested_deal_ids else None,
         company_name=task.company_name,
         provider_id=task.provider_id,
         provider_name=task.provider_name,
@@ -404,17 +539,69 @@ def _ensure_resolved_public_host(url: str) -> None:
     host = parsed.hostname
     if host is None:
         raise WebResearchFetchError("The page URL does not include a website host.")
+    _resolve_public_host_address(host, _port_for_url(url))
+
+
+def _resolve_public_host_address(host: str, port: int) -> str:
     try:
-        address_infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        address_infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise WebResearchFetchError(f"Could not resolve website host {host}.") from exc
+    vetted_addresses: list[str] = []
     for address_info in address_infos:
         sockaddr = address_info[4]
-        address = ipaddress.ip_address(str(sockaddr[0]))
+        raw_address = str(sockaddr[0])
+        address = ipaddress.ip_address(raw_address)
         if not address.is_global:
             raise WebResearchFetchError(
                 f"Website host {host} resolves to a private, local, or reserved network address."
             )
+        if raw_address not in vetted_addresses:
+            vetted_addresses.append(raw_address)
+    if not vetted_addresses:
+        raise WebResearchFetchError(f"Could not resolve website host {host}.")
+    return vetted_addresses[0]
+
+
+def _port_for_url(url: str) -> int:
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise WebResearchFetchError("The page URL has an invalid port.") from exc
+    if port is not None:
+        return port
+    if parsed.scheme == "http":
+        return 80
+    if parsed.scheme == "https":
+        return 443
+    raise WebResearchFetchError("The page URL must start with http:// or https://.")
+
+
+def _ensure_provider_filter_matches_plan(
+    provider_filter: set[str],
+    plan: ResearchPlan,
+) -> None:
+    if not provider_filter:
+        return
+    plan_provider_ids = {task.provider_id for task in plan.tasks}
+    unmatched_ids = sorted(provider_filter - plan_provider_ids)
+    if not unmatched_ids:
+        return
+    available = ", ".join(sorted(plan_provider_ids)) or "none"
+    requested = ", ".join(unmatched_ids)
+    raise WebResearchError(
+        f"Provider filter {requested} does not match this research plan. "
+        f"Available providers: {available}."
+    )
+
+
+def _is_generated_search_page(task: ResearchTask) -> bool:
+    prefixes = GENERATED_SEARCH_PAGE_PREFIXES.get(task.provider_id)
+    if prefixes is None or task.url is None:
+        return False
+    normalized_url = task.url.casefold()
+    return any(normalized_url.startswith(prefix.casefold()) for prefix in prefixes)
 
 
 def _task_summary(task: ResearchTask, *, status: str, reason: str) -> WebResearchTaskSummary:
