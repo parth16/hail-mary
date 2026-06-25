@@ -48,7 +48,23 @@ def inspect_deal_folder(root_path: Path, *, config: AppConfig) -> DealFolderInsp
         resolved_root,
         config=config,
     )
-    deal_names = tuple(sorted({deal_name for _, deal_name in candidate_files}))
+    is_private_raw_collection_root = _is_private_raw_collection_root(
+        resolved_root,
+        config,
+    )
+    use_collection_subfolders = _uses_collection_subfolders(
+        resolved_root,
+        is_private_raw_collection_root=is_private_raw_collection_root,
+    )
+    deal_names_set = {deal_name for _, deal_name in candidate_files}
+    deal_names_set.update(
+        _unreadable_deal_names(
+            unreadable_paths,
+            root_path=resolved_root,
+            use_collection_subfolders=use_collection_subfolders,
+        )
+    )
+    deal_names = tuple(sorted(deal_names_set))
     return DealFolderInspection(
         root_path=resolved_root,
         deal_names=deal_names,
@@ -188,6 +204,27 @@ def _candidate_documents(
         candidate_files.append((path, deal_name))
 
     return candidate_files, skipped_files, unreadable_paths
+
+
+def _unreadable_deal_names(
+    unreadable_paths: list[str],
+    *,
+    root_path: Path,
+    use_collection_subfolders: bool,
+) -> list[str]:
+    deal_names: list[str] = []
+    for display_path in unreadable_paths:
+        relative_path = Path(display_path)
+        if relative_path.is_absolute() or not relative_path.parts:
+            continue
+        deal_name = _deal_name_for_path(
+            relative_path,
+            root_path=root_path,
+            use_collection_subfolders=use_collection_subfolders,
+        )
+        if deal_name not in deal_names:
+            deal_names.append(deal_name)
+    return deal_names
 
 
 def _scan_input_paths(root_path: Path) -> tuple[list[Path], list[Path]]:

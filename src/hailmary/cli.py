@@ -29,6 +29,9 @@ from hailmary.config import (
 )
 from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder
+from hailmary.evidence import EvidenceReviewError
+from hailmary.evidence import review_evidence as build_evidence_review
+from hailmary.evidence.review import DealEvidenceReview
 from hailmary.ingest.folder_loader import (
     IngestionError,
 )
@@ -57,6 +60,7 @@ from hailmary.research import (
     prepare_research_plan,
     prepare_research_results_template,
 )
+from hailmary.schemas.documents import SourceKind
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 
 app = typer.Typer(
@@ -65,6 +69,8 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 console = Console(highlight=False)
+DEFAULT_REVIEW_QUOTE_LIMIT = 240
+MAX_REVIEW_QUOTE_LIMIT = 500
 
 
 def _plain(message: str, *, style: str | None = None) -> Text:
@@ -389,6 +395,394 @@ def ingest_folder(
 
     if warning_lines:
         _print_section("Review needed", warning_lines, style="yellow")
+
+
+@app.command("review-evidence")
+def review_evidence_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read local generated evidence.",
+        ),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option(
+            "--deal-id",
+            help="Review one exact ingested deal ID.",
+        ),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option(
+            "--company",
+            help="Review one exact ingested company name.",
+        ),
+    ] = None,
+    all_deals: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Review every deal in the latest ingestion summary.",
+        ),
+    ] = False,
+    evidence_id: Annotated[
+        str | None,
+        typer.Option(
+            "--evidence-id",
+            help="Limit the evidence record table to one exact evidence ID.",
+        ),
+    ] = None,
+    show_text: Annotated[
+        bool,
+        typer.Option(
+            "--show-text",
+            help="Show short evidence excerpts. Evidence text is hidden by default.",
+        ),
+    ] = False,
+    quote_limit: Annotated[
+        int | None,
+        typer.Option(
+            "--quote-limit",
+            min=1,
+            max=MAX_REVIEW_QUOTE_LIMIT,
+            help=(
+                "Show evidence excerpts capped at this many characters. Maximum is "
+                f"{MAX_REVIEW_QUOTE_LIMIT}."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Review local evidence, claims, conflicts, and diligence gaps."""
+
+    config = _config_from_options(data_dir)
+    excerpt_limit = (
+        quote_limit
+        if quote_limit is not None
+        else DEFAULT_REVIEW_QUOTE_LIMIT
+        if show_text
+        else None
+    )
+    try:
+        result = build_evidence_review(
+            config=config,
+            deal_id=deal_id,
+            company_name=company,
+            all_deals=all_deals,
+            evidence_id=evidence_id,
+        )
+    except EvidenceReviewError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    deal_word = "deal" if len(result.deals) == 1 else "deals"
+    intro_lines = [
+        _plain(
+            f"Reviewed {len(result.deals)} {deal_word} from the latest ingestion summary."
+        ),
+        _plain(f"Ingestion summary: {result.summary_path}."),
+        _plain(
+            "OCR means image-based text reading. A source span is the saved start and "
+            "end position linking an evidence record back to extracted source text. "
+            "A citation span is the saved start and end position used to verify that "
+            "a claim quote still matches stored evidence text."
+        ),
+    ]
+    if excerpt_limit is None:
+        intro_lines.append(
+            _plain(
+                "Evidence text is hidden by default. Use --show-text or --quote-limit "
+                "to show short excerpts."
+            )
+        )
+    else:
+        intro_lines.append(
+            _plain(
+                f"Showing short evidence excerpts capped at {excerpt_limit} characters."
+            )
+        )
+
+    _print_section("Evidence review", intro_lines, style="green")
+    for deal_review in result.deals:
+        _print_deal_evidence_review(deal_review, excerpt_limit=excerpt_limit)
+
+
+def _print_deal_evidence_review(
+    deal_review: DealEvidenceReview,
+    *,
+    excerpt_limit: int | None,
+) -> None:
+    console.print(Rule(deal_review.company_name, style="cyan"))
+    console.print(_deal_review_summary_table(deal_review))
+    console.print(_source_document_review_table(deal_review))
+    external_sources_table = _external_source_review_table(deal_review)
+    if external_sources_table is not None:
+        console.print(external_sources_table)
+    console.print(_claim_review_table(deal_review))
+    console.print(_conflict_review_table(deal_review))
+    console.print(_issue_review_table(deal_review))
+    console.print(_evidence_record_review_table(deal_review, excerpt_limit=excerpt_limit))
+
+
+def _deal_review_summary_table(deal_review: DealEvidenceReview) -> Table:
+    table = _two_column_table("Deal", "Value")
+    table.add_row(_plain("Company"), _plain(deal_review.company_name))
+    table.add_row(_plain("Deal ID"), _plain(deal_review.deal_id))
+    table.add_row(_plain("Evidence store"), _plain(str(deal_review.evidence_store_path)))
+    table.add_row(_plain("Evidence records"), _plain(str(deal_review.evidence_count)))
+    table.add_row(_plain("Claims"), _plain(str(deal_review.claim_count)))
+    table.add_row(_plain("Stored conflicts"), _plain(str(deal_review.conflict_count)))
+    return table
+
+
+def _source_document_review_table(deal_review: DealEvidenceReview) -> Table:
+    table = Table(
+        title="Evidence by source document",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Source document", style="bold cyan", overflow="fold")
+    table.add_column("Source")
+    table.add_column("Evidence", justify="right")
+    table.add_column("Missing source spans", justify="right")
+    table.add_column("OCR", justify="right")
+    table.add_column("Freshness issues", justify="right")
+    if not deal_review.source_documents:
+        table.add_row(
+            _plain("No source-linked evidence records"),
+            _plain(""),
+            _plain("0"),
+            _plain("0"),
+            _plain("0"),
+            _plain("0"),
+        )
+        return table
+
+    for summary in deal_review.source_documents:
+        freshness_issues = summary.stale_count + summary.unknown_freshness_count
+        table.add_row(
+            _plain(str(summary.document_path)),
+            _plain(str(summary.source_kind)),
+            _plain(str(summary.evidence_count)),
+            _plain(str(summary.missing_source_span_count)),
+            _plain(str(summary.ocr_applied_count)),
+            _plain(str(freshness_issues)),
+        )
+    return table
+
+
+def _external_source_review_table(deal_review: DealEvidenceReview) -> Table | None:
+    external_records = [
+        evidence
+        for evidence in deal_review.evidence_records
+        if evidence.source_kind != SourceKind.LOCAL_FILE
+    ]
+    if not external_records:
+        return None
+
+    table = Table(
+        title="Exact external sources",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Evidence ID", style="bold cyan", no_wrap=True)
+    table.add_column("Exact source", overflow="fold")
+    for evidence in external_records:
+        table.add_row(
+            _plain(evidence.id),
+            _plain(_evidence_source_reference(evidence)),
+        )
+    return table
+
+
+def _claim_review_table(deal_review: DealEvidenceReview) -> Table:
+    table = Table(
+        title="Claims by label and status",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Claim label", style="bold cyan")
+    table.add_column("Status")
+    table.add_column("Count", justify="right")
+    if not deal_review.claim_statuses:
+        table.add_row(_plain("No extracted claims"), _plain(""), _plain("0"))
+        return table
+    for summary in deal_review.claim_statuses:
+        table.add_row(
+            _plain(summary.label),
+            _plain(str(summary.verification_status)),
+            _plain(str(summary.count)),
+        )
+    return table
+
+
+def _conflict_review_table(deal_review: DealEvidenceReview) -> Table:
+    table = Table(
+        title="Conflicts and why they matter",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Claim label", style="bold cyan")
+    table.add_column("Status")
+    table.add_column("Values")
+    table.add_column("Why it matters")
+    if not deal_review.conflicts:
+        table.add_row(
+            _plain("No conflicts"),
+            _plain(""),
+            _plain(""),
+            _plain("No conflicting deal-term claims were found."),
+        )
+        return table
+    for conflict in deal_review.conflicts:
+        value_word = "value" if len(conflict.normalized_values) == 1 else "values"
+        table.add_row(
+            _plain(conflict.label),
+            _plain(conflict.status),
+            _plain(f"{len(conflict.normalized_values)} {value_word}"),
+            _plain(conflict.why_it_matters),
+        )
+    return table
+
+
+def _issue_review_table(deal_review: DealEvidenceReview) -> Table:
+    table = Table(
+        title="Review issues",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Issue", style="bold cyan")
+    table.add_column("Count", justify="right")
+    table.add_column("What to review")
+    if not deal_review.issues:
+        table.add_row(
+            _plain("No review issues found"),
+            _plain("0"),
+            _plain("No evidence review warnings were found for this store."),
+        )
+        return table
+    for issue in deal_review.issues:
+        table.add_row(
+            _plain(issue.issue),
+            _plain(str(issue.count)),
+            _plain(issue.guidance),
+        )
+    return table
+
+
+def _evidence_record_review_table(
+    deal_review: DealEvidenceReview,
+    *,
+    excerpt_limit: int | None,
+) -> Table:
+    table = Table(
+        title="Evidence records",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Evidence ID", style="bold cyan")
+    table.add_column("Source document")
+    table.add_column("Location", no_wrap=True)
+    table.add_column("Freshness")
+    table.add_column("Flags")
+    if excerpt_limit is not None:
+        table.add_column("Excerpt")
+    if not deal_review.evidence_records:
+        row = [
+            _plain("No matching evidence records"),
+            _plain(""),
+            _plain(""),
+            _plain(""),
+            _plain(""),
+        ]
+        if excerpt_limit is not None:
+            row.append(_plain(""))
+        table.add_row(*row)
+        return table
+
+    for evidence in deal_review.evidence_records:
+        row = [
+            _plain(evidence.id),
+            _plain(str(evidence.document_path)),
+            _plain(_evidence_location(evidence)),
+            _plain(str(evidence.source_freshness)),
+            _plain(_evidence_flags(evidence)),
+        ]
+        if excerpt_limit is not None:
+            row.append(_plain(_bounded_excerpt(evidence.text, excerpt_limit)))
+        table.add_row(*row)
+    return table
+
+
+def _evidence_source_reference(evidence: object) -> str:
+    source_url = getattr(evidence, "source_url", None)
+    source_api = getattr(evidence, "source_api", None)
+    source_kind = getattr(evidence, "source_kind", None)
+    if isinstance(source_url, str) and source_url.strip():
+        return source_url.strip()
+    if isinstance(source_api, str) and source_api.strip():
+        return source_api.strip()
+    if source_kind is not None and str(source_kind) != str(SourceKind.LOCAL_FILE):
+        return "not recorded"
+    return ""
+
+
+def _evidence_location(evidence: object) -> str:
+    page_number = getattr(evidence, "page_number", None)
+    table_index = getattr(evidence, "table_index", None)
+    if page_number is not None and table_index is not None:
+        return f"page {page_number}, table {table_index}"
+    if table_index is not None:
+        return f"table {table_index}"
+    if page_number is not None:
+        return f"page {page_number}"
+    return "document"
+
+
+def _evidence_flags(evidence: object) -> str:
+    flags: list[str] = []
+    if getattr(evidence, "ocr_applied", False):
+        ocr_confidence = getattr(evidence, "ocr_confidence", None)
+        if ocr_confidence is None:
+            flags.append("OCR")
+        else:
+            flags.append(f"OCR {_format_review_percent(ocr_confidence)}")
+    source_span_start = getattr(evidence, "source_span_start", None)
+    source_span_end = getattr(evidence, "source_span_end", None)
+    if (
+        source_span_start is None
+        or source_span_end is None
+        or source_span_start < 0
+        or source_span_end <= source_span_start
+    ):
+        flags.append("missing source span")
+    return ", ".join(flags) if flags else "none"
+
+
+def _format_review_percent(value: float) -> str:
+    return f"{value:.0%}"
+
+
+def _bounded_excerpt(text: str, limit: int) -> str:
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    if limit <= 3:
+        return collapsed[:limit]
+    return f"{collapsed[: limit - 3].rstrip()}..."
 
 
 @app.command("score-deals")
