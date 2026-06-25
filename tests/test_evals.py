@@ -120,6 +120,7 @@ def test_run_evals_command_reports_passes() -> None:
     result = runner.invoke(app, ["run-evals", "--case", "citation-span-mismatch"])
 
     assert result.exit_code == 0, result.output
+    assert "Eval results" in result.output
     assert "Ran 1 synthetic eval. 1 passed, 0 failed." in result.output
     assert "Traceback" not in result.output
 
@@ -187,6 +188,7 @@ def test_run_evals_command_reports_failures(
     result = runner.invoke(app, ["run-evals"])
 
     assert result.exit_code != 0
+    assert "Eval results" in result.output
     assert "Ran 1 synthetic eval. 0 passed, 1 failed." in result.output
     assert "- synthetic-failure: The expected behavior did not happen." in result.output
     assert "expected: PASS" in result.output
