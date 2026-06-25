@@ -88,3 +88,4 @@ Rules for all future Codex runs:
 - PR #36 loop 1: Live public API adapters must reject redirects that downgrade HTTPS even when the host and path still look expected, and shared live-research guard errors should name the active provider so operator remediation stays source-specific.
 - PR #42 loop 1: Meridian workflow placeholder updates must preserve legacy generated markers as well as legacy placeholder confidence, and Meridian deal URLs should reject any explicit port rather than only malformed ports.
 - PR #42 loop 2: URL validators that ban ports must check for an explicit port delimiter as well as parsed numeric ports, because empty ports can parse as no port.
+- PR #41: Local OCR should stay opt-in, degrade cleanly when local executables are missing, recompute citation spans after OCR inserts PDF page text, carry OCR confidence through evidence records, and keep OCR-returned prompt-injection text on the same untrusted-source path as other extracted text.
