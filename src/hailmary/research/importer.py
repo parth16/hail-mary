@@ -29,7 +29,11 @@ from hailmary.schemas.evidence import (
 )
 from hailmary.utils.slug import slugify
 
-from .meridian import MeridianWorkflowError, clean_meridian_url
+from .meridian import (
+    MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
+    MeridianWorkflowError,
+    clean_meridian_url,
+)
 from .providers import builtin_research_providers
 from .schemas import (
     ResearchImportDealSummary,
@@ -288,6 +292,12 @@ def _is_blank_prefilled_meridian_template_result(result: dict[str, object]) -> b
         return False
     if result.get("document_type") != DocumentType.PLATFORM_DEAL_PAGE.value:
         return False
+    licensing_notes = result.get("licensing_notes")
+    if (
+        not isinstance(licensing_notes, str)
+        or MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes
+    ):
+        return False
     if not _is_blank_template_value(result.get("source_api")):
         return False
     source_url = result.get("source_url")
@@ -383,6 +393,11 @@ def _validate_meridian_result_source(
         raise ResearchImportError(
             f"Research result {index} uses Meridian evidence, so source_url must be "
             "a Meridian deal page URL."
+        )
+    if result.source_api is not None:
+        raise ResearchImportError(
+            f"Research result {index} uses Meridian evidence, so source_api must be "
+            "blank. Keep the safe Meridian deal page URL in source_url."
         )
     try:
         clean_meridian_url(result.source_url)
@@ -608,7 +623,15 @@ def _evidence_record_for_result(
         source_api=result.source_api,
         retrieved_at=_as_utc(result.retrieved_at),
         external_confidence=result.confidence,
-        licensing_notes=result.licensing_notes,
+        licensing_notes=_saved_licensing_notes(result.licensing_notes),
+    )
+
+
+def _saved_licensing_notes(licensing_notes: str) -> str:
+    if MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes:
+        return licensing_notes
+    return " ".join(
+        licensing_notes.replace(MERIDIAN_WORKFLOW_TEMPLATE_MARKER, "").split()
     )
 
 
