@@ -282,6 +282,33 @@ def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
     assert "token=secret" not in output
 
 
+def test_research_workflow_rejects_tokenized_website_url_before_writing_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+
+    result = runner.invoke(
+        app,
+        [
+            "research-workflow",
+            "--company",
+            "Acme AI",
+            "--website",
+            "https://example.com/acme?token=secret#details",
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+    output = _plain_cli_output(result.output)
+    assert "website URL cannot include query strings" in output
+    assert not (data_dir / "research-plans").exists()
+    assert "token=secret" not in output
+
+
 def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled(
     tmp_path: Path,
 ) -> None:
@@ -365,6 +392,40 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
     assert result.blocking_issue_count == 0
     assert result.no_prepared_result_companies == []
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
+
+
+def test_run_research_workflow_treats_corrupt_import_state_as_blocking(
+    tmp_path: Path,
+) -> None:
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    assert deal.evidence_store_path is not None
+    deal.evidence_store_path.unlink()
+    sec_results_path = tmp_path / "sec-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        sec_form_d_results_path=sec_results_path,
+        created_at=BUILT_AT,
+    )
+
+    assert result.blocking_issue_count == 1
+    assert any(
+        issue.severity == "error" and "evidence store" in issue.message
+        for issue in result.issues
+    )
 
 
 def test_run_research_workflow_treats_live_collection_failures_as_blocking(
@@ -4767,6 +4828,45 @@ def test_prepare_public_research_results_command_requires_retrieved_at(
     output = _plain_cli_output(result.output)
     assert "retrieved_at" in output
     assert "time the source was retrieved or viewed" in output
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_command_reports_malformed_retrieved_at_as_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sec_results_path = tmp_path / "bad-retrieved-at.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": "not a timestamp",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--sec-form-d-results",
+            str(sec_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    output = _plain_cli_output(result.output)
+    assert "retrieved_at is invalid" in output
+    assert "retrieved_at is required" not in output
     assert "Traceback" not in result.output
 
 

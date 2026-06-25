@@ -3503,10 +3503,12 @@ def _first_validation_detail(exc: ValidationError) -> str:
     location_parts = tuple(first_error.get("loc", ()))
     location = ".".join(str(part) for part in location_parts)
     message = str(first_error.get("msg", "invalid value"))
+    error_type = str(first_error.get("type", ""))
     field_name = str(location_parts[-1]) if location_parts else ""
     plain_message = _plain_public_source_validation_message(
         field_name=field_name,
         message=message,
+        error_type=error_type,
     )
     return f"{location}: {plain_message}" if location else plain_message
 
@@ -3515,8 +3517,14 @@ def _plain_public_source_validation_message(
     *,
     field_name: str,
     message: str,
+    error_type: str,
 ) -> str:
     if field_name == "retrieved_at":
+        if error_type != "missing":
+            return (
+                "retrieved_at is invalid. Use an ISO 8601 timestamp for when the "
+                "source was retrieved or viewed, such as 2026-01-01T12:00:00Z."
+            )
         return (
             "retrieved_at is required. Enter the time the source was retrieved or "
             "viewed, such as 2026-01-01T12:00:00Z."

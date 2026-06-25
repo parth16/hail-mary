@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -204,13 +205,14 @@ def run_research_workflow(
 ) -> ResearchWorkflowRunSummary:
     created_at = _as_utc(created_at or datetime.now(UTC))
     try:
+        cleaned_website_url = _clean_workflow_website_url(website_url)
         cleaned_meridian_url = (
             clean_meridian_url(meridian_url) if meridian_url is not None else None
         )
         plan_result = prepare_research_plan(
             config=config,
             company_names=company_names or [],
-            website_url=website_url,
+            website_url=cleaned_website_url,
             meridian_url=cleaned_meridian_url,
             include_paid=include_paid,
             created_at=created_at,
@@ -605,7 +607,7 @@ def _import_preview_from_result(
 
 
 def _import_issue_severity(message: str) -> IssueSeverity:
-    if "No ingested deals" in message or "Run `hailmary ingest-folder`" in message:
+    if message.startswith("No ingested deals were found."):
         return "warning"
     return "error"
 
@@ -661,6 +663,42 @@ def _dedupe_paths(paths: list[Path]) -> list[Path]:
         seen.add(marker)
         deduped.append(path)
     return deduped
+
+
+def _clean_workflow_website_url(url: str | None) -> str | None:
+    if url is None:
+        return None
+    cleaned = url.strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = urlparse(cleaned)
+    except ValueError as exc:
+        raise ResearchWorkflowError("The website URL is not a valid URL.") from exc
+    if parsed.scheme not in {"http", "https"}:
+        raise ResearchWorkflowError("The website URL must start with http:// or https://.")
+    try:
+        host = parsed.hostname
+    except ValueError as exc:
+        raise ResearchWorkflowError("The website URL is not a valid URL.") from exc
+    if not parsed.netloc or host is None:
+        raise ResearchWorkflowError("The website URL must include a website host.")
+    try:
+        _port = parsed.port
+    except ValueError as exc:
+        raise ResearchWorkflowError("The website URL has an invalid port.") from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise ResearchWorkflowError(
+            "The website URL cannot include a username or password."
+        )
+    if any(character.isspace() for character in cleaned):
+        raise ResearchWorkflowError("The website URL cannot contain spaces.")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise ResearchWorkflowError(
+            "The website URL cannot include query strings, fragments, or extra "
+            "parameter text. Use the base public page URL."
+        )
+    return cleaned
 
 
 def _as_utc(value: datetime) -> datetime:
