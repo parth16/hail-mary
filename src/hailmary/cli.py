@@ -1200,11 +1200,11 @@ def prepare_meridian_workflow_command(
             _plain(f"Saved the fillable results template to {result.result_template_path}."),
             _plain(
                 "Hail Mary did not open Meridian, sign in, bypass access controls, "
-                "or save portal content."
+                "scrape pages, or save portal content."
             ),
             _plain(
-                "Use normal authenticated access and paste only allowed facts tied to page "
-                "text into the template."
+                "Use normal authenticated access and paste only short allowed evidence "
+                "snippets into the template, not screenshots or raw page dumps."
             ),
             _plain(f"After filling the template, run {next_command}"),
         ],
