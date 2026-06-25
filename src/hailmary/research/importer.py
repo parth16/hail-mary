@@ -42,6 +42,7 @@ from .schemas import (
     ResearchResultInput,
     ResearchResultsFile,
 )
+from .source_urls import validate_provider_source_url
 
 
 class ResearchImportError(RuntimeError):
@@ -335,6 +336,7 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
         if result.source_api is not None:
             _validate_source_api(result.source_api, index=display_index)
         _validate_known_provider_source_kind(result, index=display_index)
+        _validate_known_provider_source_locations(result, index=display_index)
         retrieved_at = _as_utc(result.retrieved_at)
         if retrieved_at > imported_at:
             raise ResearchImportError(
@@ -441,6 +443,42 @@ def _validate_known_provider_source_kind(
         f"Research result {index} uses provider_id {result.provider_id}, so "
         f"source_kind must be {provider.source_kind.value}."
     )
+
+
+def _validate_known_provider_source_locations(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    if result.source_url is not None:
+        _validate_provider_reference_host(
+            result.provider_id,
+            result.source_url,
+            index=index,
+            field_name="source_url",
+        )
+    if result.source_api is not None and _source_api_looks_like_url(result.source_api):
+        _validate_provider_reference_host(
+            result.provider_id,
+            result.source_api,
+            index=index,
+            field_name="source_api",
+        )
+
+
+def _validate_provider_reference_host(
+    provider_id: str,
+    value: str,
+    *,
+    index: int,
+    field_name: str,
+) -> None:
+    try:
+        validate_provider_source_url(provider_id, value, field_name=field_name)
+    except ValueError as exc:
+        raise ResearchImportError(
+            f"Research result {index} uses provider_id {provider_id}, so {exc}."
+        ) from exc
 
 
 def _match_results_to_deals(

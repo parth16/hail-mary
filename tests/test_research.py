@@ -1923,6 +1923,86 @@ def test_import_research_results_rejects_unsafe_url_like_source_apis(
         )
 
 
+def test_import_research_results_rejects_wrong_provider_source_url_host(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-wrong-provider-url.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                provider_id="sam_gov",
+                provider_name="SAM.gov search",
+                source_url="https://example.com/sam-result",
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ResearchImportError,
+        match=r"provider_id sam_gov.*source_url must use a SAM\.gov website host",
+    ):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_rejects_wrong_provider_source_api_host(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-wrong-provider-api.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                provider_id="sec_form_d",
+                source_url=None,
+                source_api="https://example.com/api/sec-result",
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ResearchImportError,
+        match=r"provider_id sec_form_d.*source_api must use an SEC website host",
+    ):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_allows_unknown_provider_source_url_host(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    custom_results_path = tmp_path / "research-results-custom-provider.json"
+    _write_results(
+        custom_results_path,
+        [
+            _research_result(
+                provider_id="custom_public_source",
+                provider_name="Custom public source",
+                source_url="https://example.com/acme-ai",
+            )
+        ],
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=custom_results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+
+    assert result.imported_count == 1
+
+
 def test_import_research_results_rejects_builtin_provider_source_kind_mismatch(
     tmp_path: Path,
 ) -> None:
