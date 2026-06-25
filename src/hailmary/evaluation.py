@@ -1061,6 +1061,10 @@ def _guard_final_decision(
         )
 
     if scored_deal.recommendation == Recommendation.PASS:
+        evidence_selection = _deterministic_recommendation_evidence_selection(
+            store,
+            scored_deal,
+        )
         forced_pass_warning = (
             "The final model recommended "
             f"{_recommendation_summary(model_recommendation)}, but rule-based scoring "
@@ -1068,14 +1072,34 @@ def _guard_final_decision(
             "gates or score gates into INVEST. Rule-based scoring means fixed checks "
             "over source-linked evidence."
         )
+        warnings = [forced_pass_warning]
+        forced_pass_reason = f"Rule-based scoring forced PASS: {scored_deal.one_line_reason}"
+        if evidence_selection.filtered_reference_count and not evidence_selection.references:
+            citation_limitation = (
+                "Hail Mary removed all rule-based recommendation citations because they "
+                "looked like instructions embedded in source documents, not investment "
+                "evidence. Treat this PASS as limited until source-linked evidence is "
+                "verified."
+            )
+            warnings.append(citation_limitation)
+            forced_pass_reason = (
+                f"NEEDS_DILIGENCE: {citation_limitation} "
+                f"Rule-based scoring forced PASS: {scored_deal.one_line_reason}"
+            )
+        elif evidence_selection.filtered_reference_count:
+            warnings.append(
+                "Hail Mary removed one or more rule-based recommendation citations "
+                "because they looked like instructions embedded in source documents, "
+                "not investment evidence."
+            )
         return GuardedFinalDecision(
             recommendation=AgentRecommendationRationale(
                 recommendation=Recommendation.PASS,
                 check_size=0,
-                reason=f"Rule-based scoring forced PASS: {scored_deal.one_line_reason}",
-                evidence=_deterministic_recommendation_evidence(store, scored_deal),
+                reason=forced_pass_reason,
+                evidence=evidence_selection.references,
             ),
-            warning=forced_pass_warning,
+            warning=" ".join(warnings),
         )
 
     if model_recommendation.recommendation == Recommendation.PASS:
