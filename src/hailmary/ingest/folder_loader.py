@@ -217,7 +217,7 @@ def _unreadable_deal_names(
         relative_path = Path(display_path)
         if relative_path.is_absolute() or not relative_path.parts:
             continue
-        deal_name = _deal_name_for_path(
+        deal_name = _deal_name_for_unreadable_path(
             relative_path,
             root_path=root_path,
             use_collection_subfolders=use_collection_subfolders,
@@ -225,6 +225,24 @@ def _unreadable_deal_names(
         if deal_name not in deal_names:
             deal_names.append(deal_name)
     return deal_names
+
+
+def _deal_name_for_unreadable_path(
+    relative_path: Path,
+    *,
+    root_path: Path,
+    use_collection_subfolders: bool,
+) -> str:
+    if use_collection_subfolders:
+        if len(relative_path.parts) > 1:
+            return relative_path.parts[0]
+        if (root_path / relative_path).is_dir():
+            return relative_path.parts[0]
+    return _deal_name_for_path(
+        relative_path,
+        root_path=root_path,
+        use_collection_subfolders=use_collection_subfolders,
+    )
 
 
 def _scan_input_paths(root_path: Path) -> tuple[list[Path], list[Path]]:

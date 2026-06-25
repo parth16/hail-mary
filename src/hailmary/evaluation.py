@@ -529,7 +529,24 @@ def _rule_based_final_decision(
     )
     final_confidence = scored_deal.confidence
     unsupported = not references
-    if scored_deal.recommendation == Recommendation.INVEST and not references:
+    if (
+        scored_deal.recommendation == Recommendation.INVEST
+        and evidence_selection.filtered_reference_count
+        and references
+    ):
+        citation_limitation = (
+            "Rule-based scoring suggested INVEST, but one or more supporting evidence "
+            "records looked like instructions embedded in source documents, not "
+            "investment evidence. The final recommendation was changed to PASS until "
+            "the score can be verified without that unsafe support."
+        )
+        final_recommendation = Recommendation.PASS
+        final_check_size = 0
+        final_reason = f"NEEDS_DILIGENCE: {citation_limitation}"
+        final_confidence = ConfidenceLevel.LOW
+        unsupported = True
+        references = []
+    elif scored_deal.recommendation == Recommendation.INVEST and not references:
         citation_limitation = (
             "Rule-based scoring suggested INVEST, but Hail Mary could not keep safe "
             "cited evidence after citation checks. The final recommendation was "
@@ -659,8 +676,13 @@ def render_final_evaluation_memo(
                     f"Confidence: {finding.confidence}. Materiality: "
                     f"{_memo_text(finding.materiality)}.{_citation_text(finding.evidence)}"
                 )
-    else:
+    elif final_review_was_model:
         lines.append("- No specialist output passed validation.")
+    else:
+        lines.append(
+            "- Model review was skipped for this run, so no specialist model roles "
+            "were attempted."
+        )
 
     lines.extend(["", "## Final Recommendation"])
     if final_review_was_model and final_output.recommendation is not None:
@@ -1144,15 +1166,14 @@ def _deterministic_recommendation_evidence_selection(
         if evidence is None:
             continue
         references.append(_reference_for_evidence(evidence))
-    candidate_references = references[:5]
     safe_references = _validated_deterministic_recommendation_references(
-        candidate_references,
+        references,
         store,
         scored_deal,
     )
     return DeterministicEvidenceSelection(
-        references=safe_references,
-        filtered_reference_count=len(candidate_references) - len(safe_references),
+        references=safe_references[:5],
+        filtered_reference_count=len(references) - len(safe_references),
     )
 
 
