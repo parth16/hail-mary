@@ -11,6 +11,7 @@ from typing import Protocol
 
 OCR_EXPLANATION = "OCR means reading text from images."
 LOW_OCR_CONFIDENCE_THRESHOLD = 0.55
+OCR_SUBPROCESS_TIMEOUT_SECONDS = 60
 
 
 class LocalOcrError(RuntimeError):
@@ -87,7 +88,14 @@ class SubprocessLocalOcrEngine:
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    timeout=OCR_SUBPROCESS_TIMEOUT_SECONDS,
                 )
+            except subprocess.TimeoutExpired as exc:
+                raise LocalOcrError(
+                    "Image-based text reading (OCR) took too long while rendering the "
+                    "PDF page and was stopped after 60 seconds. "
+                    f"{OCR_EXPLANATION}"
+                ) from exc
             except OSError as exc:
                 raise LocalOcrError(
                     "Could not render the PDF page for image-based text reading (OCR): "
@@ -116,7 +124,13 @@ class SubprocessLocalOcrEngine:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                timeout=OCR_SUBPROCESS_TIMEOUT_SECONDS,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise LocalOcrError(
+                "Image-based text reading (OCR) took too long while reading the image "
+                f"and was stopped after 60 seconds. {OCR_EXPLANATION}"
+            ) from exc
         except OSError as exc:
             raise LocalOcrError(
                 "Could not run image-based text reading (OCR): "

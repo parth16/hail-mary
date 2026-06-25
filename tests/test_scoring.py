@@ -870,6 +870,28 @@ def test_render_markdown_memo_escapes_untrusted_document_paths() -> None:
     assert "\n- ev_fake:" not in markdown
 
 
+def test_render_markdown_memo_includes_ocr_lineage_for_cited_evidence() -> None:
+    evidence = [
+        _evidence("ev_ocr", "Valuation cap $8M.").model_copy(
+            update={
+                "file_type": FileType.PNG,
+                "document_path": Path("scan.png"),
+                "ocr_applied": True,
+                "ocr_confidence": 0.86,
+            }
+        )
+    ]
+    claim = _claim("valuation cap", "$8M", "ev_ocr")
+    store = _store(evidence=evidence, claims=[claim])
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert "image-based text reading (OCR" in markdown
+    assert "OCR means reading text from images" in markdown
+    assert "OCR confidence: 86%" in markdown
+
+
 def test_render_markdown_memo_includes_cited_evidence_beyond_first_25() -> None:
     evidence = [
         _evidence(f"ev_{index}", f"Background evidence {index}.")

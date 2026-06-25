@@ -289,6 +289,43 @@ def test_evaluate_deal_warnings_include_ingestion_ocr_warnings() -> None:
     ]
 
 
+def test_evaluate_deal_warnings_include_ocr_recommended_documents() -> None:
+    source = SourceDocument(
+        id="doc_ocr",
+        deal_id="deal_ocr",
+        path=Path("scan.pdf"),
+        source_kind=SourceKind.LOCAL_FILE,
+        document_type=DocumentType.UNKNOWN,
+        file_type=FileType.PDF,
+        title="scan",
+        ingested_at=datetime(2026, 1, 1, tzinfo=UTC),
+        sha256="abc",
+        extraction_quality=ExtractionQuality.LOW,
+        ocr_recommended=True,
+        vision_recommended=True,
+        notes=(
+            "Some pages may need local OCR, image-based text reading (OCR), before "
+            "Hail Mary can use all of their content. OCR means reading text from images."
+        ),
+    )
+    deal = IngestedDeal(
+        id="deal_ocr",
+        company_name="OcrCo",
+        documents=[
+            IngestedDocument(
+                source=source,
+                pages=[],
+                tables=[],
+                output_path=Path("doc.json"),
+            )
+        ],
+    )
+
+    warnings = evaluation._ingestion_ocr_warnings(deal)
+
+    assert warnings
+
+
 def test_evaluate_deal_final_decision_validation_failure_does_not_write_final_memo(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -520,6 +557,60 @@ def test_cited_evidence_lines_include_validated_conflict_claim_citations() -> No
     assert "Valuation cap $8M" in evidence_text
     assert "ev-conflict-b" in evidence_text
     assert "Valuation cap $10M" in evidence_text
+
+
+def test_cited_evidence_lines_include_ocr_lineage() -> None:
+    evidence = _evidence_record(
+        "ev-ocr",
+        "Valuation cap $8M. Customer traction is growing.",
+        "scan.png",
+    ).model_copy(
+        update={
+            "file_type": FileType.PNG,
+            "ocr_applied": True,
+            "ocr_confidence": 0.86,
+        }
+    )
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="OcrCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence],
+        claims=[],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="OcrCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Synthetic OCR evidence.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Synthetic OCR evidence requires caution.",
+        evidence=[AgentEvidenceReference(evidence_id="ev-ocr")],
+    )
+    final_output = AgentReviewOutput(
+        deal_id="deal-1",
+        company_name="OcrCo",
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    lines = evaluation._cited_evidence_lines(
+        store,
+        scored_deal,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+    )
+
+    evidence_text = "\n".join(lines)
+    assert "image-based text reading (OCR" in evidence_text
+    assert "OCR means reading text from images" in evidence_text
+    assert "OCR confidence: 86%" in evidence_text
 
 
 def test_evaluate_deal_final_memo_includes_source_document_location(

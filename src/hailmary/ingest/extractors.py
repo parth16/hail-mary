@@ -55,6 +55,13 @@ IMAGE_LOCAL_OCR_NOTE = (
     "extracted. OCR means reading text from images."
 )
 OCR_APPLIED_NOTE = "Image-based text reading (OCR) was used for this text."
+OCR_ATTEMPTED_NOTE = (
+    "Image-based text reading (OCR) was attempted. OCR means reading text from images."
+)
+OCR_LOW_TEXT_NOTE = (
+    "Image-based text reading (OCR) found only a small amount of text. "
+    "Review the source image because most content may still be unreadable."
+)
 
 
 class ExtractionResult(BaseModel):
@@ -343,7 +350,6 @@ def _pdf_ocr_target_pages(pages: list[ExtractedPage]) -> list[ExtractedPage]:
         and (
             document_needs_ocr
             or not page.raw_text.strip()
-            or page.vision_recommended
             or _page_note_contains(page, LOCAL_OCR_IMAGE_PAGE_NOTE)
         )
     ]
@@ -462,13 +468,25 @@ def _apply_ocr_result_to_page(
     page: ExtractedPage,
     ocr_result: LocalOcrResult,
 ) -> None:
-    page.ocr_applied = True
-    page.ocr_confidence = ocr_result.confidence
     if not ocr_result.text.strip():
-        page.notes = _append_note(page.notes, _ocr_page_notes(ocr_result))
+        page.notes = _append_note(
+            page.notes,
+            _ocr_page_notes(ocr_result, applied=False),
+        )
         return
 
     if _ocr_result_is_low_confidence(ocr_result):
+        page.ocr_confidence = ocr_result.confidence
+        if page.clean_text.strip():
+            page.needs_ocr = True
+            page.vision_recommended = True
+            page.notes = _append_note(
+                page.notes,
+                _ocr_page_notes(ocr_result, applied=False),
+            )
+            return
+
+        page.ocr_applied = True
         updated_page = _make_page(
             ocr_result.text,
             page_number=page.page_number,
@@ -487,22 +505,31 @@ def _apply_ocr_result_to_page(
         page.notes = updated_page.notes
         return
 
+    page.ocr_applied = True
+    page.ocr_confidence = ocr_result.confidence
     updated_page = _make_page(
         ocr_result.text,
         page_number=page.page_number,
-        needs_ocr=False,
-        vision_recommended=False,
+        needs_ocr=None,
+        vision_recommended=None,
         source_span_start=page.source_span_start,
         notes=_ocr_page_notes(ocr_result),
     )
+    clean_text = updated_page.clean_text
+    word_count = updated_page.word_count
+    notes = updated_page.notes
+    if updated_page.needs_ocr:
+        clean_text = ""
+        word_count = 0
+        notes = _append_note(notes, OCR_LOW_TEXT_NOTE)
     page.raw_text = updated_page.raw_text
-    page.clean_text = updated_page.clean_text
-    page.word_count = updated_page.word_count
-    page.needs_ocr = False
-    page.vision_recommended = False
+    page.clean_text = clean_text
+    page.word_count = word_count
+    page.needs_ocr = updated_page.needs_ocr
+    page.vision_recommended = updated_page.vision_recommended
     page.source_span_end = updated_page.source_span_end
     page.removed_boilerplate_lines = updated_page.removed_boilerplate_lines
-    page.notes = updated_page.notes
+    page.notes = notes
 
 
 def _ocr_result_is_low_confidence(ocr_result: LocalOcrResult) -> bool:
@@ -512,8 +539,8 @@ def _ocr_result_is_low_confidence(ocr_result: LocalOcrResult) -> bool:
     )
 
 
-def _ocr_page_notes(ocr_result: LocalOcrResult) -> str:
-    notes = _append_note(None, OCR_APPLIED_NOTE)
+def _ocr_page_notes(ocr_result: LocalOcrResult, *, applied: bool = True) -> str:
+    notes = _append_note(None, OCR_APPLIED_NOTE if applied else OCR_ATTEMPTED_NOTE)
     if _ocr_result_is_low_confidence(ocr_result):
         notes = _append_note(
             notes,

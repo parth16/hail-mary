@@ -920,7 +920,7 @@ def _ingestion_ocr_warnings(deal: IngestedDeal) -> list[str]:
     ocr_warning_documents = sum(
         1
         for document in deal.documents
-        if _has_ocr_warning(document.source.notes)
+        if document.source.ocr_recommended or _has_ocr_warning(document.source.notes)
     )
     if not ocr_warning_documents:
         return []
@@ -945,6 +945,8 @@ def _has_ocr_warning(notes: str | None) -> bool:
             "found no readable text",
             "low confidence",
             "needs the local",
+            "needs local ocr",
+            "may need",
         ]
     )
 
@@ -1268,10 +1270,22 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
         source_parts.append(f"confidence: {_memo_text(evidence.external_confidence)}")
     if evidence.licensing_notes:
         source_parts.append(f"licensing: {_memo_text(evidence.licensing_notes)}")
+    if evidence.ocr_applied:
+        source_parts.append(
+            "text source: image-based text reading (OCR; OCR means reading text from images)"
+        )
+        if evidence.ocr_confidence is not None:
+            source_parts.append(
+                f"OCR confidence: {_memo_text(_format_ocr_confidence(evidence.ocr_confidence))}"
+            )
     return (
         f"- {_memo_text(evidence.id)}: {'; '.join(source_parts)}. "
         f"Quote/excerpt: \"{excerpt}\""
     )
+
+
+def _format_ocr_confidence(confidence: float) -> str:
+    return f"{confidence:.0%}"
 
 
 def _limitation_lines(

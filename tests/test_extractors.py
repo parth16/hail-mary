@@ -10,7 +10,12 @@ from docx import Document
 
 from hailmary.ingest import extractors
 from hailmary.ingest.extractors import extract_document
-from hailmary.ingest.ocr import LocalOcrError, LocalOcrResult, SubprocessLocalOcrEngine
+from hailmary.ingest.ocr import (
+    OCR_SUBPROCESS_TIMEOUT_SECONDS,
+    LocalOcrError,
+    LocalOcrResult,
+    SubprocessLocalOcrEngine,
+)
 from hailmary.schemas.documents import ExtractedPage, ExtractionQuality
 
 
@@ -257,6 +262,7 @@ def test_subprocess_ocr_decodes_tesseract_output_with_utf8_replacement(
         text: bool,
         encoding: str,
         errors: str,
+        timeout: int,
     ) -> subprocess.CompletedProcess[str]:
         seen_options.update(
             {
@@ -265,6 +271,7 @@ def test_subprocess_ocr_decodes_tesseract_output_with_utf8_replacement(
                 "text": text,
                 "encoding": encoding,
                 "errors": errors,
+                "timeout": timeout,
             }
         )
         return subprocess.CompletedProcess(
@@ -290,7 +297,32 @@ def test_subprocess_ocr_decodes_tesseract_output_with_utf8_replacement(
         "text": True,
         "encoding": "utf-8",
         "errors": "replace",
+        "timeout": OCR_SUBPROCESS_TIMEOUT_SECONDS,
     }
+
+
+def test_subprocess_ocr_timeout_warns_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image_path = tmp_path / "scan.png"
+    image_path.write_bytes(b"synthetic image placeholder")
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            cmd=["tesseract"],
+            timeout=OCR_SUBPROCESS_TIMEOUT_SECONDS,
+        )
+
+    monkeypatch.setattr("hailmary.ingest.ocr.shutil.which", lambda _: "/usr/bin/tesseract")
+    monkeypatch.setattr("hailmary.ingest.ocr.subprocess.run", fake_run)
+
+    result = extract_document(image_path, ocr_engine=SubprocessLocalOcrEngine())
+
+    assert result.ocr_recommended
+    assert not result.ocr_applied
+    assert result.notes is not None
+    assert "took too long" in result.notes
+    assert "OCR means reading text from images" in result.notes
 
 
 def test_image_ocr_low_confidence_is_recorded(tmp_path: Path) -> None:
@@ -317,6 +349,29 @@ def test_image_ocr_low_confidence_is_recorded(tmp_path: Path) -> None:
     assert "low confidence" in result.notes
     assert result.pages[0].notes is not None
     assert "low confidence" in result.pages[0].notes
+
+
+def test_image_ocr_tiny_fragment_remains_evidence_less(tmp_path: Path) -> None:
+    image_path = tmp_path / "scan.jpg"
+    image_path.write_bytes(b"synthetic image placeholder")
+    engine = FakeOcrEngine(
+        image_result=LocalOcrResult(
+            text="1",
+            confidence=0.91,
+        )
+    )
+
+    result = extract_document(image_path, ocr_engine=engine)
+
+    assert result.ocr_applied
+    assert result.ocr_recommended
+    assert result.vision_recommended
+    assert result.combined_text == ""
+    assert result.pages[0].raw_text == "1"
+    assert result.pages[0].clean_text == ""
+    assert result.pages[0].needs_ocr
+    assert result.pages[0].notes is not None
+    assert "only a small amount of text" in result.pages[0].notes
 
 
 def test_missing_image_file_is_recorded_without_crashing(tmp_path: Path) -> None:
@@ -438,6 +493,45 @@ def test_pdf_partial_ocr_failure_keeps_other_pages(
     assert result.combined_text == "Customer revenue is growing."
     assert result.notes is not None
     assert "Could not run image-based text reading (OCR)" in result.notes
+
+
+def test_pdf_low_confidence_ocr_preserves_existing_page_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return "Valuation cap $8M. Round size $1M."
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="Valuation cap $80M.",
+                confidence=0.12,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert engine.pdf_calls == [1]
+    assert result.combined_text == "Valuation cap $8M. Round size $1M."
+    assert not result.ocr_applied
+    assert result.ocr_recommended
+    assert result.pages[0].raw_text == "Valuation cap $8M. Round size $1M."
+    assert result.pages[0].clean_text == "Valuation cap $8M. Round size $1M."
+    assert result.pages[0].ocr_confidence == 0.12
+    assert not result.pages[0].ocr_applied
+    assert result.pages[0].notes is not None
+    assert "low confidence" in result.pages[0].notes
 
 
 def test_pdf_missing_pdftoppm_warns_without_crashing(
@@ -603,6 +697,42 @@ def test_pdf_low_text_divider_with_readable_page_does_not_warn_document(
 
     result = extract_document(pdf_path)
 
+    assert result.pages[0].needs_ocr
+    assert not result.ocr_recommended
+    assert not result.vision_recommended
+    assert result.notes is None
+
+
+def test_pdf_low_text_divider_with_ocr_enabled_is_not_ocr_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class TextPage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        pages = [
+            TextPage("1"),
+            TextPage("Readable traction text with customer growth and revenue context."),
+        ]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(text="Unexpected OCR text.", confidence=0.95),
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert engine.pdf_calls == []
+    assert result.pages[0].clean_text == "1"
     assert result.pages[0].needs_ocr
     assert not result.ocr_recommended
     assert not result.vision_recommended
