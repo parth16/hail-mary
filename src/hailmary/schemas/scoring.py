@@ -68,6 +68,7 @@ class ScoredDeal(BaseModel):
     capital_remaining_before: int | None = None
     capital_remaining_after: int | None = None
     memo_path: Path | None = None
+    portfolio_rank: int | None = None
 
     @property
     def triggered_kill_gates(self) -> list[KillGate]:
@@ -77,6 +78,7 @@ class ScoredDeal(BaseModel):
 class MemoRunSummary(BaseModel):
     report_dir: Path
     scored_deals: list[ScoredDeal] = Field(default_factory=list)
+    portfolio_report_path: Path | None = None
 
     @property
     def deal_count(self) -> int:

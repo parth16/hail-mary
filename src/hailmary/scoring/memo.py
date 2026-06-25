@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from hailmary.config import AppConfig, ConfigError, validate_local_state
+from hailmary.config import CHECK_SIZE_TIERS, AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.documents import IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import MemoRunSummary, Recommendation, ScoredDeal
@@ -19,6 +19,14 @@ from hailmary.utils.slug import slugify
 
 class ScoringError(RuntimeError):
     """Scoring could not continue safely."""
+
+
+CONFIDENCE_RANK = {
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+}
+PORTFOLIO_REPORT_FILENAME = "portfolio-comparison-report.md"
 
 
 def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
@@ -65,15 +73,12 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
 
     remaining_capital = config.capital_budget
     scored_by_index: dict[int, ScoredDeal] = {}
+    portfolio_rank_by_index: dict[int, int] = {}
     ranked_inputs = sorted(
         enumerate(scoring_inputs),
-        key=lambda item: (
-            item[1][1].recommendation == Recommendation.INVEST,
-            item[1][1].total_score,
-        ),
-        reverse=True,
+        key=lambda item: _portfolio_rank_key(item[1][1]),
     )
-    for index, (store, _, _) in ranked_inputs:
+    for portfolio_rank, (index, (store, _, _)) in enumerate(ranked_inputs, start=1):
         scored_deal = score_evidence_store(
             store,
             config=config,
@@ -81,6 +86,7 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
         )
         remaining_capital = scored_deal.capital_remaining_after or 0
         scored_by_index[index] = scored_deal
+        portfolio_rank_by_index[index] = portfolio_rank
 
     scored_deals: list[ScoredDeal] = []
     for index, (store, _, memo_path) in enumerate(scoring_inputs):
@@ -90,9 +96,27 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
             render_markdown_memo(scored_deal, store),
             description="Markdown memo",
         )
-        scored_deals.append(scored_deal.model_copy(update={"memo_path": memo_path}))
+        scored_deals.append(
+            scored_deal.model_copy(
+                update={
+                    "memo_path": memo_path,
+                    "portfolio_rank": portfolio_rank_by_index[index],
+                }
+            )
+        )
 
-    return MemoRunSummary(report_dir=report_dir, scored_deals=scored_deals)
+    portfolio_report_path = report_dir / PORTFOLIO_REPORT_FILENAME
+    _write_private_text(
+        portfolio_report_path,
+        render_portfolio_report(scored_deals, config=config),
+        description="portfolio comparison report",
+    )
+
+    return MemoRunSummary(
+        report_dir=report_dir,
+        scored_deals=scored_deals,
+        portfolio_report_path=portfolio_report_path,
+    )
 
 
 def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
@@ -160,6 +184,190 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def render_portfolio_report(
+    scored_deals: list[ScoredDeal],
+    *,
+    config: AppConfig,
+) -> str:
+    ranked_deals = sorted(scored_deals, key=_portfolio_report_order_key)
+    allocated_capital = sum(deal.check_size for deal in scored_deals)
+    remaining_capital = max(0, config.capital_budget - allocated_capital)
+    lines = [
+        "# Hail Mary Portfolio Comparison Report",
+        "",
+        "## Portfolio Constraints",
+        "",
+        f"- Capital budget: {_format_check_size(config.capital_budget)}",
+        f"- Allocated capital: {_format_check_size(allocated_capital)}",
+        f"- Remaining capital after allocation: {_format_check_size(remaining_capital)}",
+        f"- Allowed check sizes: {_check_tier_text(config)}",
+        f"- Configured minimum check: {_format_check_size(config.min_check)}",
+        f"- Configured maximum check: {_format_check_size(config.max_check)}",
+        "",
+        "## Ranked Deals",
+        "",
+    ]
+
+    if not ranked_deals:
+        lines.append("No scored deals were available.")
+    else:
+        lines.extend(
+            [
+                "| Rank | Company | Recommendation | Check size | Score | Confidence | "
+                "Triggered kill gates | Budget before | Budget after |",
+                "| ---: | --- | --- | ---: | ---: | --- | --- | ---: | ---: |",
+            ]
+        )
+        for rank, deal in enumerate(ranked_deals, start=1):
+            lines.append(
+                "| "
+                f"{rank} | "
+                f"{_memo_metadata_value(deal.company_name)} | "
+                f"{_memo_metadata_value(str(deal.recommendation))} | "
+                f"{_format_check_size(deal.check_size)} | "
+                f"{deal.total_score}/{deal.max_score} | "
+                f"{_memo_metadata_value(str(deal.confidence))} | "
+                f"{_triggered_gate_summary(deal)} | "
+                f"{_optional_check_size(deal.capital_remaining_before)} | "
+                f"{_optional_check_size(deal.capital_remaining_after)} |"
+            )
+
+    lines.extend(["", "## Deal Details"])
+    if not ranked_deals:
+        lines.append("")
+        lines.append("No scored deal details were available.")
+    for deal in ranked_deals:
+        lines.extend(
+            [
+                "",
+                f"### {_memo_metadata_value(deal.company_name)}",
+                "",
+                f"- Deal ID: {_memo_metadata_value(deal.deal_id)}",
+                f"- Recommendation: {_memo_metadata_value(str(deal.recommendation))}",
+                f"- Suggested check: {_format_check_size(deal.check_size)}",
+                f"- Score: {deal.total_score}/{deal.max_score}",
+                f"- Confidence: {_memo_metadata_value(str(deal.confidence))}",
+                f"- Memo path: {_memo_metadata_value(str(deal.memo_path or 'not written'))}",
+                "- Key risks:",
+            ]
+        )
+        for risk in _portfolio_key_risk_lines(deal):
+            lines.append(f"  - {risk}")
+
+        lines.append("- Kill gates:")
+        for gate in deal.kill_gates:
+            status = "TRIGGERED" if gate.triggered else "Clear"
+            lineage_label = "NEEDS_DILIGENCE" if gate.triggered else "INFERRED"
+            lines.append(
+                "  - "
+                f"{status} ({lineage_label}): {_memo_metadata_value(gate.name)}. "
+                f"{_memo_metadata_value(gate.reason)}"
+            )
+
+    lines.extend(
+        [
+            "",
+            "This report is a diligence aid, not legal, tax, financial, or investment advice.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _portfolio_rank_key(deal: ScoredDeal) -> tuple[int, int, int, int, str, str]:
+    return (
+        0 if deal.recommendation == Recommendation.INVEST else 1,
+        -deal.total_score,
+        -CONFIDENCE_RANK.get(str(deal.confidence), 0),
+        -deal.check_size,
+        deal.company_name.casefold(),
+        deal.deal_id.casefold(),
+    )
+
+
+def _portfolio_report_order_key(deal: ScoredDeal) -> tuple[int, int, int, int, int, str, str]:
+    if deal.portfolio_rank is not None:
+        return (0, deal.portfolio_rank, 0, 0, 0, "", "")
+    recommendation_rank, score_rank, confidence_rank, check_rank, company, deal_id = (
+        _portfolio_rank_key(deal)
+    )
+    return (
+        1,
+        recommendation_rank,
+        score_rank,
+        confidence_rank,
+        check_rank,
+        company,
+        deal_id,
+    )
+
+
+def _check_tier_text(config: AppConfig) -> str:
+    maximum_nonzero_check = min(config.max_check, config.capital_budget)
+    allowed_tiers = [
+        tier
+        for tier in CHECK_SIZE_TIERS
+        if tier == 0 or config.min_check <= tier <= maximum_nonzero_check
+    ]
+    return ", ".join(_format_check_size(tier) for tier in allowed_tiers)
+
+
+def _optional_check_size(check_size: int | None) -> str:
+    if check_size is None:
+        return "unknown"
+    return _format_check_size(check_size)
+
+
+def _triggered_gate_summary(deal: ScoredDeal) -> str:
+    if not deal.triggered_kill_gates:
+        return "None"
+    return "; ".join(_memo_metadata_value(gate.name) for gate in deal.triggered_kill_gates)
+
+
+def _portfolio_key_risk_lines(deal: ScoredDeal) -> list[str]:
+    risks: list[str] = []
+    for gate in deal.triggered_kill_gates:
+        risks.append(
+            "NEEDS_DILIGENCE: "
+            f"{_memo_metadata_value(gate.name)}. {_memo_metadata_value(gate.reason)}"
+        )
+
+    for factor in deal.score_factors:
+        if factor.score >= factor.max_score:
+            continue
+        evidence_text = _portfolio_evidence_text(factor.evidence_ids)
+        label = "INFERRED" if factor.evidence_ids else "NEEDS_DILIGENCE"
+        risks.append(
+            f"{label}: {_memo_metadata_value(factor.name)} scored "
+            f"{factor.score}/{factor.max_score}. "
+            f"{_memo_metadata_value(factor.explanation)}{evidence_text}"
+        )
+
+    for question in deal.diligence_questions:
+        risks.append(
+            "NEEDS_DILIGENCE: "
+            f"{_memo_metadata_value(question.question)} Reason: "
+            f"{_memo_metadata_value(question.reason)}"
+            f"{_portfolio_evidence_text(question.evidence_ids)}"
+        )
+
+    if not risks:
+        risks.append(
+            "INFERRED: No blocking deterministic risks were found; "
+            "verify the source-linked deal memo before committing capital."
+        )
+    return risks
+
+
+def _portfolio_evidence_text(evidence_ids: list[str]) -> str:
+    if not evidence_ids:
+        return ""
+    formatted_evidence_ids = ", ".join(
+        _memo_metadata_value(evidence_id) for evidence_id in evidence_ids
+    )
+    return f" Evidence: {formatted_evidence_ids}."
 
 
 def _load_ingestion_summary(summary_path: Path) -> IngestionSummary:

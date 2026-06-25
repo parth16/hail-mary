@@ -31,13 +31,20 @@ from hailmary.schemas.evidence import (
 )
 from hailmary.schemas.scoring import (
     ConfidenceLevel,
+    DiligenceQuestion,
     FundabilityRisk,
+    KillGate,
     PMFLevel,
     Recommendation,
     ScoredDeal,
     ScoreFactor,
 )
-from hailmary.scoring import render_markdown_memo, score_evidence_store, score_latest_ingestion
+from hailmary.scoring import (
+    render_markdown_memo,
+    render_portfolio_report,
+    score_evidence_store,
+    score_latest_ingestion,
+)
 from hailmary.scoring.memo import ScoringError, _write_private_text
 
 runner = CliRunner()
@@ -1045,6 +1052,268 @@ def test_score_latest_ingestion_writes_private_markdown_memos(tmp_path: Path) ->
     assert stat.S_IMODE(memo_path.stat().st_mode) == 0o600
 
 
+def test_score_latest_ingestion_writes_private_portfolio_report(tmp_path: Path) -> None:
+    stores = [
+        _strong_store(deal_id="deal_one", company_name="Deal One"),
+        _store_without_funding_signal(
+            deal_id="deal_two",
+            company_name="Deal Two",
+        ),
+    ]
+    _write_ingestion_summary(tmp_path, stores)
+
+    result = score_latest_ingestion(config=AppConfig(data_dir=tmp_path / "data"))
+
+    portfolio_report_path = result.portfolio_report_path
+    assert portfolio_report_path == tmp_path / "data" / "reports" / (
+        "portfolio-comparison-report.md"
+    )
+    assert portfolio_report_path.exists()
+    assert stat.S_IMODE(portfolio_report_path.stat().st_mode) == 0o600
+    report = portfolio_report_path.read_text(encoding="utf-8")
+    assert report.startswith("# Hail Mary Portfolio Comparison Report")
+    assert "## Portfolio Constraints" in report
+    assert "Allowed check sizes: $0, $1K, $2.5K, $5K, $7.5K, $10K" in report
+    assert "Configured minimum check: $1K" in report
+    assert "Configured maximum check: $10K" in report
+    assert "## Ranked Deals" in report
+    assert "## Deal Details" in report
+    assert "Memo path:" in report
+
+
+def test_render_portfolio_report_ranks_final_scored_deals_deterministically(
+    tmp_path: Path,
+) -> None:
+    lower_score_store = _store_without_funding_signal(
+        deal_id="deal_lower",
+        company_name="A Lower Score",
+    )
+    higher_score_store = _strong_store(
+        deal_id="deal_higher",
+        company_name="B Higher Score",
+    )
+    _write_ingestion_summary(tmp_path, [lower_score_store, higher_score_store])
+
+    result = score_latest_ingestion(
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=2_500)
+    )
+
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    higher_row = "| 1 | B Higher Score | INVEST | $2.5K |"
+    lower_row = "| 2 | A Lower Score | PASS | $0 |"
+    assert higher_row in report
+    assert lower_row in report
+    assert report.index(higher_row) < report.index(lower_row)
+    assert "No available check size" in report
+
+
+def test_score_latest_ingestion_allocates_tied_deals_in_report_rank_order(
+    tmp_path: Path,
+) -> None:
+    later_company_store = _strong_store(
+        deal_id="deal_zeta",
+        company_name="Zeta Score",
+    )
+    earlier_company_store = _strong_store(
+        deal_id="deal_alpha",
+        company_name="Alpha Score",
+    )
+    _write_ingestion_summary(tmp_path, [later_company_store, earlier_company_store])
+
+    result = score_latest_ingestion(
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=2_500)
+    )
+
+    scored_by_company = {deal.company_name: deal for deal in result.scored_deals}
+    assert scored_by_company["Alpha Score"].recommendation == Recommendation.INVEST
+    assert scored_by_company["Alpha Score"].check_size == 2_500
+    assert scored_by_company["Zeta Score"].recommendation == Recommendation.PASS
+    assert scored_by_company["Zeta Score"].check_size == 0
+
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    alpha_row = "| 1 | Alpha Score | INVEST | $2.5K |"
+    zeta_row = "| 2 | Zeta Score | PASS | $0 |"
+    assert alpha_row in report
+    assert zeta_row in report
+    assert report.index(alpha_row) < report.index(zeta_row)
+    assert "| $2.5K | $0 |" in report
+
+
+def test_portfolio_report_preserves_allocation_order_when_early_pass_spends_no_capital(
+    tmp_path: Path,
+) -> None:
+    high_minimum_evidence = [
+        _evidence(
+            "ev_high_min_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. Minimum investment $5K.",
+            deal_id="deal_high_min",
+        ),
+        _evidence(
+            "ev_high_min_traction",
+            "ARR revenue growth with paid customers and retention.",
+            deal_id="deal_high_min",
+        ),
+        _evidence(
+            "ev_high_min_funding",
+            "Lead investor committed and seed round is active.",
+            deal_id="deal_high_min",
+        ),
+    ]
+    high_minimum_store = _store(
+        evidence=high_minimum_evidence,
+        claims=[
+            _claim("valuation cap", "$8M", "ev_high_min_terms", deal_id="deal_high_min"),
+            _claim("discount", "20%", "ev_high_min_terms", deal_id="deal_high_min"),
+            _claim("round size", "$1M", "ev_high_min_terms", deal_id="deal_high_min"),
+            _claim(
+                "minimum investment",
+                "$5K",
+                "ev_high_min_terms",
+                deal_id="deal_high_min",
+            ),
+        ],
+        deal_id="deal_high_min",
+        company_name="High Minimum",
+    )
+    affordable_store = _strong_store(
+        deal_id="deal_affordable",
+        company_name="Affordable",
+    )
+    _write_ingestion_summary(tmp_path, [high_minimum_store, affordable_store])
+
+    result = score_latest_ingestion(
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=2_500)
+    )
+
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    high_minimum_row = "| 1 | High Minimum | PASS | $0 |"
+    affordable_row = "| 2 | Affordable | INVEST | $2.5K |"
+    assert high_minimum_row in report
+    assert affordable_row in report
+    assert report.index(high_minimum_row) < report.index(affordable_row)
+    assert "| $2.5K | $2.5K |" in report
+    assert "| $2.5K | $0 |" in report
+
+
+def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> None:
+    strong_scored = score_evidence_store(
+        _strong_store(deal_id="deal_strong", company_name="StrongCo"),
+        config=AppConfig(data_dir=Path("data")),
+    ).model_copy(update={"memo_path": Path("data/reports/strong-memo.md")})
+    no_evidence_scored = score_evidence_store(
+        _store(evidence=[], claims=[], deal_id="deal_empty", company_name="EmptyCo"),
+        config=AppConfig(data_dir=Path("data")),
+    ).model_copy(update={"memo_path": Path("data/reports/empty-memo.md")})
+
+    report = render_portfolio_report(
+        [strong_scored, no_evidence_scored],
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert "INFERRED: Product-market fit evidence scored" in report
+    assert "Evidence: ev\\_traction." in report
+    assert "NEEDS_DILIGENCE: No usable source-linked evidence" in report
+    assert (
+        "NEEDS_DILIGENCE: Find concrete customer, revenue, retention, or usage evidence"
+        in report
+    )
+
+
+def test_render_portfolio_report_filters_allowed_check_sizes_by_config() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_strong", company_name="StrongCo"),
+        config=AppConfig(data_dir=Path("data"), min_check=2_500, max_check=5_000),
+    )
+
+    report = render_portfolio_report(
+        [scored],
+        config=AppConfig(data_dir=Path("data"), min_check=2_500, max_check=5_000),
+    )
+
+    allowed_line = next(
+        line for line in report.splitlines() if line.startswith("- Allowed check sizes:")
+    )
+    assert allowed_line == "- Allowed check sizes: $0, $2.5K, $5K"
+    assert "$1K" not in allowed_line
+    assert "$7.5K" not in allowed_line
+    assert "$10K" not in allowed_line
+
+
+def test_render_portfolio_report_caps_allowed_check_sizes_by_capital_budget() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_strong", company_name="StrongCo"),
+        config=AppConfig(data_dir=Path("data"), capital_budget=2_500),
+    )
+
+    report = render_portfolio_report(
+        [scored],
+        config=AppConfig(data_dir=Path("data"), capital_budget=2_500),
+    )
+
+    allowed_line = next(
+        line for line in report.splitlines() if line.startswith("- Allowed check sizes:")
+    )
+    assert allowed_line == "- Allowed check sizes: $0, $1K, $2.5K"
+    assert "$5K" not in allowed_line
+    assert "$7.5K" not in allowed_line
+    assert "$10K" not in allowed_line
+
+
+def test_render_portfolio_report_escapes_dynamic_markdown() -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal|bad\n# Fake Deal",
+        company_name="Bad|Co\n# Fake Heading",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=42,
+        confidence=ConfidenceLevel.LOW,
+        one_line_reason="Injected\n# Bad Reason",
+        pmf_level=PMFLevel.UNKNOWN,
+        fundability_risk=FundabilityRisk.HIGH,
+        kill_gates=[
+            KillGate(
+                name="Gate|Name\n# Bad Gate",
+                triggered=True,
+                reason="Reason with [fake](https://example.com)\n# Bad Reason",
+            )
+        ],
+        score_factors=[
+            ScoreFactor(
+                name="Factor|Name",
+                score=1,
+                max_score=10,
+                explanation="Explanation with | pipe\n# Bad Factor",
+                evidence_ids=["ev|bad"],
+            )
+        ],
+        diligence_questions=[
+            DiligenceQuestion(
+                priority=1,
+                question="Question with | pipe\n# Bad Question",
+                reason="Reason with `code`\n# Bad Diligence",
+            )
+        ],
+        memo_path=Path("data/reports/[bad](memo).md"),
+    )
+
+    report = render_portfolio_report(
+        [scored_deal],
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert "\n# Fake Heading" not in report
+    assert "\n# Bad Reason" not in report
+    assert "\n# Bad Factor" not in report
+    assert "\n# Bad Question" not in report
+    assert "Bad\\|Co \\# Fake Heading" in report
+    assert "Gate\\|Name \\# Bad Gate" in report
+    assert "\\[bad\\]\\(memo\\).md" in report
+    assert "ev\\|bad" in report
+
+
 def test_score_latest_ingestion_rebases_relative_evidence_store_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1133,6 +1402,8 @@ def test_score_deals_command_has_rich_success_output(tmp_path: Path) -> None:
     assert "Company" in result.output
     assert "Recommendation" in result.output
     assert "Scored 1 deal." in result.output
+    assert "Saved the portfolio comparison report to" in result.output
+    assert "portfolio-comparison-report.md" in result.output
 
 
 def test_score_deals_missing_ingestion_summary_has_plain_english_error(
