@@ -28,8 +28,17 @@ MAX_XLSX_COLUMN_LETTERS = 3
 MAX_XLSX_BLANK_GAP = 100
 INVALID_XLSX_CELL_INDEX = -1
 PDF_REPEATED_SHORT_TEXT_MIN_PAGES = 2
-PDF_REPEATED_SHORT_TEXT_WORD_THRESHOLD = 5
+PDF_REPEATED_SHORT_TEXT_WORD_THRESHOLD = 8
+PDF_IMAGE_TEXT_WORD_THRESHOLD = 8
 MAX_HTML_TABLE_SPAN = 100
+LOCAL_OCR_DOCUMENT_NOTE = (
+    "Some pages may need local OCR before Hail Mary can use all of their content."
+)
+LOCAL_OCR_EMPTY_PAGE_NOTE = "Page has no extracted text and may need local OCR."
+LOCAL_OCR_IMAGE_PAGE_NOTE = (
+    "Page has image content with little extracted text and may need local OCR."
+)
+IMAGE_LOCAL_OCR_NOTE = "Image file needs local OCR before text can be extracted."
 
 
 class ExtractionResult(BaseModel):
@@ -69,6 +78,8 @@ def extract_document(path: Path) -> ExtractionResult:
         return _extract_xlsx(path)
     if file_type in {FileType.TXT, FileType.MD}:
         return _extract_text_file(path)
+    if file_type in {FileType.PNG, FileType.JPG}:
+        return _extract_image(path)
 
     return ExtractionResult(
         pages=[],
@@ -112,6 +123,8 @@ def _make_page(
     source_span_end = (
         source_span_start + len(raw_text) if source_span_start is not None else None
     )
+    if needs_ocr is None and page_needs_ocr and not raw_text.strip():
+        notes = _append_note(notes, LOCAL_OCR_EMPTY_PAGE_NOTE)
     return ExtractedPage(
         page_number=page_number,
         raw_text=raw_text,
@@ -124,6 +137,14 @@ def _make_page(
         removed_boilerplate_lines=cleaning.removed_boilerplate_lines,
         notes=notes,
     )
+
+
+def _append_note(existing_note: str | None, new_note: str) -> str:
+    if not existing_note:
+        return new_note
+    if new_note in existing_note:
+        return existing_note
+    return f"{existing_note} {new_note}"
 
 
 def _clean_text_needs_ocr(clean_text: str, *, word_count: int) -> bool:
@@ -158,6 +179,9 @@ def _result_from_pages(
     notes: str | None = None,
 ) -> ExtractionResult:
     ocr_recommended = _document_ocr_recommended(pages)
+    result_notes = notes
+    if ocr_recommended:
+        result_notes = _append_note(result_notes, LOCAL_OCR_DOCUMENT_NOTE)
     return ExtractionResult(
         pages=pages,
         tables=tables or [],
@@ -166,7 +190,7 @@ def _result_from_pages(
         ocr_recommended=ocr_recommended,
         vision_recommended=ocr_recommended
         or any(page.vision_recommended and page.notes for page in pages),
-        notes=notes,
+        notes=result_notes,
     )
 
 
@@ -210,24 +234,32 @@ def _extract_pdf(path: Path) -> ExtractionResult:
     pages: list[ExtractedPage] = []
     source_offset = 0
     for index in range(page_count):
+        has_image_resources = False
         try:
             page = pages_proxy[index]
             raw_text = page.extract_text() or ""
             notes = None
+            has_image_resources = _pdf_page_has_image_resources(page)
         except Exception as exc:
             raw_text = ""
             notes = f"Could not extract text from page {index + 1}: {exc}"
 
-        pages.append(
-            _make_page(
-                raw_text,
-                page_number=index + 1,
-                needs_ocr=None,
-                vision_recommended=None,
-                source_span_start=source_offset,
-                notes=notes,
-            )
+        extracted_page = _make_page(
+            raw_text,
+            page_number=index + 1,
+            needs_ocr=None,
+            vision_recommended=None,
+            source_span_start=source_offset,
+            notes=notes,
         )
+        if has_image_resources and extracted_page.word_count <= PDF_IMAGE_TEXT_WORD_THRESHOLD:
+            extracted_page.needs_ocr = True
+            extracted_page.vision_recommended = True
+            extracted_page.notes = _append_note(
+                extracted_page.notes,
+                LOCAL_OCR_IMAGE_PAGE_NOTE,
+            )
+        pages.append(extracted_page)
         if raw_text:
             source_offset += len(raw_text) + 2
 
@@ -236,6 +268,79 @@ def _extract_pdf(path: Path) -> ExtractionResult:
         pages,
         page_count=page_count,
         notes=_page_failure_notes(pages),
+    )
+
+
+def _pdf_page_has_image_resources(page: Any) -> bool:
+    if _pdf_page_images_collection_has_items(page):
+        return True
+
+    try:
+        resources = _pdf_resolved_object(page.get("/Resources"))
+        if not resources:
+            return False
+        xobjects = _pdf_resolved_object(resources.get("/XObject"))
+        if not xobjects:
+            return False
+        for xobject in xobjects.values():
+            resolved_xobject = _pdf_resolved_object(xobject)
+            xobject_get = getattr(resolved_xobject, "get", None)
+            if xobject_get is not None and str(xobject_get("/Subtype")) == "/Image":
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _pdf_page_images_collection_has_items(page: Any) -> bool:
+    try:
+        images = getattr(page, "images", None)
+        if images is None:
+            return False
+        try:
+            return len(images) > 0
+        except TypeError:
+            return any(True for _ in images)
+    except Exception:
+        return False
+
+
+def _pdf_resolved_object(value: Any) -> Any:
+    get_object = getattr(value, "get_object", None)
+    if get_object is None:
+        return value
+    return get_object()
+
+
+def _extract_image(path: Path) -> ExtractionResult:
+    try:
+        path.stat()
+    except OSError as exc:
+        return ExtractionResult(
+            pages=[],
+            page_count=None,
+            extraction_quality=ExtractionQuality.LOW,
+            notes=f"Could not read the image file: {exc}",
+        )
+
+    page = ExtractedPage(
+        page_number=1,
+        raw_text="",
+        clean_text="",
+        word_count=0,
+        needs_ocr=True,
+        vision_recommended=True,
+        source_span_start=0,
+        source_span_end=0,
+        notes=IMAGE_LOCAL_OCR_NOTE,
+    )
+    return ExtractionResult(
+        pages=[page],
+        page_count=1,
+        extraction_quality=ExtractionQuality.LOW,
+        ocr_recommended=True,
+        vision_recommended=True,
+        notes=IMAGE_LOCAL_OCR_NOTE,
     )
 
 

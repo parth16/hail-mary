@@ -20,11 +20,7 @@ FILE_TYPE_BY_SUFFIX: dict[str, FileType] = {
 }
 
 
-SUPPORTED_SUFFIXES = {
-    suffix
-    for suffix, file_type in FILE_TYPE_BY_SUFFIX.items()
-    if file_type not in {FileType.PNG, FileType.JPG}
-}
+SUPPORTED_SUFFIXES = set(FILE_TYPE_BY_SUFFIX)
 
 
 def classify_file_type(path: Path) -> FileType:
