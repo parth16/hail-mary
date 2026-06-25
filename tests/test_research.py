@@ -313,6 +313,32 @@ def test_prepare_meridian_workflow_command_writes_files(
     assert templates[0].name in result.output.replace("\n", "")
 
 
+def test_prepare_meridian_workflow_command_quotes_printed_import_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "Hail Mary Data"
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-meridian-workflow",
+            "--company",
+            "Acme AI",
+            "--meridian-url",
+            "https://portal.angellist.com/m/acme-ai/invest",
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = result.output.replace("\n", "")
+    assert f"--data-dir {shlex.quote(str(data_dir))} --dry-run" in output
+    assert "Hail Mary Data --dry-run" not in output
+
+
 def test_prepare_meridian_workflow_quotes_space_containing_paths(
     tmp_path: Path,
 ) -> None:

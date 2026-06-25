@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -646,10 +647,13 @@ def prepare_meridian_workflow_command(
         "Use normal authenticated access and paste only allowed facts tied to page "
         "text into the template."
     )
-    data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
+    data_dir_option = (
+        f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
+    )
     console.print(
         "After filling the template, run "
-        f"`hailmary import-research-results {result.result_template_path}"
+        f"`hailmary import-research-results "
+        f"{shlex.quote(str(result.result_template_path))}"
         f"{data_dir_option} --dry-run`."
     )
 
