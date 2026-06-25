@@ -520,6 +520,7 @@ def _apply_ocr_result_to_page(
     clean_text = updated_page.clean_text
     word_count = updated_page.word_count
     notes = updated_page.notes
+    ocr_text_is_insufficient = updated_page.needs_ocr
     if updated_page.needs_ocr:
         if page.clean_text.strip():
             page.needs_ocr = True
@@ -547,8 +548,12 @@ def _apply_ocr_result_to_page(
             source_span_start=page.source_span_start,
             notes=_append_note(notes, OCR_PRESERVED_TEXT_NOTE),
         )
-        clean_text = updated_page.clean_text
-        word_count = updated_page.word_count
+        if ocr_text_is_insufficient:
+            clean_text = ""
+            word_count = 0
+        else:
+            clean_text = updated_page.clean_text
+            word_count = updated_page.word_count
         notes = updated_page.notes
     page.ocr_applied = True
     page.raw_text = updated_page.raw_text

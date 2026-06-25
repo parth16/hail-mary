@@ -650,6 +650,47 @@ def test_pdf_useful_ocr_does_not_duplicate_existing_page_text(
     assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
 
 
+def test_pdf_fragment_ocr_does_not_reenter_evidence_after_raw_text_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class BoilerplateOnlyPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return "\n".join(["Confidential: not for distribution"] * 3)
+
+    class Reader:
+        pages = [BoilerplateOnlyPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="$10K",
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert engine.pdf_calls == [1]
+    assert result.ocr_applied
+    assert result.ocr_recommended
+    assert result.combined_text == ""
+    assert "Confidential: not for distribution" in result.pages[0].raw_text
+    assert "$10K" in result.pages[0].raw_text
+    assert result.pages[0].clean_text == ""
+    assert result.pages[0].word_count == 0
+    assert result.pages[0].needs_ocr
+    assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
+    assert result.pages[0].notes is not None
+    assert "only a small amount of text" in result.pages[0].notes
+
+
 def test_pdf_missing_pdftoppm_warns_without_crashing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
