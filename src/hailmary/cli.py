@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import json
 import shlex
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, Literal, NoReturn
 
 import typer
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group, RenderableType
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
 
 from hailmary.agents.packets import (
     AgentPacketError,
@@ -49,12 +55,92 @@ from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 app = typer.Typer(
     help="Evaluate private startup deals from local diligence documents.",
     no_args_is_help=True,
+    rich_markup_mode="rich",
 )
-console = Console()
+console = Console(highlight=False)
+
+
+def _plain(message: str, *, style: str | None = None) -> Text:
+    if style is None:
+        return Text(message)
+    return Text(message, style=style)
+
+
+def _print_json(json_text: str) -> None:
+    console.print(json_text, markup=False, highlight=False, soft_wrap=True)
+
+
+def _print_panel(
+    title: str,
+    renderables: Sequence[RenderableType],
+    *,
+    border_style: str,
+) -> None:
+    console.print(
+        Panel(
+            Group(*renderables),
+            title=title,
+            border_style=border_style,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+
+
+def _print_error(message: str) -> None:
+    _print_panel(
+        "Error",
+        [_plain(f"Error: {message}", style="bold red")],
+        border_style="red",
+    )
+
+
+def _print_section(title: str, lines: Sequence[Text], *, style: str) -> None:
+    console.print(Rule(title, style=style))
+    for line in lines:
+        console.print(line, soft_wrap=True)
+
+
+def _two_column_table(
+    first_column: str,
+    second_column: str,
+    *,
+    second_justify: Literal["default", "left", "center", "right", "full"] = "left",
+) -> Table:
+    table = Table(
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column(first_column, style="bold cyan")
+    table.add_column(second_column, justify=second_justify)
+    return table
+
+
+def _research_provider_table(
+    title: str,
+    providers: Sequence[ResearchProvider],
+    *,
+    use_operator_note: bool = False,
+) -> Table:
+    table = Table(
+        title=title,
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Source", style="bold cyan")
+    table.add_column("Notes")
+    for provider in providers:
+        notes = provider.operator_note if use_operator_note else provider.description
+        table.add_row(_plain(provider.name), _plain(notes))
+    return table
 
 
 def _exit_with_config_error(exc: ConfigError) -> NoReturn:
-    console.print(f"Error: {exc}")
+    _print_error(str(exc))
     raise typer.Exit(1) from None
 
 
@@ -90,11 +176,16 @@ def init(
     except ConfigError as exc:
         _exit_with_config_error(exc)
 
-    console.print(f"Created Hail Mary local folders in {result.data_dir}.")
+    table = _two_column_table("Status", "Location")
+    table.add_row(
+        _plain("Created Hail Mary local folders", style="bold green"),
+        _plain(str(result.data_dir)),
+    )
     if result.config_created:
-        console.print(f"Created local config at {result.config_path}.")
+        table.add_row(_plain("Created local config"), _plain(str(result.config_path)))
     else:
-        console.print(f"Kept existing local config at {result.config_path}.")
+        table.add_row(_plain("Kept existing local config"), _plain(str(result.config_path)))
+    _print_panel("Init complete", [table], border_style="green")
 
 
 @app.command("ingest-folder")
@@ -121,18 +212,24 @@ def ingest_folder(
     try:
         summary = ingest_folder_path(folder, config=config)
     except (FileNotFoundError, NotADirectoryError) as exc:
-        raise typer.BadParameter(str(exc), param_hint="folder") from None
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
     except IngestionError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     deal_word = "deal" if len(summary.deals) == 1 else "deals"
     doc_word = "document" if summary.document_count == 1 else "documents"
-    console.print(
-        f"Scanned {summary.root_path}. Found {len(summary.deals)} {deal_word} "
-        f"and {summary.document_count} {doc_word}."
-    )
-    console.print(f"Saved the scan summary to {summary.summary_path}.")
+    summary_lines = [
+        _plain(
+            f"Found {len(summary.deals)} {deal_word} and {summary.document_count} "
+            f"{doc_word}. Scanned {summary.root_path}."
+        ),
+        _plain(f"Saved the scan summary to {summary.summary_path}."),
+    ]
+    metrics = _two_column_table("Metric", "Value", second_justify="right")
+    metrics.add_row(_plain("Deals"), _plain(str(len(summary.deals))))
+    metrics.add_row(_plain("Documents"), _plain(str(summary.document_count)))
 
     evidence_count = sum(deal.evidence_count for deal in summary.deals)
     claim_count = sum(deal.claim_count for deal in summary.deals)
@@ -143,22 +240,35 @@ def ingest_folder(
     if evidence_count:
         evidence_word = "record" if evidence_count == 1 else "records"
         claim_word = "claim" if claim_count == 1 else "claims"
-        console.print(
-            f"Built {evidence_count} source-linked evidence {evidence_word} "
-            f"and {claim_count} deal-term {claim_word}."
+        summary_lines.append(
+            _plain(
+                f"Built {evidence_count} source-linked evidence {evidence_word} "
+                f"and {claim_count} deal-term {claim_word}."
+            )
         )
+        metrics.add_row(_plain("Evidence records"), _plain(str(evidence_count)))
+        metrics.add_row(_plain("Deal-term claims"), _plain(str(claim_count)))
+
+    _print_section("Scan complete", summary_lines, style="green")
+    console.print(metrics)
+
+    warning_lines: list[Text] = []
     if deals_without_evidence:
         deal_names = ", ".join(deal.company_name for deal in deals_without_evidence)
         deal_word = "deal" if len(deals_without_evidence) == 1 else "deals"
-        console.print(
-            f"No usable evidence text was built for {deal_word}: {deal_names}. "
-            "Hail Mary stored the files it could read, but cannot use their text yet."
+        warning_lines.append(
+            _plain(
+                f"No usable evidence text was built for {deal_word}: {deal_names}. "
+                "Hail Mary stored the files it could read, but cannot use their text yet."
+            )
         )
     if conflict_count:
         conflict_word = "conflict" if conflict_count == 1 else "conflicts"
-        console.print(
-            f"Found {conflict_count} deal-term {conflict_word}. "
-            "Review the cited evidence before relying on those terms."
+        warning_lines.append(
+            _plain(
+                f"Found {conflict_count} deal-term {conflict_word}. "
+                "Review the cited evidence before relying on those terms."
+            )
         )
 
     image_text_documents = sum(
@@ -169,22 +279,31 @@ def ingest_folder(
     )
     if image_text_documents:
         document_word = "document" if image_text_documents == 1 else "documents"
-        console.print(
-            f"{image_text_documents} {document_word} may need image-based text reading "
-            "(OCR) before Hail Mary can use all of their content."
+        warning_lines.append(
+            _plain(
+                f"{image_text_documents} {document_word} may need image-based text reading "
+                "(OCR) before Hail Mary can use all of their content."
+            )
         )
 
     if summary.skipped_files:
-        console.print(
-            f"Skipped {len(summary.skipped_files)} unsupported or ignored files. "
-            "These were not treated as diligence documents."
+        warning_lines.append(
+            _plain(
+                f"Skipped {len(summary.skipped_files)} unsupported or ignored files. "
+                "These were not treated as diligence documents."
+            )
         )
     if summary.unreadable_paths:
         path_word = "path" if len(summary.unreadable_paths) == 1 else "paths"
-        console.print(
-            f"Could not read {len(summary.unreadable_paths)} {path_word}. "
-            "Hail Mary did not scan those locations, so diligence documents may be missing."
+        warning_lines.append(
+            _plain(
+                f"Could not read {len(summary.unreadable_paths)} {path_word}. "
+                "Hail Mary did not scan those locations, so diligence documents may be missing."
+            )
         )
+
+    if warning_lines:
+        _print_section("Review needed", warning_lines, style="yellow")
 
 
 @app.command("score-deals")
@@ -203,19 +322,33 @@ def score_deals(
     try:
         result = score_latest_ingestion(config=config)
     except ScoringError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     deal_word = "deal" if result.deal_count == 1 else "deals"
     memo_word = "memo" if result.deal_count == 1 else "memos"
-    console.print(f"Scored {result.deal_count} {deal_word}.")
-    console.print(f"Saved Markdown {memo_word} to {result.report_dir}.")
+    result_lines = [
+        _plain(f"Scored {result.deal_count} {deal_word}."),
+        _plain(f"Saved Markdown {memo_word} to {result.report_dir}."),
+    ]
+    deals = Table(
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    deals.add_column("Company", style="bold cyan")
+    deals.add_column("Recommendation")
+    deals.add_column("Check size", justify="right")
+    deals.add_column("Score", justify="right")
     for scored_deal in result.scored_deals:
-        console.print(
-            f"{scored_deal.company_name}: {scored_deal.recommendation}, "
-            f"check size {_format_check_size(scored_deal.check_size)}, "
-            f"score {scored_deal.total_score}/{scored_deal.max_score}."
+        deals.add_row(
+            _plain(scored_deal.company_name),
+            _plain(scored_deal.recommendation),
+            _plain(_format_check_size(scored_deal.check_size)),
+            _plain(f"{scored_deal.total_score}/{scored_deal.max_score}"),
         )
+    _print_panel("Scoring complete", [*result_lines, deals], border_style="green")
 
 
 @app.command("prepare-agent-packets")
@@ -234,14 +367,18 @@ def prepare_agent_packets_command(
     try:
         result = prepare_agent_packets(config=config)
     except AgentPacketError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     packet_word = "packet" if result.packet_count == 1 else "packets"
-    console.print(f"Prepared {result.packet_count} local agent input {packet_word}.")
-    console.print(f"Saved JSON {packet_word} to {result.output_dir}.")
-    console.print(
-        "These files contain generated diligence material and should stay private."
+    _print_panel(
+        "Agent packets prepared",
+        [
+            _plain(f"Prepared {result.packet_count} local agent input {packet_word}."),
+            _plain(f"Saved JSON {packet_word} to {result.output_dir}."),
+            _plain("These files contain generated diligence material and should stay private."),
+        ],
+        border_style="green",
     )
 
 
@@ -262,22 +399,30 @@ def validate_agent_output_command(
         packet = load_agent_input_packet(packet_path)
         output = load_agent_review_output(output_path)
     except AgentPacketError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     result = validate_agent_output(output, packet)
     if not result.valid:
         issue_word = "problem" if len(result.issues) == 1 else "problems"
-        console.print(
-            f"Agent output did not pass validation. Found {len(result.issues)} "
-            f"{issue_word}."
-        )
+        issue_lines = [
+            _plain(
+                f"Agent output did not pass validation. Found {len(result.issues)} {issue_word}."
+            )
+        ]
         for issue in result.issues:
-            console.print(f"- {issue.location}: {issue.message}")
+            issue_lines.append(_plain(f"- {issue.location}: {issue.message}"))
+        _print_panel(
+            "Validation failed",
+            issue_lines,
+            border_style="red",
+        )
         raise typer.Exit(1) from None
 
-    console.print(
-        "Agent output passed validation. Every cited evidence ID is in the packet."
+    _print_panel(
+        "Validation passed",
+        [_plain("Agent output passed validation. Every cited evidence ID is in the packet.")],
+        border_style="green",
     )
 
 
@@ -315,21 +460,28 @@ def run_evals_command(
         categories = _parse_eval_categories(category or [])
         summary = run_builtin_evals(case_ids=case or [], categories=categories)
     except EvalHarnessError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     if json_output:
-        console.out(summary.model_dump_json(indent=2))
+        _print_json(summary.model_dump_json(indent=2))
     else:
         eval_word = "eval" if summary.total_count == 1 else "evals"
-        console.print(
-            f"Ran {summary.total_count} synthetic {eval_word}. "
-            f"{summary.passed_count} passed, {summary.failed_count} failed."
+        result_lines = [
+            _plain(
+                f"Ran {summary.total_count} synthetic {eval_word}. "
+                f"{summary.passed_count} passed, {summary.failed_count} failed."
+            )
+        ]
+        for failed_result in summary.failed_results:
+            result_lines.append(_plain(f"- {failed_result.id}: {failed_result.message}"))
+            for detail_name, detail_value in _operator_eval_details(failed_result.details):
+                result_lines.append(_plain(f"  {detail_name}: {detail_value}"))
+        _print_panel(
+            "Eval results",
+            result_lines,
+            border_style="green" if summary.passed else "red",
         )
-        for result in summary.failed_results:
-            console.print(f"- {result.id}: {result.message}")
-            for detail_name, detail_value in _operator_eval_details(result.details):
-                console.print(f"  {detail_name}: {detail_value}")
 
     if not summary.passed:
         raise typer.Exit(1) from None
@@ -357,7 +509,7 @@ def list_research_providers_command(
     providers = builtin_research_providers(include_paid=include_paid)
     if json_output:
         payload = [provider.model_dump(mode="json") for provider in providers]
-        console.out(json.dumps(payload, indent=2))
+        _print_json(json.dumps(payload, indent=2))
         return
 
     free_providers = _providers_by_category(
@@ -372,18 +524,21 @@ def list_research_providers_command(
         providers,
         ResearchProviderCategory.PAID_OPTIONAL,
     )
-    console.print("Free and public sources:")
-    for provider in free_providers:
-        console.print(f"- {provider.name}: {provider.description}")
-    console.print("Authenticated sources:")
-    for provider in portal_providers:
-        console.print(f"- {provider.name}: {provider.operator_note}")
+    renderables: list[RenderableType] = [
+        _research_provider_table("Free and public sources", free_providers),
+        _research_provider_table(
+            "Authenticated sources",
+            portal_providers,
+            use_operator_note=True,
+        ),
+    ]
     if paid_providers:
-        console.print("Optional paid sources:")
-        for provider in paid_providers:
-            console.print(f"- {provider.name}: {provider.description}")
+        renderables.append(_research_provider_table("Optional paid sources", paid_providers))
     else:
-        console.print("Optional paid sources are hidden. Use --include-paid to list them.")
+        renderables.append(
+            _plain("Optional paid sources are hidden. Use --include-paid to list them.")
+        )
+    _print_panel("Research providers", renderables, border_style="cyan")
 
 
 @app.command("prepare-research-plan")
@@ -449,31 +604,32 @@ def prepare_research_plan_command(
             include_paid=include_paid,
         )
     except ResearchPlanError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     if json_output:
-        console.out(result.plan.model_dump_json(indent=2))
+        _print_json(result.plan.model_dump_json(indent=2))
         return
 
     deal_word = "deal" if result.deal_count == 1 else "deals"
     task_word = "task" if result.task_count == 1 else "tasks"
-    console.print(
-        f"Prepared an external research plan for {result.deal_count} {deal_word} "
-        f"with {result.task_count} {task_word}."
-    )
-    console.print(f"Saved the private JSON plan to {result.output_path}.")
-    console.print("No websites, APIs, paid databases, or Meridian pages were contacted.")
+    plan_lines = [
+        _plain(
+            f"Prepared an external research plan for {result.deal_count} {deal_word} "
+            f"with {result.task_count} {task_word}."
+        ),
+        _plain(f"Saved the private JSON plan to {result.output_path}."),
+        _plain("No websites, APIs, paid databases, or Meridian pages were contacted."),
+    ]
 
     manual_count = sum(
-        1
-        for task in result.plan.tasks
-        if task.status == ResearchTaskStatus.NEEDS_OPERATOR
+        1 for task in result.plan.tasks if task.status == ResearchTaskStatus.NEEDS_OPERATOR
     )
     if manual_count:
-        console.print(f"{manual_count} {task_word} need your manual action before use.")
+        plan_lines.append(_plain(f"{manual_count} {task_word} need your manual action before use."))
     if result.plan.local_only:
-        console.print("Local-only mode is on, so this plan is a checklist only.")
+        plan_lines.append(_plain("Local-only mode is on, so this plan is a checklist only."))
+    _print_panel("Research plan prepared", plan_lines, border_style="green")
 
 
 @app.command("prepare-research-results-template")
@@ -504,20 +660,27 @@ def prepare_research_results_template_command(
             plan_path=research_plan,
         )
     except ResearchTemplateError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     result_word = "result" if result.result_count == 1 else "results"
-    console.print(
-        f"Prepared a fillable external research results template with "
-        f"{result.result_count} {result_word}."
-    )
-    console.print(f"Saved the private JSON template to {result.output_path}.")
-    console.print("No websites, APIs, paid databases, or Meridian pages were contacted.")
     data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
-    console.print(
-        "Fill in source-backed facts, then run "
-        f"`hailmary import-research-results {result.output_path}{data_dir_option} --dry-run`."
+    next_command = (
+        f"`hailmary import-research-results {result.output_path}"
+        f"{data_dir_option} --dry-run`."
+    )
+    _print_section(
+        "Research template prepared",
+        [
+            _plain(
+                f"Prepared a fillable external research results template with "
+                f"{result.result_count} {result_word}."
+            ),
+            _plain(f"Saved the private JSON template to {result.output_path}."),
+            _plain("No websites, APIs, paid databases, or Meridian pages were contacted."),
+            _plain(f"Fill in source-backed facts, then run {next_command}"),
+        ],
+        style="green",
     )
 
 
@@ -561,39 +724,56 @@ def prepare_public_research_results_command(
             sec_form_d_results_path=sec_form_d_results,
         )
     except ResearchCollectionError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     result_word = "result" if result.result_count == 1 else "results"
     company_word = "company" if result.deal_count == 1 else "companies"
     if result.output_path is None:
-        console.print(
-            f"No matching public research {result_word} were found for "
-            f"{result.deal_count} {company_word}."
+        _print_section(
+            "Public research results",
+            [
+                _plain(
+                    f"No matching public research {result_word} were found for "
+                    f"{result.deal_count} {company_word}."
+                ),
+                _plain("No results file was saved."),
+                _plain("No websites or software data feeds were contacted."),
+            ],
+            style="yellow",
         )
-        console.print("No results file was saved.")
-        console.print("No websites or software data feeds were contacted.")
         return
 
-    console.print(
-        f"Prepared {result.result_count} public research {result_word} for "
-        f"{result.deal_count} {company_word}."
-    )
-    zero_result_companies = [
-        deal.company_name for deal in result.deals if deal.result_count == 0
-    ]
-    if zero_result_companies:
-        console.print(
-            "No public research results were prepared for: "
-            f"{', '.join(zero_result_companies)}."
+    result_lines = [
+        _plain(
+            f"Prepared {result.result_count} public research {result_word} for "
+            f"{result.deal_count} {company_word}."
         )
-    console.print(f"Saved the private JSON results file to {result.output_path}.")
-    console.print("No websites or software data feeds were contacted.")
-    data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
-    console.print(
-        "After ingesting the matching deal folders, run "
-        f"`hailmary import-research-results {result.output_path}{data_dir_option} --dry-run`."
+    ]
+    zero_result_companies = [deal.company_name for deal in result.deals if deal.result_count == 0]
+    if zero_result_companies:
+        result_lines.append(
+            _plain(
+                f"No public research results were prepared for: {', '.join(zero_result_companies)}."
+            )
+        )
+    result_lines.extend(
+        [
+            _plain(f"Saved the private JSON results file to {result.output_path}."),
+            _plain("No websites or software data feeds were contacted."),
+        ]
     )
+    data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
+    next_command = (
+        f"`hailmary import-research-results {result.output_path}"
+        f"{data_dir_option} --dry-run`."
+    )
+    result_lines.append(
+        _plain(
+            f"After ingesting the matching deal folders, run {next_command}"
+        )
+    )
+    _print_section("Public research results prepared", result_lines, style="green")
 
 
 @app.command("prepare-meridian-workflow")
@@ -633,28 +813,34 @@ def prepare_meridian_workflow_command(
             meridian_url=meridian_url,
         )
     except MeridianWorkflowError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
-    console.print(f"Prepared a Meridian manual workflow for {result.workflow.company_name}.")
-    console.print(f"Saved the private workflow to {result.output_path}.")
-    console.print(f"Saved the fillable results template to {result.result_template_path}.")
-    console.print(
-        "Hail Mary did not open Meridian, sign in, bypass access controls, "
-        "or save portal content."
-    )
-    console.print(
-        "Use normal authenticated access and paste only allowed facts tied to page "
-        "text into the template."
-    )
     data_dir_option = (
         f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
     )
-    console.print(
-        "After filling the template, run "
+    next_command = (
         f"`hailmary import-research-results "
         f"{shlex.quote(str(result.result_template_path))}"
         f"{data_dir_option} --dry-run`."
+    )
+    _print_section(
+        "Meridian workflow prepared",
+        [
+            _plain(f"Prepared a Meridian manual workflow for {result.workflow.company_name}."),
+            _plain(f"Saved the private workflow to {result.output_path}."),
+            _plain(f"Saved the fillable results template to {result.result_template_path}."),
+            _plain(
+                "Hail Mary did not open Meridian, sign in, bypass access controls, "
+                "or save portal content."
+            ),
+            _plain(
+                "Use normal authenticated access and paste only allowed facts tied to page "
+                "text into the template."
+            ),
+            _plain(f"After filling the template, run {next_command}"),
+        ],
+        style="green",
     )
 
 
@@ -691,56 +877,70 @@ def import_research_results_command(
             dry_run=dry_run,
         )
     except ResearchImportError as exc:
-        console.print(f"Error: {exc}")
+        _print_error(str(exc))
         raise typer.Exit(1) from None
 
     record_word = "record" if result.imported_count == 1 else "records"
     deal_word = "deal" if result.deal_count == 1 else "deals"
     if result.dry_run:
-        console.print(
-            f"Dry run: {result.imported_count} external research evidence {record_word} "
-            f"would be imported into {result.deal_count} {deal_word}."
-        )
+        result_lines = [
+            _plain(
+                f"Dry run: {result.imported_count} external research evidence {record_word} "
+                f"would be imported into {result.deal_count} {deal_word}."
+            )
+        ]
+        border_style = "yellow"
     else:
-        console.print(
-            f"Imported {result.imported_count} external research evidence {record_word} "
-            f"into {result.deal_count} {deal_word}."
-        )
+        result_lines = [
+            _plain(
+                f"Imported {result.imported_count} external research evidence {record_word} "
+                f"into {result.deal_count} {deal_word}."
+            )
+        ]
+        border_style = "green"
     if result.skipped_duplicate_count:
         duplicate_word = "record" if result.skipped_duplicate_count == 1 else "records"
-        console.print(
-            f"Skipped {result.skipped_duplicate_count} duplicate {duplicate_word}."
+        result_lines.append(
+            _plain(f"Skipped {result.skipped_duplicate_count} duplicate {duplicate_word}.")
         )
     if result.skipped_blank_template_row_count:
         row_word = "row" if result.skipped_blank_template_row_count == 1 else "rows"
-        console.print(
-            f"Skipped {result.skipped_blank_template_row_count} untouched template "
-            f"{row_word}."
+        result_lines.append(
+            _plain(
+                f"Skipped {result.skipped_blank_template_row_count} untouched template {row_word}."
+            )
         )
     if result.dry_run:
         for deal in result.deals:
             if deal.imported_count:
                 deal_record_word = "record" if deal.imported_count == 1 else "records"
-                console.print(
-                    f"- {deal.company_name}: would add {deal.imported_count} "
-                    f"{deal_record_word}."
+                result_lines.append(
+                    _plain(
+                        f"- {deal.company_name}: would add {deal.imported_count} "
+                        f"{deal_record_word}."
+                    )
                 )
-        console.print("No evidence stores were changed.")
-        console.print("No websites or APIs were contacted.")
+        result_lines.append(_plain("No evidence stores were changed."))
+        result_lines.append(_plain("No websites or APIs were contacted."))
+        _print_panel("Research import preview", result_lines, border_style=border_style)
         return
     if result.updated_store_paths:
         store_word = "store" if len(result.updated_store_paths) == 1 else "stores"
-        console.print(f"Updated {len(result.updated_store_paths)} evidence {store_word}.")
+        result_lines.append(
+            _plain(f"Updated {len(result.updated_store_paths)} evidence {store_word}.")
+        )
         for deal in result.deals:
             if deal.imported_count:
                 deal_record_word = "record" if deal.imported_count == 1 else "records"
-                console.print(
-                    f"- {deal.company_name}: added {deal.imported_count} "
-                    f"{deal_record_word}."
+                result_lines.append(
+                    _plain(
+                        f"- {deal.company_name}: added {deal.imported_count} {deal_record_word}."
+                    )
                 )
     else:
-        console.print("No new evidence records were added.")
-    console.print("No websites or APIs were contacted.")
+        result_lines.append(_plain("No new evidence records were added."))
+    result_lines.append(_plain("No websites or APIs were contacted."))
+    _print_panel("Research results imported", result_lines, border_style=border_style)
 
 
 def _parse_eval_categories(raw_categories: list[str]) -> list[EvalCategory]:
@@ -751,8 +951,7 @@ def _parse_eval_categories(raw_categories: list[str]) -> list[EvalCategory]:
             categories.append(EvalCategory(raw_category))
         except ValueError as exc:
             raise EvalHarnessError(
-                f"Unknown eval category {raw_category!r}. Valid categories are: "
-                f"{valid_values}."
+                f"Unknown eval category {raw_category!r}. Valid categories are: {valid_values}."
             ) from exc
     return categories
 

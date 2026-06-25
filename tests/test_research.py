@@ -301,6 +301,7 @@ def test_prepare_meridian_workflow_command_writes_files(
     )
 
     assert result.exit_code == 0, result.output
+    assert "Meridian workflow prepared" in result.output
     assert "Prepared a Meridian manual workflow for Acme AI" in result.output
     assert "did not open Meridian, sign in, bypass access controls" in result.output
     assert "import-research-results" in result.output
@@ -412,6 +413,7 @@ def test_list_research_providers_command_hides_paid_by_default() -> None:
     result = runner.invoke(app, ["list-research-providers"])
 
     assert result.exit_code == 0, result.output
+    assert "Research providers" in result.output
     assert "Free and public sources" in result.output
     assert "Meridian deal page" in result.output
     assert "Crunchbase" not in result.output
@@ -445,6 +447,7 @@ def test_prepare_research_plan_command_writes_plan(
     )
 
     assert result.exit_code == 0, result.output
+    assert "Research plan prepared" in result.output
     assert "Prepared an external research plan for 1 deal" in result.output
     assert "No websites, APIs, paid databases, or Meridian pages were contacted" in result.output
     assert (tmp_path / "data" / "research-plans").is_dir()
@@ -668,6 +671,7 @@ def test_prepare_research_results_template_command_writes_template(
     )
 
     assert result.exit_code == 0, result.output
+    assert "Research template prepared" in result.output
     assert "Prepared a fillable external research results template" in result.output
     assert "No websites, APIs, paid databases, or Meridian pages were contacted" in result.output
     assert "import-research-results" in result.output
@@ -827,6 +831,7 @@ def test_prepare_public_research_results_command_writes_results(
     )
 
     assert result.exit_code == 0, result.output
+    assert "Public research results prepared" in result.output
     assert "Prepared 1 public research result for 2 companies" in result.output
     assert "No public research results were prepared for: MissingCo" in result.output
     assert "No websites or software data feeds were contacted" in result.output
@@ -1789,6 +1794,7 @@ def test_import_research_results_command_has_plain_english_success(
     )
 
     assert result.exit_code == 0, result.output
+    assert "Research results imported" in result.output
     assert "Imported 1 external research evidence record into 1 deal" in result.output
     assert "No websites or APIs were contacted" in result.output
 
@@ -1814,6 +1820,7 @@ def test_import_research_results_command_dry_run_has_plain_english_preview(
     )
 
     assert result.exit_code == 0, result.output
+    assert "Research import preview" in result.output
     assert "Dry run: 1 external research evidence record would be imported" in result.output
     assert "- Acme AI: would add 1 record." in result.output
     assert "No evidence stores were changed." in result.output

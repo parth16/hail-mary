@@ -1122,6 +1122,19 @@ def test_score_latest_ingestion_rejects_absolute_evidence_path_outside_data_dir(
         score_latest_ingestion(config=AppConfig(data_dir=data_dir))
 
 
+def test_score_deals_command_has_rich_success_output(tmp_path: Path) -> None:
+    store = _strong_store(deal_id="deal_one", company_name="Deal One")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(app, ["score-deals", "--data-dir", str(tmp_path / "data")])
+
+    assert result.exit_code == 0, result.output
+    assert "Scoring complete" in result.output
+    assert "Company" in result.output
+    assert "Recommendation" in result.output
+    assert "Scored 1 deal." in result.output
+
+
 def test_score_deals_missing_ingestion_summary_has_plain_english_error(
     tmp_path: Path,
 ) -> None:

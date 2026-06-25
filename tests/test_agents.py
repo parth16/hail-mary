@@ -1066,6 +1066,7 @@ def test_prepare_agent_packets_command_has_plain_english_output(
     )
 
     assert result.exit_code == 0, result.output
+    assert "Agent packets prepared" in result.output
     assert f"Prepared {len(DEFAULT_AGENT_ROLES)} local agent input packets" in result.output
     assert "should stay private" in result.output
 
@@ -1113,6 +1114,7 @@ def test_validate_agent_output_command_reports_unknown_evidence_id(
     )
 
     assert result.exit_code != 0
+    assert "Validation failed" in result.output
     assert "Agent output did not pass validation" in result.output
     assert "Unknown evidence ID" in result.output
     assert "Traceback" not in result.output

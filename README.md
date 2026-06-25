@@ -34,27 +34,35 @@ The implementation prompt is in `hail-mary-codex-prompt.md`. It defines:
 
 ## Current Commands
 
-The current build includes:
+For direct terminal use from any directory, add the wrapper to `~/.zshrc` before
+running Hail Mary commands:
+
+```bash
+export HAILMARY_ROOT="$HOME/Documents/hail-mary"
+hailmary() { "$HAILMARY_ROOT/bin/hailmary" "$@"; }
+```
+
+Then sync the project environment and run commands directly:
 
 ```bash
 uv sync
-uv run hailmary init
-uv run hailmary ingest-folder ./pitch-decks
-uv run hailmary score-deals
-uv run hailmary prepare-agent-packets
-uv run hailmary validate-agent-output output.json packet.json
-uv run hailmary run-evals
-uv run hailmary list-research-providers
-uv run hailmary prepare-research-plan --company "ExampleCo"
-uv run hailmary prepare-research-results-template
-uv run hailmary prepare-public-research-results \
+hailmary init
+hailmary ingest-folder ./pitch-decks
+hailmary score-deals
+hailmary prepare-agent-packets
+hailmary validate-agent-output output.json packet.json
+hailmary run-evals
+hailmary list-research-providers
+hailmary prepare-research-plan --company "ExampleCo"
+hailmary prepare-research-results-template
+hailmary prepare-public-research-results \
   --company "ExampleCo" \
   --sec-form-d-results sec-form-d-results.json
-uv run hailmary prepare-meridian-workflow \
+hailmary prepare-meridian-workflow \
   --company "ExampleCo" \
   --meridian-url "https://portal.angellist.com/m/example/invest"
-uv run hailmary import-research-results research-results.json --dry-run
-uv run hailmary import-research-results research-results.json
+hailmary import-research-results research-results.json --dry-run
+hailmary import-research-results research-results.json
 ```
 
 `init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `score-deals` reads the local evidence stores and writes deterministic Markdown memos under `data/reports/`.
