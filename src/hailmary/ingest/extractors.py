@@ -15,6 +15,13 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from hailmary.ingest.document_classifier import classify_file_type
+from hailmary.ingest.ocr import (
+    LOW_OCR_CONFIDENCE_THRESHOLD,
+    LocalOcrDependencyError,
+    LocalOcrEngine,
+    LocalOcrError,
+    LocalOcrResult,
+)
 from hailmary.schemas.documents import (
     ExtractedPage,
     ExtractedTable,
@@ -32,13 +39,22 @@ PDF_REPEATED_SHORT_TEXT_WORD_THRESHOLD = 8
 PDF_IMAGE_TEXT_WORD_THRESHOLD = 8
 MAX_HTML_TABLE_SPAN = 100
 LOCAL_OCR_DOCUMENT_NOTE = (
-    "Some pages may need local OCR before Hail Mary can use all of their content."
+    "Some pages may need local OCR, image-based text reading (OCR), before Hail Mary "
+    "can use all of their content. OCR means reading text from images."
 )
-LOCAL_OCR_EMPTY_PAGE_NOTE = "Page has no extracted text and may need local OCR."
+LOCAL_OCR_EMPTY_PAGE_NOTE = (
+    "Page has no extracted text and may need image-based text reading (OCR). "
+    "OCR means reading text from images."
+)
 LOCAL_OCR_IMAGE_PAGE_NOTE = (
-    "Page has image content with little extracted text and may need local OCR."
+    "Page has image content with little extracted text and may need image-based text "
+    "reading (OCR). OCR means reading text from images."
 )
-IMAGE_LOCAL_OCR_NOTE = "Image file needs local OCR before text can be extracted."
+IMAGE_LOCAL_OCR_NOTE = (
+    "Image file needs local OCR, image-based text reading (OCR), before text can be "
+    "extracted. OCR means reading text from images."
+)
+OCR_APPLIED_NOTE = "Image-based text reading (OCR) was used for this text."
 
 
 class ExtractionResult(BaseModel):
@@ -47,6 +63,8 @@ class ExtractionResult(BaseModel):
     page_count: int | None
     extraction_quality: ExtractionQuality
     ocr_recommended: bool = False
+    ocr_applied: bool = False
+    ocr_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     vision_recommended: bool = False
     notes: str | None = None
 
@@ -63,11 +81,15 @@ class ExtractionResult(BaseModel):
         return len(self.tables)
 
 
-def extract_document(path: Path) -> ExtractionResult:
+def extract_document(
+    path: Path,
+    *,
+    ocr_engine: LocalOcrEngine | None = None,
+) -> ExtractionResult:
     file_type = classify_file_type(path)
 
     if file_type == FileType.PDF:
-        return _extract_pdf(path)
+        return _extract_pdf(path, ocr_engine=ocr_engine)
     if file_type == FileType.DOCX:
         return _extract_docx(path)
     if file_type == FileType.HTML:
@@ -79,7 +101,7 @@ def extract_document(path: Path) -> ExtractionResult:
     if file_type in {FileType.TXT, FileType.MD}:
         return _extract_text_file(path)
     if file_type in {FileType.PNG, FileType.JPG}:
-        return _extract_image(path)
+        return _extract_image(path, ocr_engine=ocr_engine)
 
     return ExtractionResult(
         pages=[],
@@ -179,6 +201,7 @@ def _result_from_pages(
     notes: str | None = None,
 ) -> ExtractionResult:
     ocr_recommended = _document_ocr_recommended(pages)
+    ocr_confidence = _ocr_confidence_from_pages(pages)
     result_notes = notes
     if ocr_recommended:
         result_notes = _append_note(result_notes, LOCAL_OCR_DOCUMENT_NOTE)
@@ -188,10 +211,23 @@ def _result_from_pages(
         page_count=page_count,
         extraction_quality=_quality_from_pages(pages),
         ocr_recommended=ocr_recommended,
+        ocr_applied=any(page.ocr_applied for page in pages),
+        ocr_confidence=ocr_confidence,
         vision_recommended=ocr_recommended
         or any(page.vision_recommended and page.notes for page in pages),
         notes=result_notes,
     )
+
+
+def _ocr_confidence_from_pages(pages: list[ExtractedPage]) -> float | None:
+    confidences = [
+        page.ocr_confidence
+        for page in pages
+        if page.ocr_applied and page.ocr_confidence is not None
+    ]
+    if not confidences:
+        return None
+    return sum(confidences) / len(confidences)
 
 
 def _document_ocr_recommended(pages: list[ExtractedPage]) -> bool:
@@ -209,7 +245,11 @@ def _document_ocr_recommended(pages: list[ExtractedPage]) -> bool:
     return len(ocr_pages) * 2 > len(pages)
 
 
-def _extract_pdf(path: Path) -> ExtractionResult:
+def _extract_pdf(
+    path: Path,
+    *,
+    ocr_engine: LocalOcrEngine | None,
+) -> ExtractionResult:
     try:
         reader = PdfReader(path)
     except Exception as exc:
@@ -264,11 +304,53 @@ def _extract_pdf(path: Path) -> ExtractionResult:
             source_offset += len(raw_text) + 2
 
     _mark_repeated_short_pdf_pages_for_ocr(pages)
+    if ocr_engine is not None:
+        _apply_pdf_ocr(path, pages, ocr_engine)
+        _refresh_page_source_spans(pages)
     return _result_from_pages(
         pages,
         page_count=page_count,
         notes=_page_failure_notes(pages),
     )
+
+
+def _apply_pdf_ocr(
+    path: Path,
+    pages: list[ExtractedPage],
+    ocr_engine: LocalOcrEngine,
+) -> None:
+    targets = _pdf_ocr_target_pages(pages)
+    for page in targets:
+        if page.page_number is None:
+            continue
+        try:
+            ocr_result = ocr_engine.pdf_page_to_text(path, page_number=page.page_number)
+        except LocalOcrDependencyError as exc:
+            page.notes = _append_note(page.notes, str(exc))
+            return
+        except LocalOcrError as exc:
+            page.notes = _append_note(page.notes, str(exc))
+            continue
+        _apply_ocr_result_to_page(page, ocr_result)
+
+
+def _pdf_ocr_target_pages(pages: list[ExtractedPage]) -> list[ExtractedPage]:
+    document_needs_ocr = _document_ocr_recommended(pages)
+    return [
+        page
+        for page in pages
+        if page.needs_ocr
+        and (
+            document_needs_ocr
+            or not page.raw_text.strip()
+            or page.vision_recommended
+            or _page_note_contains(page, LOCAL_OCR_IMAGE_PAGE_NOTE)
+        )
+    ]
+
+
+def _page_note_contains(page: ExtractedPage, note: str) -> bool:
+    return page.notes is not None and note in page.notes
 
 
 def _pdf_page_has_image_resources(page: Any) -> bool:
@@ -312,7 +394,11 @@ def _pdf_resolved_object(value: Any) -> Any:
     return get_object()
 
 
-def _extract_image(path: Path) -> ExtractionResult:
+def _extract_image(
+    path: Path,
+    *,
+    ocr_engine: LocalOcrEngine | None,
+) -> ExtractionResult:
     try:
         path.stat()
     except OSError as exc:
@@ -323,6 +409,34 @@ def _extract_image(path: Path) -> ExtractionResult:
             notes=f"Could not read the image file: {exc}",
         )
 
+    if ocr_engine is not None:
+        try:
+            ocr_result = ocr_engine.image_to_text(path, page_number=1)
+        except LocalOcrError as exc:
+            return _image_needs_ocr_result(str(exc))
+        page = _make_page(
+            ocr_result.text,
+            page_number=1,
+            needs_ocr=not bool(ocr_result.text.strip()),
+            vision_recommended=not bool(ocr_result.text.strip()),
+            source_span_start=0,
+            notes=_ocr_page_notes(ocr_result),
+        )
+        if ocr_result.text.strip():
+            page.ocr_applied = True
+            page.ocr_confidence = ocr_result.confidence
+        else:
+            page.notes = _append_note(page.notes, IMAGE_LOCAL_OCR_NOTE)
+        return _result_from_pages(
+            [page],
+            page_count=1,
+            notes=page.notes,
+        )
+
+    return _image_needs_ocr_result(IMAGE_LOCAL_OCR_NOTE)
+
+
+def _image_needs_ocr_result(notes: str) -> ExtractionResult:
     page = ExtractedPage(
         page_number=1,
         raw_text="",
@@ -332,7 +446,7 @@ def _extract_image(path: Path) -> ExtractionResult:
         vision_recommended=True,
         source_span_start=0,
         source_span_end=0,
-        notes=IMAGE_LOCAL_OCR_NOTE,
+        notes=notes,
     )
     return ExtractionResult(
         pages=[page],
@@ -340,8 +454,61 @@ def _extract_image(path: Path) -> ExtractionResult:
         extraction_quality=ExtractionQuality.LOW,
         ocr_recommended=True,
         vision_recommended=True,
-        notes=IMAGE_LOCAL_OCR_NOTE,
+        notes=notes,
     )
+
+
+def _apply_ocr_result_to_page(
+    page: ExtractedPage,
+    ocr_result: LocalOcrResult,
+) -> None:
+    if not ocr_result.text.strip():
+        page.notes = _append_note(page.notes, _ocr_page_notes(ocr_result))
+        return
+
+    updated_page = _make_page(
+        ocr_result.text,
+        page_number=page.page_number,
+        needs_ocr=False,
+        vision_recommended=False,
+        source_span_start=page.source_span_start,
+        notes=_ocr_page_notes(ocr_result),
+    )
+    page.raw_text = updated_page.raw_text
+    page.clean_text = updated_page.clean_text
+    page.word_count = updated_page.word_count
+    page.needs_ocr = False
+    page.vision_recommended = False
+    page.source_span_end = updated_page.source_span_end
+    page.removed_boilerplate_lines = updated_page.removed_boilerplate_lines
+    page.ocr_applied = True
+    page.ocr_confidence = ocr_result.confidence
+    page.notes = updated_page.notes
+
+
+def _ocr_page_notes(ocr_result: LocalOcrResult) -> str:
+    notes = _append_note(None, OCR_APPLIED_NOTE)
+    if (
+        ocr_result.confidence is not None
+        and ocr_result.confidence < LOW_OCR_CONFIDENCE_THRESHOLD
+    ):
+        notes = _append_note(
+            notes,
+            "Image-based text reading (OCR) finished with low confidence. "
+            "Review the source image before relying on this text.",
+        )
+    if ocr_result.notes:
+        notes = _append_note(notes, ocr_result.notes)
+    return notes
+
+
+def _refresh_page_source_spans(pages: list[ExtractedPage]) -> None:
+    source_offset = 0
+    for page in pages:
+        page.source_span_start = source_offset
+        page.source_span_end = source_offset + len(page.raw_text)
+        if page.raw_text:
+            source_offset += len(page.raw_text) + 2
 
 
 def _extract_docx(path: Path) -> ExtractionResult:

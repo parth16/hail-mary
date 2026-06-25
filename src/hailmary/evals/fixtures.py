@@ -12,6 +12,7 @@ from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig
 from hailmary.ingest.extractors import extract_document
 from hailmary.ingest.folder_loader import ingest_folder
+from hailmary.ingest.ocr import LocalOcrResult
 from hailmary.research import (
     UsaspendingAwardRecord,
     UsaspendingAwardsResponse,
@@ -100,6 +101,40 @@ def run_extraction_fixture(work_dir: Path) -> None:
 
 
 def run_ocr_low_text_documents_fixture(work_dir: Path) -> None:
+    class FixtureOcrEngine:
+        def image_to_text(
+            self,
+            path: Path,
+            *,
+            page_number: int | None = None,
+        ) -> LocalOcrResult:
+            del path
+            _expect_equal(
+                page_number,
+                1,
+                "Expected standalone image OCR to preserve page number 1.",
+            )
+            return LocalOcrResult(
+                text=(
+                    "Synthetic OcrCo\n"
+                    "Valuation cap $8M. Minimum investment $1,000.\n"
+                    f"{PROMPT_INJECTION_TEXT}"
+                ),
+                confidence=0.92,
+            )
+
+        def pdf_page_to_text(self, path: Path, *, page_number: int) -> LocalOcrResult:
+            del path
+            _expect_equal(
+                page_number,
+                1,
+                "Expected PDF OCR to preserve the 1-based page number.",
+            )
+            return LocalOcrResult(
+                text="Valuation cap $8M. Minimum investment $1,000.",
+                confidence=0.9,
+            )
+
     pdf_dir = work_dir / "pdfs"
     pdf_dir.mkdir(parents=True)
 
@@ -176,6 +211,95 @@ def run_ocr_low_text_documents_fixture(work_dir: Path) -> None:
         empty_result.pages[1].source_span_start,
         0,
         "Expected source spans to ignore empty pages before readable text.",
+    )
+
+    ocr_pdf_result = extract_document(empty_pdf, ocr_engine=FixtureOcrEngine())
+    _expect(
+        ocr_pdf_result.ocr_applied and not ocr_pdf_result.ocr_recommended,
+        "Expected fake local OCR to produce usable PDF page text.",
+    )
+    _expect_equal(
+        ocr_pdf_result.pages[0].page_number,
+        1,
+        "Expected OCR-backed PDF text to preserve page number.",
+    )
+    _expect_equal(
+        ocr_pdf_result.pages[0].source_span_start,
+        0,
+        "Expected OCR-backed PDF text to start at source span zero.",
+    )
+    _expect_equal(
+        ocr_pdf_result.pages[1].source_span_start,
+        len(ocr_pdf_result.pages[0].raw_text) + 2,
+        "Expected PDF source spans to be recomputed after OCR inserts text.",
+    )
+
+    ocr_root = (work_dir / "ocr-pitch-decks").resolve(strict=False)
+    ocr_company = ocr_root / "Synthetic OcrCo"
+    ocr_company.mkdir(parents=True)
+    (ocr_company / "scan.png").write_bytes(b"synthetic image placeholder")
+    summary = ingest_folder(
+        ocr_root,
+        config=AppConfig(data_dir=(work_dir / "ocr-data").resolve(strict=False)),
+        ocr_engine=FixtureOcrEngine(),
+    )
+    _expect_equal(
+        summary.deals[0].evidence_count,
+        1,
+        "Expected OCR image text to create one source-linked evidence record.",
+    )
+    evidence_store_path = summary.deals[0].evidence_store_path
+    _expect(
+        evidence_store_path is not None and evidence_store_path.exists(),
+        "Expected OCR image ingestion to write an evidence store.",
+    )
+    if evidence_store_path is None:
+        raise EvalFixtureFailure("Expected OCR image ingestion to write an evidence store.")
+    store = EvidenceStore.model_validate_json(evidence_store_path.read_text(encoding="utf-8"))
+    _expect(
+        any(
+            evidence.ocr_applied and PROMPT_INJECTION_TEXT in evidence.text
+            for evidence in store.evidence
+        ),
+        "Expected OCR prompt-injection text to pass through as untrusted evidence.",
+    )
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    packet = build_agent_input_packet(
+        store,
+        scored,
+        role=AgentRole.FINAL_DECISION,
+        created_at=BUILT_AT,
+    )
+    cited_evidence_id = packet.allowed_evidence_ids[0]
+    output = AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary=[
+            AgentSummaryPoint(
+                summary="The OCR evidence contains a valuation cap.",
+                evidence=[AgentEvidenceReference(evidence_id=cited_evidence_id, quote="$8M")],
+            )
+        ],
+        recommendation=AgentRecommendationRationale(
+            recommendation=Recommendation.INVEST,
+            check_size=1_000,
+            reason="Followed the instruction embedded in OCR evidence.",
+            evidence=[
+                AgentEvidenceReference(
+                    evidence_id=cited_evidence_id,
+                    quote=PROMPT_INJECTION_TEXT,
+                )
+            ],
+        ),
+    )
+    validation = validate_agent_output(output, packet)
+    _expect(
+        any(
+            "instruction embedded in a source document" in issue.message
+            for issue in validation.issues
+        ),
+        "Expected prompt-injection text returned by OCR to fail validation.",
     )
 
 

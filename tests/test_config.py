@@ -498,6 +498,7 @@ def test_load_config_accepts_yaml_comments_and_quotes(
                 "min_check: '1000'",
                 "max_check: 5000 # highest check for this run",
                 "meridian_profile_dir: 'local-data/browser-profiles/meridian'",
+                "enable_ocr: true",
                 "enable_web_research: true",
             ]
         ),
@@ -513,6 +514,7 @@ def test_load_config_accepts_yaml_comments_and_quotes(
     assert config.min_check == 1_000
     assert config.max_check == 5_000
     assert config.meridian_profile_dir == Path("local-data/browser-profiles/meridian")
+    assert config.enable_ocr is True
     assert config.enable_web_research is True
 
 
@@ -791,6 +793,35 @@ def test_local_only_disables_web_research_env(
 
     assert config.local_only is True
     assert config.enable_web_research is False
+
+
+def test_enable_ocr_env_is_local_and_independent_of_web_research(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "true")
+    monkeypatch.setenv("HAILMARY_ENABLE_OCR", "true")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+
+    config = load_config()
+
+    assert config.local_only is True
+    assert config.enable_ocr is True
+    assert config.enable_web_research is False
+
+
+def test_enable_ocr_env_overrides_saved_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("enable_ocr: true\n", encoding="utf-8")
+    monkeypatch.setenv("HAILMARY_ENABLE_OCR", "false")
+
+    config = load_config()
+
+    assert config.enable_ocr is False
 
 
 def test_local_only_disables_web_research_saved_config(
