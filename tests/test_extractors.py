@@ -335,6 +335,40 @@ def test_pdf_low_text_divider_with_readable_page_does_not_warn_document(
     assert result.notes is None
 
 
+def test_pdf_boilerplate_only_divider_with_readable_page_does_not_warn_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class TextPage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        pages = [
+            TextPage(
+                "Not for distribution\n"
+                "Not for distribution\n"
+                "Not for distribution\n"
+            ),
+            TextPage("Readable traction text with customer growth and revenue context."),
+        ]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert result.pages[0].clean_text == ""
+    assert result.pages[0].notes is None
+    assert not result.ocr_recommended
+    assert not result.vision_recommended
+    assert result.notes is None
+
+
 def test_pdf_empty_page_with_readable_page_warns_document(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

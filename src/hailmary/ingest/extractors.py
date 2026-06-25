@@ -123,7 +123,7 @@ def _make_page(
     source_span_end = (
         source_span_start + len(raw_text) if source_span_start is not None else None
     )
-    if needs_ocr is None and page_needs_ocr and not cleaning.clean_text.strip():
+    if needs_ocr is None and page_needs_ocr and not raw_text.strip():
         notes = _append_note(notes, LOCAL_OCR_EMPTY_PAGE_NOTE)
     return ExtractedPage(
         page_number=page_number,
