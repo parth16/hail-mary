@@ -282,9 +282,17 @@ def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
     assert "token=secret" not in output
 
 
+@pytest.mark.parametrize(
+    "website_url",
+    [
+        "https://example.com/acme?token=secret#details",
+        "https://example.com/acme;token=secret/details",
+    ],
+)
 def test_research_workflow_rejects_tokenized_website_url_before_writing_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    website_url: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data"
@@ -296,7 +304,7 @@ def test_research_workflow_rejects_tokenized_website_url_before_writing_plan(
             "--company",
             "Acme AI",
             "--website",
-            "https://example.com/acme?token=secret#details",
+            website_url,
             "--data-dir",
             str(data_dir),
         ],

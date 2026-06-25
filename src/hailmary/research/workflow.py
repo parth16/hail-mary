@@ -693,7 +693,7 @@ def _clean_workflow_website_url(url: str | None) -> str | None:
         )
     if any(character.isspace() for character in cleaned):
         raise ResearchWorkflowError("The website URL cannot contain spaces.")
-    if parsed.params or parsed.query or parsed.fragment:
+    if ";" in parsed.path or parsed.params or parsed.query or parsed.fragment:
         raise ResearchWorkflowError(
             "The website URL cannot include query strings, fragments, or extra "
             "parameter text. Use the base public page URL."
