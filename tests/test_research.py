@@ -2264,6 +2264,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "https://user:token@portal.angellist.com/m/acme-ai/invest",
         "https://portal.angellist.com:bad/m/acme-ai/invest",
         "https://portal.angellist.com:444/m/acme-ai/invest",
+        "https://portal.angellist.com:/m/acme-ai/invest",
         "https://portal.angellist.com/m/acme ai/invest",
         "https://portal.angellist.com/m/acme-ai;jsessionid=secret/invest",
         "https://portal.angellist.com/m/acme-ai/invest;jsessionid=secret",
@@ -3837,6 +3838,10 @@ def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
         ),
         (
             "https://portal.angellist.com:444/m/example/invest",
+            "cannot include a port",
+        ),
+        (
+            "https://portal.angellist.com:/m/example/invest",
             "cannot include a port",
         ),
         (

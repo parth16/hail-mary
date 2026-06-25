@@ -193,7 +193,7 @@ def clean_meridian_url(url: str) -> str:
         port = parsed.port
     except ValueError as exc:
         raise MeridianWorkflowError("The Meridian URL has an invalid port.") from exc
-    if port is not None:
+    if port is not None or _has_explicit_port(parsed.netloc):
         raise MeridianWorkflowError("The Meridian URL cannot include a port.")
     if parsed.username is not None or parsed.password is not None:
         raise MeridianWorkflowError(
@@ -229,6 +229,16 @@ def clean_meridian_url(url: str) -> str:
             "underscores, or hyphens in the deal name."
         )
     return cleaned
+
+
+def _has_explicit_port(netloc: str) -> bool:
+    host_port = netloc.rsplit("@", 1)[-1]
+    if host_port.startswith("["):
+        closing_bracket_index = host_port.find("]")
+        if closing_bracket_index == -1:
+            return False
+        return host_port[closing_bracket_index + 1 :].startswith(":")
+    return ":" in host_port
 
 
 def _meridian_provider() -> ResearchProvider:
