@@ -336,6 +336,16 @@ def score_deals(
         _plain(f"Scored {result.deal_count} {deal_word}."),
         _plain(f"Saved Markdown {memo_word} to {result.report_dir}."),
     ]
+    if result.portfolio_report_path is not None:
+        result_lines.append(
+            _plain(f"Saved the portfolio comparison report to {result.portfolio_report_path}.")
+        )
+        result_lines.append(
+            _plain(
+                "Portfolio comparison report file: "
+                f"{result.portfolio_report_path.name}."
+            )
+        )
     deals = Table(
         box=box.SIMPLE,
         header_style="bold",

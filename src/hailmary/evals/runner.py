@@ -257,8 +257,8 @@ def _eval_definitions() -> list[EvalDefinition]:
                 category=EvalCategory.MEMO_SNAPSHOT,
                 name="Memo required section snapshot",
                 description=(
-                    "Checks that Markdown memo rendering keeps the decision, score, "
-                    "evidence, diligence, and advice disclaimer sections."
+                    "Checks that Markdown memo and portfolio report rendering keep "
+                    "decision, score, evidence, diligence, and disclaimer sections."
                 ),
             ),
             run=lambda _: fixtures.run_memo_snapshot_fixture(),

@@ -77,6 +77,7 @@ class ScoredDeal(BaseModel):
 class MemoRunSummary(BaseModel):
     report_dir: Path
     scored_deals: list[ScoredDeal] = Field(default_factory=list)
+    portfolio_report_path: Path | None = None
 
     @property
     def deal_count(self) -> int:

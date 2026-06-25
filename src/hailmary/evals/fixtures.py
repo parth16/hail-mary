@@ -41,7 +41,7 @@ from hailmary.schemas.evidence import (
     VerificationStatus,
 )
 from hailmary.schemas.scoring import Recommendation, ScoredDeal
-from hailmary.scoring.memo import render_markdown_memo
+from hailmary.scoring.memo import render_markdown_memo, render_portfolio_report
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -1158,7 +1158,9 @@ def run_missing_data_fixture() -> None:
 
 def run_memo_snapshot_fixture() -> None:
     store = _strong_store()
-    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data"))).model_copy(
+        update={"memo_path": Path("data/reports/synthetic-evalco-memo.md")}
+    )
     memo = render_markdown_memo(scored, store)
     expected_fragments = [
         "# Hail Mary Investment Memo: Synthetic EvalCo",
@@ -1180,6 +1182,33 @@ def run_memo_snapshot_fixture() -> None:
         not missing_fragments,
         "Expected the memo snapshot to contain every required section and cited evidence ID.",
         missing_fragments=", ".join(missing_fragments),
+    )
+
+    portfolio_report = render_portfolio_report(
+        [scored],
+        config=AppConfig(data_dir=Path("data")),
+    )
+    expected_portfolio_fragments = [
+        "# Hail Mary Portfolio Comparison Report",
+        "## Portfolio Constraints",
+        "Allowed check sizes: $0, $1K, $2.5K, $5K, $7.5K, $10K",
+        "## Ranked Deals",
+        "Synthetic EvalCo",
+        "## Deal Details",
+        "Key risks:",
+        "Evidence: ev\\_traction.",
+        "This report is a diligence aid, not legal, tax, financial, or investment advice.",
+    ]
+    missing_portfolio_fragments = [
+        fragment
+        for fragment in expected_portfolio_fragments
+        if fragment not in portfolio_report
+    ]
+    _expect(
+        not missing_portfolio_fragments,
+        "Expected the portfolio report snapshot to contain required sections "
+        "and cited evidence IDs.",
+        missing_fragments=", ".join(missing_portfolio_fragments),
     )
 
 
