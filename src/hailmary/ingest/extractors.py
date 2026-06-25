@@ -505,7 +505,6 @@ def _apply_ocr_result_to_page(
         page.notes = updated_page.notes
         return
 
-    page.ocr_applied = True
     page.ocr_confidence = ocr_result.confidence
     updated_page = _make_page(
         ocr_result.text,
@@ -519,9 +518,20 @@ def _apply_ocr_result_to_page(
     word_count = updated_page.word_count
     notes = updated_page.notes
     if updated_page.needs_ocr:
+        if page.clean_text.strip():
+            page.needs_ocr = True
+            page.vision_recommended = True
+            page.notes = _append_note(
+                page.notes,
+                _ocr_page_notes(ocr_result, applied=False),
+            )
+            page.notes = _append_note(page.notes, OCR_LOW_TEXT_NOTE)
+            return
+
         clean_text = ""
         word_count = 0
         notes = _append_note(notes, OCR_LOW_TEXT_NOTE)
+    page.ocr_applied = True
     page.raw_text = updated_page.raw_text
     page.clean_text = clean_text
     page.word_count = word_count

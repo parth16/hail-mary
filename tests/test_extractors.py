@@ -534,6 +534,45 @@ def test_pdf_low_confidence_ocr_preserves_existing_page_text(
     assert "low confidence" in result.pages[0].notes
 
 
+def test_pdf_fragment_ocr_preserves_existing_page_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return "Valuation cap $8M. Round size $1M."
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="1",
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert engine.pdf_calls == [1]
+    assert result.combined_text == "Valuation cap $8M. Round size $1M."
+    assert not result.ocr_applied
+    assert result.ocr_recommended
+    assert result.pages[0].raw_text == "Valuation cap $8M. Round size $1M."
+    assert result.pages[0].clean_text == "Valuation cap $8M. Round size $1M."
+    assert result.pages[0].ocr_confidence == 0.91
+    assert not result.pages[0].ocr_applied
+    assert result.pages[0].notes is not None
+    assert "only a small amount of text" in result.pages[0].notes
+
+
 def test_pdf_missing_pdftoppm_warns_without_crashing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
