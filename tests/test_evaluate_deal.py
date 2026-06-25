@@ -227,7 +227,10 @@ def test_evaluate_deal_specialist_validation_failure_retries_then_records_limita
     company_dir = _write_company_folder(tmp_path)
     client = RecordingReviewClient(
         outputs_by_role={
-            AgentRole.TEAM: [_unknown_evidence_output_json, _unknown_evidence_output_json]
+            AgentRole.TEAM_EXECUTION: [
+                _unknown_evidence_output_json,
+                _unknown_evidence_output_json,
+            ]
         }
     )
 
@@ -238,13 +241,81 @@ def test_evaluate_deal_specialist_validation_failure_retries_then_records_limita
         max_concurrency=1,
     )
 
-    team_calls = [call for call in client.calls if call[0].agent_role == AgentRole.TEAM]
+    team_calls = [
+        call for call in client.calls if call[0].agent_role == AgentRole.TEAM_EXECUTION
+    ]
     assert len(team_calls) == 2
     assert team_calls[1][1]
-    assert any("Team failed validation" in warning for warning in result.warnings)
+    assert any("Team Execution failed validation" in warning for warning in result.warnings)
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
-    assert "Team failed validation after one repair attempt" in memo_text
-    assert len(list(result.agent_output_dir.glob("team-attempt-*-invalid.json"))) == 2
+    assert "Team Execution failed validation after one repair attempt" in memo_text
+    assert len(list(result.agent_output_dir.glob("team_execution-attempt-*-invalid.json"))) == 2
+
+
+def test_evaluate_deal_repairs_invalid_json_with_first_validation_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient(
+        outputs_by_role={
+            AgentRole.PRODUCT_CUSTOMER_TRACTION: ["{not valid json", _valid_output_json]
+        }
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    role_calls = [
+        call
+        for call in client.calls
+        if call[0].agent_role == AgentRole.PRODUCT_CUSTOMER_TRACTION
+    ]
+    assert len(role_calls) == 2
+    assert "First problem" in role_calls[1][1][0].message
+    invalid_attempts = list(
+        result.agent_output_dir.glob("product_customer_traction-attempt-*-invalid.json")
+    )
+    assert len(invalid_attempts) == 1
+    assert invalid_attempts[0].parent == result.agent_output_dir
+
+
+def test_evaluate_deal_committee_context_excludes_unsupported_findings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient(
+        outputs_by_role={
+            AgentRole.PRODUCT_CUSTOMER_TRACTION: [_mixed_committee_output_json]
+        }
+    )
+
+    evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    final_calls = [
+        call for call in client.calls if call[0].agent_role == AgentRole.FINAL_DECISION
+    ]
+    committee_context = final_calls[-1][2]
+    context_payload = json.loads(committee_context)
+    assert "supported_specialist_findings" in context_payload
+    assert "Supported traction" in committee_context
+    assert "Missing customer cohort evidence" in committee_context
+    assert "Unsupported hype" not in committee_context
+    assert "Unsupported risk" not in committee_context
 
 
 def test_evaluate_deal_warnings_include_ingestion_ocr_warnings() -> None:
@@ -385,6 +456,8 @@ def test_evaluate_deal_deterministic_pass_overrides_model_invest(
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "**Recommendation:** PASS" in memo_text
     assert "Deterministic scoring forced PASS" in memo_text
+    assert "Model recommendation before guardrails: INVEST" in memo_text
+    assert "Guardrail override" in memo_text
     assert "Valuation cap" not in result.final_recommendation.reason
 
 
@@ -416,6 +489,9 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
     assert result.final_recommendation.recommendation == Recommendation.INVEST
     assert result.final_recommendation.check_size == 5_000
     assert any("deterministic allocation" in warning for warning in result.warnings)
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Model recommendation before guardrails: INVEST" in memo_text
+    assert "Guardrail override" in memo_text
 
 
 def test_evaluate_deal_scores_against_capital_after_reserve(
@@ -507,6 +583,7 @@ def test_evaluate_deal_no_evidence_writes_pass_memo_without_model_calls(
     assert "**Recommendation:** PASS" in memo_text
     assert "NEEDS\\_DILIGENCE: No usable source-linked evidence was available" in memo_text
     assert "skipped model committee review" in memo_text
+    assert "Model recommendation before guardrails" not in memo_text
 
 
 def test_evaluate_deal_renders_final_decision_findings(
@@ -853,6 +930,43 @@ def _unknown_evidence_output_json(packet: AgentInputPacket) -> str:
                 evidence=[AgentEvidenceReference(evidence_id="ev_missing")],
             )
         ],
+    ).model_dump_json()
+
+
+def _mixed_committee_output_json(packet: AgentInputPacket) -> str:
+    evidence = packet.evidence[0]
+    reference = AgentEvidenceReference(evidence_id=evidence.id, quote=_quote(evidence.text))
+    return AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary=[
+            AgentSummaryPoint(
+                summary="Supported traction is visible in packet evidence.",
+                evidence=[reference],
+            ),
+            AgentSummaryPoint(
+                summary="Unsupported hype should not reach the final-decision context.",
+                unsupported=True,
+            ),
+        ],
+        findings=[
+            AgentFinding(
+                title="Supported traction",
+                finding="Supported traction uses packet evidence.",
+                confidence=ConfidenceLevel.MEDIUM,
+                materiality="high",
+                evidence=[reference],
+            ),
+            AgentFinding(
+                title="Unsupported risk",
+                finding="Unsupported risk should stay out of committee context.",
+                confidence=ConfidenceLevel.LOW,
+                materiality="medium",
+                unsupported=True,
+            ),
+        ],
+        limitations=["Missing customer cohort evidence should reach final context."],
     ).model_dump_json()
 
 

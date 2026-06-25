@@ -19,6 +19,10 @@ from hailmary.schemas.scoring import (
 
 
 class AgentRole(StrEnum):
+    PRODUCT_CUSTOMER_TRACTION = "product_customer_traction"
+    MARKET_COMPETITION = "market_competition"
+    TEAM_EXECUTION = "team_execution"
+    FINANCING_NEXT_ROUND_RISK = "financing_next_round_risk"
     EXTRACTION = "extraction"
     STAGE_NORMALIZER = "stage_normalizer"
     DEAL_TERMS = "deal_terms"
@@ -76,6 +80,28 @@ class AgentScoreSnapshot(BaseModel):
     fundability_risk: FundabilityRisk
 
 
+class AgentScoreFactorItem(BaseModel):
+    name: str
+    score: int
+    max_score: int
+    explanation: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AgentKillGateItem(BaseModel):
+    name: str
+    triggered: bool
+    reason: str
+
+
+class AgentConflictItem(BaseModel):
+    id: str
+    claim_type: ClaimType
+    label: str
+    normalized_values: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
 class AgentInputPacket(BaseModel):
     created_at: datetime
     deal_id: str
@@ -87,6 +113,10 @@ class AgentInputPacket(BaseModel):
     output_schema_name: str = "AgentReviewOutput"
     output_schema: dict[str, Any] = Field(default_factory=dict)
     score: AgentScoreSnapshot
+    score_factors: list[AgentScoreFactorItem] = Field(default_factory=list)
+    triggered_kill_gates: list[AgentKillGateItem] = Field(default_factory=list)
+    conflicts: list[AgentConflictItem] = Field(default_factory=list)
+    packet_limitations: list[str] = Field(default_factory=list)
     evidence: list[AgentEvidenceItem] = Field(default_factory=list)
     verified_claims: list[AgentClaimItem] = Field(default_factory=list)
     diligence_questions: list[str] = Field(default_factory=list)
