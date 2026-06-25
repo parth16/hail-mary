@@ -192,6 +192,49 @@ def test_page_evidence_keeps_safe_clean_text_source_span() -> None:
     assert store.evidence[0].source_span_end == 60
 
 
+def test_page_evidence_keeps_span_when_ocr_merge_adds_blank_separator() -> None:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    source = SourceDocument(
+        id="doc_test",
+        deal_id="deal_test",
+        path=Path("deck.pdf"),
+        source_kind=SourceKind.LOCAL_FILE,
+        document_type=DocumentType.PITCH_DECK,
+        file_type=FileType.PDF,
+        title="deck",
+        ingested_at=created_at,
+        sha256="abc",
+        extraction_quality=ExtractionQuality.MEDIUM,
+        ocr_applied=True,
+    )
+    raw_text = "Acme investor deck\n\nValuation cap $8M. Minimum investment $1,000."
+    document = IngestedDocument(
+        source=source,
+        pages=[
+            ExtractedPage(
+                page_number=1,
+                raw_text=raw_text,
+                clean_text="Acme investor deck\nValuation cap $8M. Minimum investment $1,000.",
+                word_count=8,
+                source_span_start=30,
+                source_span_end=30 + len(raw_text),
+                ocr_applied=True,
+                ocr_confidence=0.91,
+            )
+        ],
+        tables=[],
+        output_path=Path("out.json"),
+    )
+    deal = IngestedDeal(id="deal_test", company_name="SpanCo", documents=[document])
+
+    store = build_evidence_store(deal, created_at=created_at)
+
+    assert store.evidence[0].source_span_start == 30
+    assert store.evidence[0].source_span_end == 30 + len(raw_text)
+    assert store.evidence[0].ocr_applied
+    assert store.evidence[0].ocr_confidence == 0.91
+
+
 def test_page_evidence_drops_span_when_clean_text_changes_raw_text() -> None:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
     source = SourceDocument(
