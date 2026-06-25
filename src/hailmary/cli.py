@@ -196,12 +196,20 @@ def _config_with_portfolio_overrides(
         updates["min_check"] = min_check
     if max_check is not None:
         updates["max_check"] = max_check
+    parsed_reserve_percent: Decimal | None = None
     if reserve_percent is not None:
-        updates["reserve_percent"] = _parse_decimal_option(
+        parsed_reserve_percent = _parse_decimal_option(
             reserve_percent,
             option_name="reserve percent",
         )
-    if reserve_dollars is not None:
+    if reserve_percent is not None and reserve_dollars is not None:
+        updates["reserve_percent"] = parsed_reserve_percent or Decimal("0")
+        updates["reserve_dollars"] = reserve_dollars
+    elif reserve_percent is not None:
+        updates["reserve_percent"] = parsed_reserve_percent or Decimal("0")
+        updates["reserve_dollars"] = 0
+    elif reserve_dollars is not None:
+        updates["reserve_percent"] = Decimal("0")
         updates["reserve_dollars"] = reserve_dollars
     if estimated_dilution_percent is not None:
         updates["estimated_dilution_percent"] = _parse_decimal_option(

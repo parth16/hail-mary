@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, Decimal, localcontext
 
 from hailmary.config import CHECK_SIZE_TIERS, AppConfig
 from hailmary.schemas.scoring import Recommendation, ScoredDeal
@@ -175,16 +175,22 @@ def portfolio_return_case(
     config: AppConfig,
 ) -> PortfolioReturnCase:
     invested = Decimal(invested_capital)
-    gross_value_before_dilution = invested * gross_return_multiple
-    dilution_factor = Decimal("1") - (config.estimated_dilution_percent / PERCENT_BASE)
-    value_after_dilution = gross_value_before_dilution * dilution_factor
-    platform_fee = invested * config.platform_fee_percent / PERCENT_BASE
-    profit_after_dilution = max(Decimal("0"), value_after_dilution - invested)
-    carry = profit_after_dilution * config.carry_percent / PERCENT_BASE
-    net_cash_returned = value_after_dilution - carry
-    net_profit_after_fees = net_cash_returned - invested - platform_fee
-    cash_in = invested + platform_fee
-    net_multiple = Decimal("0") if cash_in == 0 else net_cash_returned / cash_in
+    with localcontext() as context:
+        max_result_adjusted = (
+            max(invested.adjusted(), 0) + max(gross_return_multiple.adjusted(), 0) + 10
+        )
+        context.Emax = max(context.Emax, max_result_adjusted)
+        context.Emin = min(context.Emin, -max_result_adjusted)
+        gross_value_before_dilution = invested * gross_return_multiple
+        dilution_factor = Decimal("1") - (config.estimated_dilution_percent / PERCENT_BASE)
+        value_after_dilution = gross_value_before_dilution * dilution_factor
+        platform_fee = invested * config.platform_fee_percent / PERCENT_BASE
+        profit_after_dilution = max(Decimal("0"), value_after_dilution - invested)
+        carry = profit_after_dilution * config.carry_percent / PERCENT_BASE
+        net_cash_returned = value_after_dilution - carry
+        net_profit_after_fees = net_cash_returned - invested - platform_fee
+        cash_in = invested + platform_fee
+        net_multiple = Decimal("0") if cash_in == 0 else net_cash_returned / cash_in
     return PortfolioReturnCase(
         label=label,
         gross_return_multiple=gross_return_multiple,

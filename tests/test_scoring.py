@@ -1558,6 +1558,25 @@ def test_render_portfolio_report_formats_large_return_assumptions_without_crashi
     assert "| Configured | 100000000000000000000x |" in report
 
 
+def test_render_portfolio_report_bounds_extreme_return_assumption_formatting(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        gross_return_multiple=Decimal("1e1000000"),
+    )
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_extreme", company_name="Extreme Math"),
+        config=config,
+    )
+
+    report = render_portfolio_report([scored], config=config)
+
+    assert "Gross return multiple: 1E+1000000x" in report
+    assert "| Configured | 1E+1000000x | $5,000 | $5E+1000003 |" in report
+    assert len(report) < 20_000
+
+
 def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> None:
     strong_scored = score_evidence_store(
         _strong_store(deal_id="deal_strong", company_name="StrongCo"),
@@ -1802,6 +1821,68 @@ def test_score_deals_command_accepts_portfolio_scenario_overrides(tmp_path: Path
     assert "Carry: 20%" in report
     assert "Gross return multiple: 8x" in report
     assert "| 1 | Deal One | INVEST | $1K |" in report
+
+
+def test_score_deals_run_only_reserve_percent_replaces_saved_reserve_dollars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("reserve_dollars: 1500\n", encoding="utf-8")
+    store = _strong_store(deal_id="deal_one", company_name="Deal One")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(
+        app,
+        [
+            "score-deals",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--capital-budget",
+            "10000",
+            "--reserve-percent",
+            "10",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = (tmp_path / "data" / "reports" / "portfolio-comparison-report.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Reserve: $1,000 (10% reserve)" in report
+
+
+def test_score_deals_run_only_reserve_dollars_replaces_saved_reserve_percent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("reserve_percent: 10\n", encoding="utf-8")
+    store = _strong_store(deal_id="deal_one", company_name="Deal One")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(
+        app,
+        [
+            "score-deals",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--capital-budget",
+            "10000",
+            "--reserve-dollars",
+            "1500",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = (tmp_path / "data" / "reports" / "portfolio-comparison-report.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Reserve: $1,500 (configured reserve dollars)" in report
 
 
 def test_score_deals_command_rejects_conflicting_reserve_overrides(tmp_path: Path) -> None:

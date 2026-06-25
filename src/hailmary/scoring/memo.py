@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from decimal import ROUND_HALF_UP, Decimal, localcontext
+from decimal import ROUND_HALF_UP, Decimal, DecimalException, localcontext
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -33,6 +33,7 @@ class ScoringError(RuntimeError):
 
 
 PORTFOLIO_REPORT_FILENAME = "portfolio-comparison-report.md"
+MAX_FIXED_DECIMAL_REPORT_CHARS = 120
 
 
 def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
@@ -671,7 +672,11 @@ def _format_check_size(check_size: int) -> str:
 
 
 def _format_dollars(value: int | Decimal) -> str:
-    amount = _quantize_decimal(Decimal(value), Decimal("0.01"))
+    decimal_value = Decimal(value)
+    if _fixed_decimal_report_chars(decimal_value) > MAX_FIXED_DECIMAL_REPORT_CHARS:
+        prefix = "-" if decimal_value < 0 else ""
+        return f"{prefix}${_format_scientific_decimal(decimal_value.copy_abs())}"
+    amount = _quantize_decimal(decimal_value, Decimal("0.01"))
     prefix = "-" if amount < 0 else ""
     absolute_amount = abs(amount)
     if absolute_amount == absolute_amount.to_integral_value():
@@ -688,6 +693,8 @@ def _format_multiple(value: Decimal) -> str:
 
 
 def _format_net_multiple(value: Decimal) -> str:
+    if _fixed_decimal_report_chars(value) > MAX_FIXED_DECIMAL_REPORT_CHARS:
+        return f"{_format_decimal(value)}x"
     rounded = _quantize_decimal(value, Decimal("0.01"))
     return f"{_format_decimal(rounded)}x"
 
@@ -701,10 +708,41 @@ def _quantize_decimal(value: Decimal, quantizer: Decimal) -> Decimal:
 
 
 def _format_decimal(value: Decimal) -> str:
-    text = format(value.normalize(), "f")
+    if value == 0:
+        return "0"
+    if _fixed_decimal_report_chars(value) > MAX_FIXED_DECIMAL_REPORT_CHARS:
+        return _format_scientific_decimal(value)
+    try:
+        normalized = value.normalize()
+    except DecimalException:
+        return _format_scientific_decimal(value)
+    text = format(normalized, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return "0" if text == "-0" else text
+
+
+def _fixed_decimal_report_chars(value: Decimal) -> int:
+    if value == 0:
+        return 1
+    value_tuple = value.as_tuple()
+    digit_count = len(value_tuple.digits)
+    exponent = value_tuple.exponent
+    if not isinstance(exponent, int):
+        return MAX_FIXED_DECIMAL_REPORT_CHARS + 1
+    if exponent >= 0:
+        return digit_count + exponent
+    integer_digits = max(value.adjusted() + 1, 1)
+    return integer_digits + 1 + abs(exponent)
+
+
+def _format_scientific_decimal(value: Decimal) -> str:
+    mantissa, exponent = format(value, ".6E").split("E", maxsplit=1)
+    mantissa = mantissa.rstrip("0").rstrip(".")
+    exponent_sign = exponent[0] if exponent and exponent[0] in "+-" else "+"
+    exponent_digits = exponent[1:] if exponent and exponent[0] in "+-" else exponent
+    exponent_digits = exponent_digits.lstrip("0") or "0"
+    return f"{mantissa}E{exponent_sign}{exponent_digits}"
 
 
 def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
