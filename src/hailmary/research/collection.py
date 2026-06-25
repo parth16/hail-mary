@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, Self
-from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -18,23 +17,11 @@ from hailmary.config import AppConfig, ConfigError, validate_local_state
 
 from .providers import builtin_research_providers
 from .schemas import ResearchProvider, ResearchResultInput, ResearchResultsFile
+from .source_urls import validate_http_url, validate_provider_source_url
 
 
 class ResearchCollectionError(RuntimeError):
     """Public research results could not be prepared safely."""
-
-
-PUBLIC_SOURCE_HOSTS: dict[str, tuple[str, str]] = {
-    "sec_form_d": ("sec.gov", "an SEC website host such as www.sec.gov or data.sec.gov"),
-    "sam_gov": ("sam.gov", "a SAM.gov website host such as sam.gov or www.sam.gov"),
-    "usaspending": (
-        "usaspending.gov",
-        "a USAspending website host such as www.usaspending.gov",
-    ),
-    "sbir": ("sbir.gov", "an SBIR website host such as www.sbir.gov"),
-    "uspto": ("uspto.gov", "a USPTO website host such as tmsearch.uspto.gov"),
-    "github": ("github.com", "the GitHub website host github.com"),
-}
 
 
 class PublicSourceSearchResult(BaseModel):
@@ -76,14 +63,14 @@ class PublicSourceSearchResult(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_url(self) -> Self:
-        _validate_http_url(self.source_url, field_name="source_url")
+        validate_http_url(self.source_url, field_name="source_url")
         return self
 
 
 class SecFormDSearchResult(PublicSourceSearchResult):
     @model_validator(mode="after")
     def validate_sec_source_url(self) -> Self:
-        _validate_provider_source_url("sec_form_d", self.source_url)
+        validate_provider_source_url("sec_form_d", self.source_url)
         return self
 
 
@@ -152,7 +139,7 @@ class PublicSourceFileAdapter:
         for search_result in self.client.search(deal.company_name):
             if not _exact_company_name_match(deal.company_name, search_result.company_name):
                 continue
-            _validate_provider_source_url(provider.id, search_result.source_url)
+            validate_provider_source_url(provider.id, search_result.source_url)
             try:
                 result = ResearchResultInput(
                     company_name=deal.company_name,
@@ -363,7 +350,7 @@ def _load_public_source_search_results(
         ) from exc
     for index, result in enumerate(results_file.results, start=1):
         try:
-            _validate_provider_source_url(provider_id, result.source_url)
+            validate_provider_source_url(provider_id, result.source_url)
         except ValueError as exc:
             raise ResearchCollectionError(
                 f"{provider.name} result {index} has an invalid source_url: {exc}"
@@ -434,47 +421,8 @@ def _resolve_input_file(path: Path, *, description: str) -> Path:
     return resolved_path
 
 
-def _validate_http_url(url: str, *, field_name: str) -> None:
-    try:
-        parsed = urlparse(url)
-    except ValueError as exc:
-        raise ValueError(f"{field_name} is not a valid URL") from exc
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError(f"{field_name} must start with http:// or https://")
-    try:
-        host = parsed.hostname
-    except ValueError as exc:
-        raise ValueError(f"{field_name} is not a valid URL") from exc
-    if not parsed.netloc or host is None:
-        raise ValueError(f"{field_name} must include a website host")
-    try:
-        _port = parsed.port
-    except ValueError as exc:
-        raise ValueError(f"{field_name} has an invalid port") from exc
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError(f"{field_name} cannot include a username or password")
-    if any(character.isspace() for character in url):
-        raise ValueError(f"{field_name} cannot contain spaces")
-
-
 def _validate_sec_source_url(url: str) -> None:
-    _validate_provider_source_url("sec_form_d", url)
-
-
-def _validate_provider_source_url(provider_id: str, url: str) -> None:
-    _validate_http_url(url, field_name="source_url")
-    host_rule = PUBLIC_SOURCE_HOSTS.get(provider_id)
-    if host_rule is None:
-        return
-    allowed_suffix, description = host_rule
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").casefold()
-    allowed_host = allowed_suffix.casefold()
-    if host == allowed_host or host.endswith(f".{allowed_host}"):
-        return
-    raise ValueError(
-        f"source_url must use {description}"
-    )
+    validate_provider_source_url("sec_form_d", url)
 
 
 def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
