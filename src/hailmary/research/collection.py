@@ -24,7 +24,20 @@ class ResearchCollectionError(RuntimeError):
     """Public research results could not be prepared safely."""
 
 
-class SecFormDSearchResult(BaseModel):
+PUBLIC_SOURCE_HOSTS: dict[str, tuple[str, str]] = {
+    "sec_form_d": ("sec.gov", "an SEC website host such as www.sec.gov or data.sec.gov"),
+    "sam_gov": ("sam.gov", "a SAM.gov website host such as sam.gov or www.sam.gov"),
+    "usaspending": (
+        "usaspending.gov",
+        "a USAspending website host such as www.usaspending.gov",
+    ),
+    "sbir": ("sbir.gov", "an SBIR website host such as www.sbir.gov"),
+    "uspto": ("uspto.gov", "a USPTO website host such as tmsearch.uspto.gov"),
+    "github": ("github.com", "the GitHub website host github.com"),
+}
+
+
+class PublicSourceSearchResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     company_name: str
@@ -64,14 +77,23 @@ class SecFormDSearchResult(BaseModel):
     @model_validator(mode="after")
     def validate_source_url(self) -> Self:
         _validate_http_url(self.source_url, field_name="source_url")
-        _validate_sec_source_url(self.source_url)
         return self
 
 
-class SecFormDSearchResultsFile(BaseModel):
+class SecFormDSearchResult(PublicSourceSearchResult):
+    @model_validator(mode="after")
+    def validate_sec_source_url(self) -> Self:
+        _validate_provider_source_url("sec_form_d", self.source_url)
+        return self
+
+
+class PublicSourceSearchResultsFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    results: list[SecFormDSearchResult]
+    results: list[PublicSourceSearchResult]
+
+
+SecFormDSearchResultsFile = PublicSourceSearchResultsFile
 
 
 class ResearchCollectionDealSummary(BaseModel):
@@ -99,25 +121,24 @@ class ResearchCollectionDeal:
     company_name: str
 
 
-class SecFormDSearchClient(Protocol):
-    def search(self, company_name: str) -> Iterable[SecFormDSearchResult]:
-        """Return locally available SEC Form D search results for one company."""
+class PublicSourceSearchClient(Protocol):
+    def search(self, company_name: str) -> Iterable[PublicSourceSearchResult]:
+        """Return locally available public-source results for one company."""
 
 
 @dataclass(frozen=True)
-class LocalSecFormDSearchClient:
-    results: tuple[SecFormDSearchResult, ...]
+class LocalPublicSourceSearchClient:
+    results: tuple[PublicSourceSearchResult, ...]
 
-    def search(self, company_name: str) -> Iterable[SecFormDSearchResult]:
+    def search(self, company_name: str) -> Iterable[PublicSourceSearchResult]:
         for result in self.results:
             if _exact_company_name_match(company_name, result.company_name):
                 yield result
 
 
 @dataclass(frozen=True)
-class SecFormDPublicAdapter:
-    client: SecFormDSearchClient
-
+class PublicSourceFileAdapter:
+    client: PublicSourceSearchClient
     provider_id: str = "sec_form_d"
 
     def collect(
@@ -131,6 +152,7 @@ class SecFormDPublicAdapter:
         for search_result in self.client.search(deal.company_name):
             if not _exact_company_name_match(deal.company_name, search_result.company_name):
                 continue
+            _validate_provider_source_url(provider.id, search_result.source_url)
             try:
                 result = ResearchResultInput(
                     company_name=deal.company_name,
@@ -140,17 +162,33 @@ class SecFormDPublicAdapter:
                     text=search_result.text,
                     retrieved_at=_as_utc(search_result.retrieved_at),
                     source_url=search_result.source_url,
-                    confidence="high: exact company name match from a local SEC Form D source file",
+                    confidence=(
+                        "high: exact company name match from a local "
+                        f"{provider.name} source file"
+                    ),
                     licensing_notes=provider.licensing_notes,
                     source_kind=provider.source_kind,
                 )
             except ValidationError as exc:
                 detail = _first_validation_detail(exc)
                 raise ResearchCollectionError(
-                    f"SEC Form D result for {deal.company_name} is incomplete: {detail}"
+                    f"{provider.name} result for {deal.company_name} is incomplete: "
+                    f"{detail}"
                 ) from exc
             results.append(result)
         return results
+
+
+SecFormDSearchClient = PublicSourceSearchClient
+LocalSecFormDSearchClient = LocalPublicSourceSearchClient
+SecFormDPublicAdapter = PublicSourceFileAdapter
+
+
+@dataclass(frozen=True)
+class PublicSourceFile:
+    provider_id: str
+    path: Path
+    description: str
 
 
 def prepare_public_research_results(
@@ -158,6 +196,11 @@ def prepare_public_research_results(
     config: AppConfig,
     company_names: list[str] | None = None,
     sec_form_d_results_path: Path | None = None,
+    sam_gov_results_path: Path | None = None,
+    usaspending_results_path: Path | None = None,
+    sbir_results_path: Path | None = None,
+    uspto_results_path: Path | None = None,
+    github_results_path: Path | None = None,
     collected_at: datetime | None = None,
 ) -> ResearchCollectionRunSummary:
     try:
@@ -172,23 +215,45 @@ def prepare_public_research_results(
             "Pass at least one --company value. Hail Mary will only prepare public "
             "research results for companies you name explicitly."
         )
-    if sec_form_d_results_path is None:
+    source_files = _public_source_files(
+        sec_form_d_results_path=sec_form_d_results_path,
+        sam_gov_results_path=sam_gov_results_path,
+        usaspending_results_path=usaspending_results_path,
+        sbir_results_path=sbir_results_path,
+        uspto_results_path=uspto_results_path,
+        github_results_path=github_results_path,
+    )
+    if not source_files:
         raise ResearchCollectionError(
             "Add at least one local public-source file, such as --sec-form-d-results. "
             "Hail Mary will not fetch websites or software data feeds in this command."
         )
 
-    adapter = SecFormDPublicAdapter(
-        client=LocalSecFormDSearchClient(
-            tuple(_load_sec_form_d_search_results(sec_form_d_results_path).results)
+    adapters = [
+        PublicSourceFileAdapter(
+            provider_id=source_file.provider_id,
+            client=LocalPublicSourceSearchClient(
+                tuple(
+                    _load_public_source_search_results(
+                        source_file.path,
+                        provider_id=source_file.provider_id,
+                        description=source_file.description,
+                    ).results
+                )
+            ),
         )
-    )
-    provider_ids = [adapter.provider_id]
+        for source_file in source_files
+    ]
+    provider_ids = [adapter.provider_id for adapter in adapters]
     deals = [ResearchCollectionDeal(company_name=company_name) for company_name in companies]
     results: list[ResearchResultInput] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
-        deal_results = adapter.collect(deal, collected_at=collected_at)
+        deal_results = [
+            result
+            for adapter in adapters
+            for result in adapter.collect(deal, collected_at=collected_at)
+        ]
         results.extend(deal_results)
         deal_summaries.append(
             ResearchCollectionDealSummary(
@@ -235,39 +300,85 @@ def prepare_public_research_results(
     )
 
 
-def _load_sec_form_d_search_results(path: Path) -> SecFormDSearchResultsFile:
-    input_path = _resolve_input_file(path, description="SEC Form D results")
+def _public_source_files(
+    *,
+    sec_form_d_results_path: Path | None,
+    sam_gov_results_path: Path | None,
+    usaspending_results_path: Path | None,
+    sbir_results_path: Path | None,
+    uspto_results_path: Path | None,
+    github_results_path: Path | None,
+) -> list[PublicSourceFile]:
+    candidates = [
+        (sec_form_d_results_path, "sec_form_d", "SEC Form D results"),
+        (sam_gov_results_path, "sam_gov", "SAM.gov results"),
+        (usaspending_results_path, "usaspending", "USAspending results"),
+        (sbir_results_path, "sbir", "SBIR/STTR results"),
+        (uspto_results_path, "uspto", "USPTO results"),
+        (github_results_path, "github", "GitHub results"),
+    ]
+    return [
+        PublicSourceFile(provider_id=provider_id, path=path, description=description)
+        for path, provider_id, description in candidates
+        if path is not None
+    ]
+
+
+def _load_public_source_search_results(
+    path: Path,
+    *,
+    provider_id: str,
+    description: str,
+) -> PublicSourceSearchResultsFile:
+    provider = _provider_by_id(provider_id)
+    input_path = _resolve_input_file(path, description=description)
     try:
         raw_text = input_path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise ResearchCollectionError(
-            "The SEC Form D results file is not plain UTF-8 text. Save it as JSON text "
+            f"The {description} file is not plain UTF-8 text. Save it as JSON text "
             "and try again."
         ) from exc
     except OSError as exc:
         raise ResearchCollectionError(
-            f"Could not read the SEC Form D results file at {path}: {exc}"
+            f"Could not read the {description} file at {path}: {exc}"
         ) from exc
 
     try:
         payload = json.loads(raw_text)
     except json.JSONDecodeError as exc:
         raise ResearchCollectionError(
-            f"The SEC Form D results file is not valid JSON: {exc.msg}."
+            f"The {description} file is not valid JSON: {exc.msg}."
         ) from exc
     if isinstance(payload, list):
         payload = {"results": payload}
     elif not isinstance(payload, dict):
         raise ResearchCollectionError(
-            "The SEC Form D results file must be a JSON object with a `results` list."
+            f"The {description} file must be a JSON object with a `results` list."
         )
     try:
-        return SecFormDSearchResultsFile.model_validate(payload)
+        results_file = PublicSourceSearchResultsFile.model_validate(payload)
     except ValidationError as exc:
         detail = _first_validation_detail(exc)
         raise ResearchCollectionError(
-            f"The SEC Form D results file is incomplete: {detail}"
+            f"The {description} file is incomplete: {detail}"
         ) from exc
+    for index, result in enumerate(results_file.results, start=1):
+        try:
+            _validate_provider_source_url(provider_id, result.source_url)
+        except ValueError as exc:
+            raise ResearchCollectionError(
+                f"{provider.name} result {index} has an invalid source_url: {exc}"
+            ) from exc
+    return results_file
+
+
+def _load_sec_form_d_search_results(path: Path) -> SecFormDSearchResultsFile:
+    return _load_public_source_search_results(
+        path,
+        provider_id="sec_form_d",
+        description="SEC Form D results",
+    )
 
 
 def _clean_company_names(company_names: list[str]) -> list[str]:
@@ -349,13 +460,22 @@ def _validate_http_url(url: str, *, field_name: str) -> None:
 
 
 def _validate_sec_source_url(url: str) -> None:
+    _validate_provider_source_url("sec_form_d", url)
+
+
+def _validate_provider_source_url(provider_id: str, url: str) -> None:
+    _validate_http_url(url, field_name="source_url")
+    host_rule = PUBLIC_SOURCE_HOSTS.get(provider_id)
+    if host_rule is None:
+        return
+    allowed_suffix, description = host_rule
     parsed = urlparse(url)
-    host = parsed.hostname or ""
-    normalized_host = host.casefold()
-    if normalized_host == "sec.gov" or normalized_host.endswith(".sec.gov"):
+    host = (parsed.hostname or "").casefold()
+    allowed_host = allowed_suffix.casefold()
+    if host == allowed_host or host.endswith(f".{allowed_host}"):
         return
     raise ValueError(
-        "source_url must use an SEC website host such as www.sec.gov or data.sec.gov"
+        f"source_url must use {description}"
     )
 
 

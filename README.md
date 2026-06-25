@@ -57,7 +57,8 @@ hailmary prepare-research-plan --company "ExampleCo"
 hailmary prepare-research-results-template
 hailmary prepare-public-research-results \
   --company "ExampleCo" \
-  --sec-form-d-results sec-form-d-results.json
+  --sec-form-d-results sec-form-d-results.json \
+  --sam-gov-results sam-gov-results.json
 hailmary prepare-meridian-workflow \
   --company "ExampleCo" \
   --meridian-url "https://portal.angellist.com/m/example/invest"
@@ -75,7 +76,7 @@ hailmary import-research-results research-results.json
 
 `prepare-research-results-template` turns a private research plan into a fillable JSON file under `data/research-results-templates/`. It copies company names, provider IDs, source kinds, licensing notes, and ingested deal IDs when available, but leaves fact fields and citation URLs blank so the file cannot be mistaken for validated evidence.
 
-`prepare-public-research-results` is the first public-source adapter foundation. Today it normalizes a local SEC Form D JSON file into an import-ready results file under `data/research-results/`. It does not fetch SEC, browse websites, call software data feeds, or use paid data. A minimal SEC Form D input file looks like:
+`prepare-public-research-results` normalizes local public-source JSON files into an import-ready results file under `data/research-results/`. It supports local files for SEC Form D, SAM.gov, USAspending, SBIR/STTR, USPTO, and GitHub. It only imports exact company-name matches and checks that each result URL belongs to the expected source. It does not fetch websites, browse pages, call software data feeds, or use paid data. A minimal input file for any supported source looks like:
 
 ```json
 {
@@ -90,6 +91,8 @@ hailmary import-research-results research-results.json
   ]
 }
 ```
+
+Use the matching option for each local source file: `--sec-form-d-results`, `--sam-gov-results`, `--usaspending-results`, `--sbir-results`, `--uspto-results`, or `--github-results`.
 
 `prepare-meridian-workflow` writes a private manual workflow under `data/meridian-workflows/` and a fillable Meridian results template under `data/research-results-templates/`. It does not open Meridian, sign in, bypass access controls, or save portal content. Use normal authenticated access, collect only facts you are allowed to save locally, fill in the template with the time viewed and Meridian page URL, then run `import-research-results --dry-run`. Use the base Meridian deal URL without extra text after `?` or `#`.
 
