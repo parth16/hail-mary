@@ -350,9 +350,7 @@ def _load_public_source_search_results(
         raise ResearchCollectionError(
             f"The {description} file is not valid JSON: {exc.msg}."
         ) from exc
-    if isinstance(payload, list):
-        payload = {"results": payload}
-    elif not isinstance(payload, dict):
+    if not isinstance(payload, dict):
         raise ResearchCollectionError(
             f"The {description} file must be a JSON object with a `results` list."
         )

@@ -1065,7 +1065,7 @@ def test_prepare_public_research_results_command_reports_bad_source_url(
     )
 
     assert result.exit_code != 0
-    assert "source_url must use an SEC website host" in " ".join(result.output.split())
+    assert "source_url must use an SEC website host" in _plain_cli_output(result.output)
     assert "Traceback" not in result.output
 
 
@@ -1102,7 +1102,7 @@ def test_prepare_public_research_results_command_reports_bad_sam_source_url(
     )
 
     assert result.exit_code != 0
-    assert "source_url must use a SAM.gov website host" in " ".join(result.output.split())
+    assert "source_url must use a SAM.gov website host" in _plain_cli_output(result.output)
     assert "Traceback" not in result.output
 
 
@@ -1130,6 +1130,32 @@ def test_prepare_public_research_results_command_requires_results_list(
     assert result.exit_code != 0
     assert "results" in result.output
     assert "Field required" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_command_rejects_top_level_array(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sec_results_path = tmp_path / "array-results.json"
+    sec_results_path.write_text("[]", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--sec-form-d-results",
+            str(sec_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "must be a JSON object with a `results` list" in _plain_cli_output(result.output)
     assert "Traceback" not in result.output
 
 
@@ -2148,6 +2174,10 @@ def _research_result(**overrides: object) -> dict[str, object]:
 
 def _write_results(path: Path, results: list[dict[str, object]]) -> None:
     path.write_text(json.dumps({"results": results}), encoding="utf-8")
+
+
+def _plain_cli_output(output: str) -> str:
+    return " ".join(output.replace("│", " ").split())
 
 
 def _write_public_source_results(path: Path, results: list[dict[str, object]]) -> None:
