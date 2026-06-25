@@ -21,20 +21,24 @@ def test_builtin_eval_metadata_covers_required_phase_6_categories() -> None:
 
     assert categories == {
         EvalCategory.EXTRACTION,
+        EvalCategory.OCR,
         EvalCategory.CITATION,
         EvalCategory.CONTRADICTION,
         EvalCategory.RESEARCH_IMPORT,
+        EvalCategory.PUBLIC_COLLECTORS,
+        EvalCategory.MERIDIAN,
         EvalCategory.PROMPT_INJECTION,
         EvalCategory.SCORE_CALIBRATION,
         EvalCategory.MISSING_DATA,
         EvalCategory.MEMO_SNAPSHOT,
+        EvalCategory.PRIVACY,
     }
 
 
 def test_run_builtin_evals_passes_all_synthetic_cases(tmp_path: Path) -> None:
     summary = run_builtin_evals(work_dir=tmp_path)
 
-    assert summary.total_count == 18
+    assert summary.total_count == 26
     assert summary.passed
     assert summary.failed_results == []
 
@@ -48,6 +52,21 @@ def test_run_builtin_evals_filters_by_category(tmp_path: Path) -> None:
     assert {result.id for result in summary.results} == {
         "score-strong-invest",
         "score-borderline-pass",
+        "score-calibration-guards",
+    }
+    assert summary.passed
+
+
+def test_run_builtin_evals_filters_by_ocr_category(tmp_path: Path) -> None:
+    summary = run_builtin_evals(
+        categories=[EvalCategory.OCR],
+        work_dir=tmp_path,
+    )
+
+    assert {result.id for result in summary.results} == {
+        "ocr-image-unavailable",
+        "ocr-fake-success-source-linked",
+        "ocr-prompt-injection-untrusted",
     }
     assert summary.passed
 
@@ -65,6 +84,42 @@ def test_run_builtin_evals_filters_prompt_injection_document_cases(
         "prompt-injection-pdf-recommendation",
         "prompt-injection-docx-recommendation",
         "prompt-injection-boundaries",
+    }
+    assert summary.passed
+
+
+def test_run_builtin_evals_filters_public_collector_cases(tmp_path: Path) -> None:
+    summary = run_builtin_evals(
+        categories=[EvalCategory.PUBLIC_COLLECTORS],
+        work_dir=tmp_path,
+    )
+
+    assert {result.id for result in summary.results} == {
+        "public-collectors-source-guards",
+    }
+    assert summary.passed
+
+
+def test_run_builtin_evals_filters_meridian_cases(tmp_path: Path) -> None:
+    summary = run_builtin_evals(
+        categories=[EvalCategory.MERIDIAN],
+        work_dir=tmp_path,
+    )
+
+    assert {result.id for result in summary.results} == {
+        "meridian-workflow-guards",
+    }
+    assert summary.passed
+
+
+def test_run_builtin_evals_filters_privacy_cases(tmp_path: Path) -> None:
+    summary = run_builtin_evals(
+        categories=[EvalCategory.PRIVACY],
+        work_dir=tmp_path,
+    )
+
+    assert {result.id for result in summary.results} == {
+        "privacy-output-guards",
     }
     assert summary.passed
 

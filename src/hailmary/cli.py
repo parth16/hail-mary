@@ -625,8 +625,9 @@ def run_evals_command(
             "--category",
             help=(
                 "Run one eval category. Can be used more than once. Valid values: "
-                "extraction, citation, contradiction, research_import, prompt_injection, "
-                "score_calibration, missing_data, memo_snapshot."
+                "extraction, ocr, citation, contradiction, research_import, "
+                "public_collectors, meridian, prompt_injection, score_calibration, "
+                "missing_data, memo_snapshot, privacy."
             ),
         ),
     ] = None,
