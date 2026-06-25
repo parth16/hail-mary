@@ -12,6 +12,7 @@ import hailmary.evaluation as evaluation
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder, openai_review_messages
+from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
     AgentFinding,
@@ -125,11 +126,22 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
 
     assert result.exit_code == 0, result.output
     assert "1. local setup and privacy checks" in result.output
-    assert "7. final memo write" in result.output
+    assert "final memo write" in result.output
     assert "Deal evaluation complete" in result.output
-    assert "Recommendation" in result.output
+    assert "Company" in result.output
+    assert "Mode" in result.output
+    assert "Documents ingested" in result.output
+    assert "Evidence records" in result.output
+    assert "Claims found" in result.output
+    assert "Conflicts found" in result.output
+    assert "Rule-based recommendation" in result.output
+    assert "Final recommendation" in result.output
     assert "Check size" in result.output
     assert "Final memo" in result.output
+    assert "Failed model roles" in result.output
+    assert "OCR means reading text from images" in result.output
+    assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
+    assert "Valuation cap $8M" not in result.output
 
     memo_paths = list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
     assert len(memo_paths) == 1
@@ -177,16 +189,6 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
             AppConfig(data_dir=Path("data"), local_only=False, mock_llm=False),
             "OPENAI_API_KEY is missing",
         ),
-        (
-            {},
-            AppConfig(data_dir=Path("data"), local_only=True, mock_llm=False),
-            "HAILMARY_LOCAL_ONLY must be false",
-        ),
-        (
-            {},
-            AppConfig(data_dir=Path("data"), local_only=False, mock_llm=True),
-            "HAILMARY_MOCK_LLM must be false",
-        ),
     ],
 )
 def test_evaluate_deal_preflight_settings_fail_before_model_calls(
@@ -206,6 +208,11 @@ def test_evaluate_deal_preflight_settings_fail_before_model_calls(
     company_dir = _write_company_folder(tmp_path)
     client = RecordingReviewClient()
 
+    def fail_ingestion(*_: object, **__: object) -> None:
+        raise AssertionError("ingestion should not run before model settings pass")
+
+    monkeypatch.setattr(evaluation, "ingest_folder", fail_ingestion)
+
     with pytest.raises(EvaluationError, match=expected_message):
         evaluate_deal_folder(
             company_dir,
@@ -215,6 +222,32 @@ def test_evaluate_deal_preflight_settings_fail_before_model_calls(
         )
 
     assert client.calls == []
+
+
+def test_evaluate_deal_local_only_succeeds_without_model_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    for name in ("HAILMARY_LLM_PROVIDER", "HAILMARY_MODEL", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient()
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert result.evaluation_mode == "local-only"
+    assert client.calls == []
+    assert result.final_recommendation.recommendation == result.deterministic_score.recommendation
+    assert "Local-only mode was used" in result.mode_explanation
+    assert any("Local-only mode was used" in warning for warning in result.warnings)
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Rule-based scoring means fixed checks over source-linked evidence" in memo_text
 
 
 def test_evaluate_deal_specialist_validation_failure_retries_then_records_limitation(
@@ -240,9 +273,10 @@ def test_evaluate_deal_specialist_validation_failure_retries_then_records_limita
     team_calls = [call for call in client.calls if call[0].agent_role == AgentRole.TEAM]
     assert len(team_calls) == 2
     assert team_calls[1][1]
-    assert any("Team failed validation" in warning for warning in result.warnings)
+    assert result.failed_specialist_roles == [AgentRole.TEAM]
+    assert any("Team model review failed validation" in warning for warning in result.warnings)
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
-    assert "Team failed validation after one repair attempt" in memo_text
+    assert "Team model review failed validation after one repair attempt" in memo_text
     assert len(list(result.agent_output_dir.glob("team-attempt-*-invalid.json"))) == 2
 
 
@@ -342,7 +376,7 @@ def test_evaluate_deal_final_decision_validation_failure_does_not_write_final_me
         }
     )
 
-    with pytest.raises(EvaluationError, match="final-decision review did not pass"):
+    with pytest.raises(EvaluationError, match="final model review did not pass"):
         evaluate_deal_folder(
             company_dir,
             config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
@@ -351,6 +385,7 @@ def test_evaluate_deal_final_decision_validation_failure_does_not_write_final_me
         )
 
     assert list((tmp_path / "data" / "reports").glob("*-final-evaluation.md")) == []
+    assert len(client.calls) >= 2
 
 
 def test_evaluate_deal_deterministic_pass_overrides_model_invest(
@@ -383,7 +418,7 @@ def test_evaluate_deal_deterministic_pass_overrides_model_invest(
     assert any("forced final PASS" in warning for warning in result.warnings)
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "**Recommendation:** PASS" in memo_text
-    assert "Deterministic scoring forced PASS" in memo_text
+    assert "Rule-based scoring forced PASS" in memo_text
     assert "Valuation cap" not in result.final_recommendation.reason
 
 
@@ -414,7 +449,7 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
     assert result.deterministic_score.check_size == 5_000
     assert result.final_recommendation.recommendation == Recommendation.INVEST
     assert result.final_recommendation.check_size == 5_000
-    assert any("deterministic allocation" in warning for warning in result.warnings)
+    assert any("rule-based allocation" in warning for warning in result.warnings)
 
 
 def test_evaluate_deal_final_memo_includes_conflict_evidence_for_forced_pass(
@@ -645,7 +680,7 @@ def test_evaluate_deal_rejects_collection_folder_with_multiple_deals(
     _write_company_folder(root, company_name="TwoCo")
     client = RecordingReviewClient()
 
-    with pytest.raises(EvaluationError, match="produced 2 deals"):
+    with pytest.raises(EvaluationError, match="appears to contain 2 deals"):
         evaluate_deal_folder(
             root,
             config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
@@ -654,6 +689,65 @@ def test_evaluate_deal_rejects_collection_folder_with_multiple_deals(
         )
 
     assert client.calls == []
+
+
+def test_evaluate_deal_rejects_folder_with_no_readable_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = tmp_path / "UnreadableCo"
+    company_dir.mkdir()
+    (company_dir / "photo.bmp").write_bytes(b"unsupported")
+    client = RecordingReviewClient()
+
+    with pytest.raises(EvaluationError, match="No readable diligence documents"):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+            model_client=client,
+            max_concurrency=1,
+        )
+
+    assert client.calls == []
+
+
+def test_evaluate_deal_wraps_malformed_evidence_store_in_plain_english(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path)
+
+    def corrupt_store(folder: Path, *, config: AppConfig) -> object:
+        summary = real_ingest_folder(folder, config=config)
+        assert summary.deals[0].evidence_store_path is not None
+        summary.deals[0].evidence_store_path.write_text("{bad json", encoding="utf-8")
+        return summary
+
+    monkeypatch.setattr(evaluation, "ingest_folder", corrupt_store)
+
+    with pytest.raises(EvaluationError, match="saved evidence store.*malformed"):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+            max_concurrency=1,
+        )
+
+
+def test_evaluate_deal_rejects_invalid_generated_data_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path)
+
+    with pytest.raises(EvaluationError, match="Local generated-data setup failed"):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(data_dir=tmp_path, local_only=True),
+            max_concurrency=1,
+        )
 
 
 def test_evaluate_deal_missing_provider_cli_error_has_no_traceback(
@@ -676,8 +770,55 @@ def test_evaluate_deal_missing_provider_cli_error_has_no_traceback(
     )
 
     assert result.exit_code != 0
-    assert "HAILMARY_LLM_PROVIDER is missing" in result.output
+    assert "HAILMARY_LLM_PROVIDER" in result.output
+    assert "missing" in result.output
     assert "Traceback" not in result.output
+
+
+def test_evaluate_deal_cli_reports_specialist_failure_without_evidence_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="SpecialistFailCo",
+        include_long_tail=True,
+    )
+
+    class SpecialistFailureClient(RecordingReviewClient):
+        def __init__(self, *, model: str, api_key: str) -> None:
+            del model, api_key
+            super().__init__(
+                outputs_by_role={
+                    AgentRole.TEAM: [
+                        _unknown_evidence_output_json,
+                        _unknown_evidence_output_json,
+                    ]
+                }
+            )
+
+    monkeypatch.setattr(evaluation, "OpenAIAgentReviewClient", SpecialistFailureClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-deal",
+            str(company_dir),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--max-concurrency",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Failed model roles" in result.output
+    assert "Team" in result.output
+    assert "Team model review failed validation" in result.output
+    assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
+    assert "Valuation cap $8M" not in result.output
 
 
 def _set_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:
