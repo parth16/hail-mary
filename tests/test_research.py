@@ -682,6 +682,35 @@ def test_prepare_research_results_template_command_writes_template(
     assert templates[0].name in result.output.replace("\n", "")
 
 
+def test_prepare_research_results_template_command_quotes_printed_import_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "Hail Mary Data"
+    config = AppConfig(data_dir=data_dir)
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-research-results-template",
+            str(plan_result.output_path),
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = result.output.replace("\n", "")
+    assert f"--data-dir {shlex.quote(str(data_dir))} --dry-run" in output
+    assert "Hail Mary Data --dry-run" not in output
+
+
 def test_prepare_research_results_template_command_has_plain_english_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -766,6 +795,127 @@ def test_prepare_public_research_results_writes_private_importable_file(
     assert dry_run.updated_store_paths == []
 
 
+def test_prepare_public_research_results_combines_free_public_source_files(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    sam_results_path = tmp_path / "sam-gov-results.json"
+    usaspending_results_path = tmp_path / "usaspending-results.json"
+    sbir_results_path = tmp_path / "sbir-results.json"
+    uspto_results_path = tmp_path / "uspto-results.json"
+    github_results_path = tmp_path / "github-results.json"
+    retrieved_at = "2025-12-31T12:00:00Z"
+
+    _write_public_source_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+    _write_public_source_results(
+        sam_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI SAM.gov result",
+                "text": "Acme AI has a public SAM.gov result.",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://sam.gov/search/?index=opp&keywords=Acme+AI",
+            },
+            {
+                "company_name": "Acme AI Holdings",
+                "title": "Acme AI Holdings SAM.gov result",
+                "text": "Related legal entity result that is not an exact match.",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://sam.gov/search/?index=opp&keywords=Acme+AI+Holdings",
+            },
+        ],
+    )
+    _write_public_source_results(
+        usaspending_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI USAspending result",
+                "text": "Acme AI has a public USAspending result.",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://www.usaspending.gov/search/?keywords=Acme+AI",
+            }
+        ],
+    )
+    _write_public_source_results(
+        sbir_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI SBIR result",
+                "text": "Acme AI has a public SBIR/STTR result.",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://www.sbir.gov/award/acme-ai",
+            }
+        ],
+    )
+    _write_public_source_results(
+        uspto_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI USPTO result",
+                "text": "Acme AI has a public USPTO result.",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://tmsearch.uspto.gov/search/search-results?query=Acme+AI",
+            }
+        ],
+    )
+    _write_public_source_results(
+        github_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI GitHub result",
+                "text": "Acme AI has a public GitHub repository result.",
+                "retrieved_at": retrieved_at,
+                "source_url": "https://github.com/acme-ai/example",
+            }
+        ],
+    )
+
+    result = prepare_public_research_results(
+        config=config,
+        company_names=["Acme AI"],
+        sec_form_d_results_path=sec_results_path,
+        sam_gov_results_path=sam_results_path,
+        usaspending_results_path=usaspending_results_path,
+        sbir_results_path=sbir_results_path,
+        uspto_results_path=uspto_results_path,
+        github_results_path=github_results_path,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    assert result.result_count == 6
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    provider_ids = {item["provider_id"] for item in saved["results"]}
+    assert provider_ids == {
+        "sec_form_d",
+        "sam_gov",
+        "usaspending",
+        "sbir",
+        "uspto",
+        "github",
+    }
+    titles = {item["title"] for item in saved["results"]}
+    assert "Acme AI Holdings SAM.gov result" not in titles
+    assert all(item["company_name"] == "Acme AI" for item in saved["results"])
+
+
 def test_prepare_public_research_results_returns_no_file_when_no_results(
     tmp_path: Path,
 ) -> None:
@@ -802,6 +952,8 @@ def test_prepare_public_research_results_command_writes_results(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     sec_results_path = tmp_path / "sec-form-d-results.json"
+    sam_results_path = tmp_path / "sam-gov-results.json"
+    data_dir = tmp_path / "Hail Mary Data"
     _write_sec_form_d_results(
         sec_results_path,
         [
@@ -811,6 +963,18 @@ def test_prepare_public_research_results_command_writes_results(
                 "text": "Acme AI filed a Form D.",
                 "retrieved_at": "2025-12-31T12:00:00Z",
                 "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+    _write_public_source_results(
+        sam_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI SAM.gov result",
+                "text": "Acme AI has a public SAM.gov result.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://sam.gov/search/?index=opp&keywords=Acme+AI",
             }
         ],
     )
@@ -825,20 +989,25 @@ def test_prepare_public_research_results_command_writes_results(
             "MissingCo",
             "--sec-form-d-results",
             str(sec_results_path),
+            "--sam-gov-results",
+            str(sam_results_path),
             "--data-dir",
-            str(tmp_path / "data"),
+            str(data_dir),
         ],
     )
 
     assert result.exit_code == 0, result.output
     assert "Public research results prepared" in result.output
-    assert "Prepared 1 public research result for 2 companies" in result.output
+    assert "Prepared 2 public research results for 2 companies" in result.output
     assert "No public research results were prepared for: MissingCo" in result.output
     assert "No websites or software data feeds were contacted" in result.output
     assert "import-research-results" in result.output
-    results = list((tmp_path / "data" / "research-results").glob("*.json"))
+    output = result.output.replace("\n", "")
+    assert f"--data-dir {shlex.quote(str(data_dir))} --dry-run" in output
+    assert "Hail Mary Data --dry-run" not in output
+    results = list((data_dir / "research-results").glob("*.json"))
     assert len(results) == 1
-    assert results[0].name in result.output.replace("\n", "")
+    assert results[0].name in output
 
 
 def test_prepare_public_research_results_command_requires_local_source_file(
@@ -896,7 +1065,44 @@ def test_prepare_public_research_results_command_reports_bad_source_url(
     )
 
     assert result.exit_code != 0
-    assert "source_url must use an SEC website host" in result.output
+    assert "source_url must use an SEC website host" in _plain_cli_output(result.output)
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_command_reports_bad_sam_source_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sam_results_path = tmp_path / "bad-sam-gov-results.json"
+    _write_public_source_results(
+        sam_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI SAM.gov result",
+                "text": "Acme AI has a public SAM.gov result.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://example.com/sam-result",
+            }
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--sam-gov-results",
+            str(sam_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "source_url must use a SAM.gov website host" in _plain_cli_output(result.output)
     assert "Traceback" not in result.output
 
 
@@ -924,6 +1130,32 @@ def test_prepare_public_research_results_command_requires_results_list(
     assert result.exit_code != 0
     assert "results" in result.output
     assert "Field required" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_command_rejects_top_level_array(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sec_results_path = tmp_path / "array-results.json"
+    sec_results_path.write_text("[]", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--sec-form-d-results",
+            str(sec_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "must be a JSON object with a `results` list" in _plain_cli_output(result.output)
     assert "Traceback" not in result.output
 
 
@@ -1944,5 +2176,13 @@ def _write_results(path: Path, results: list[dict[str, object]]) -> None:
     path.write_text(json.dumps({"results": results}), encoding="utf-8")
 
 
-def _write_sec_form_d_results(path: Path, results: list[dict[str, object]]) -> None:
+def _plain_cli_output(output: str) -> str:
+    return " ".join(output.replace("│", " ").split())
+
+
+def _write_public_source_results(path: Path, results: list[dict[str, object]]) -> None:
     path.write_text(json.dumps({"results": results}), encoding="utf-8")
+
+
+def _write_sec_form_d_results(path: Path, results: list[dict[str, object]]) -> None:
+    _write_public_source_results(path, results)

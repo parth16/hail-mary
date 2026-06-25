@@ -664,9 +664,11 @@ def prepare_research_results_template_command(
         raise typer.Exit(1) from None
 
     result_word = "result" if result.result_count == 1 else "results"
-    data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
+    data_dir_option = (
+        f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
+    )
     next_command = (
-        f"`hailmary import-research-results {result.output_path}"
+        f"`hailmary import-research-results {shlex.quote(str(result.output_path))}"
         f"{data_dir_option} --dry-run`."
     )
     _print_section(
@@ -706,6 +708,56 @@ def prepare_public_research_results_command(
             ),
         ),
     ] = None,
+    sam_gov_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sam-gov-results",
+            help=(
+                "Local JSON file of SAM.gov results. Hail Mary reads this file "
+                "and does not contact SAM.gov."
+            ),
+        ),
+    ] = None,
+    usaspending_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--usaspending-results",
+            help=(
+                "Local JSON file of USAspending results. Hail Mary reads this file "
+                "and does not contact USAspending."
+            ),
+        ),
+    ] = None,
+    sbir_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sbir-results",
+            help=(
+                "Local JSON file of SBIR/STTR award results. Hail Mary reads this "
+                "file and does not contact SBIR.gov."
+            ),
+        ),
+    ] = None,
+    uspto_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--uspto-results",
+            help=(
+                "Local JSON file of USPTO results. Hail Mary reads this file "
+                "and does not contact USPTO."
+            ),
+        ),
+    ] = None,
+    github_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--github-results",
+            help=(
+                "Local JSON file of GitHub results. Hail Mary reads this file "
+                "and does not contact GitHub."
+            ),
+        ),
+    ] = None,
     data_dir: Annotated[
         Path | None,
         typer.Option(
@@ -722,6 +774,11 @@ def prepare_public_research_results_command(
             config=config,
             company_names=company or [],
             sec_form_d_results_path=sec_form_d_results,
+            sam_gov_results_path=sam_gov_results,
+            usaspending_results_path=usaspending_results,
+            sbir_results_path=sbir_results,
+            uspto_results_path=uspto_results,
+            github_results_path=github_results,
         )
     except ResearchCollectionError as exc:
         _print_error(str(exc))
@@ -763,9 +820,11 @@ def prepare_public_research_results_command(
             _plain("No websites or software data feeds were contacted."),
         ]
     )
-    data_dir_option = f" --data-dir {config.data_dir}" if data_dir is not None else ""
+    data_dir_option = (
+        f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
+    )
     next_command = (
-        f"`hailmary import-research-results {result.output_path}"
+        f"`hailmary import-research-results {shlex.quote(str(result.output_path))}"
         f"{data_dir_option} --dry-run`."
     )
     result_lines.append(
