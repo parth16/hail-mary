@@ -62,6 +62,9 @@ OCR_LOW_TEXT_NOTE = (
     "Image-based text reading (OCR) found only a small amount of text. "
     "Review the source image because most content may still be unreadable."
 )
+OCR_PRESERVED_TEXT_NOTE = (
+    "Existing PDF text was preserved while image-based text reading (OCR) was used."
+)
 
 
 class ExtractionResult(BaseModel):
@@ -531,6 +534,22 @@ def _apply_ocr_result_to_page(
         clean_text = ""
         word_count = 0
         notes = _append_note(notes, OCR_LOW_TEXT_NOTE)
+    merged_raw_text = _merge_existing_page_text_with_ocr(
+        existing_text=page.raw_text,
+        ocr_text=updated_page.raw_text,
+    )
+    if merged_raw_text != updated_page.raw_text:
+        updated_page = _make_page(
+            merged_raw_text,
+            page_number=page.page_number,
+            needs_ocr=updated_page.needs_ocr,
+            vision_recommended=updated_page.vision_recommended,
+            source_span_start=page.source_span_start,
+            notes=_append_note(notes, OCR_PRESERVED_TEXT_NOTE),
+        )
+        clean_text = updated_page.clean_text
+        word_count = updated_page.word_count
+        notes = updated_page.notes
     page.ocr_applied = True
     page.raw_text = updated_page.raw_text
     page.clean_text = clean_text
@@ -560,6 +579,27 @@ def _ocr_page_notes(ocr_result: LocalOcrResult, *, applied: bool = True) -> str:
     if ocr_result.notes:
         notes = _append_note(notes, ocr_result.notes)
     return notes
+
+
+def _merge_existing_page_text_with_ocr(*, existing_text: str, ocr_text: str) -> str:
+    existing = existing_text.strip()
+    ocr = ocr_text.strip()
+    if not existing:
+        return ocr
+    if not ocr:
+        return existing
+
+    normalized_existing = _normalize_text_for_merge(existing)
+    normalized_ocr = _normalize_text_for_merge(ocr)
+    if normalized_existing and normalized_existing in normalized_ocr:
+        return ocr
+    if normalized_ocr and normalized_ocr in normalized_existing:
+        return existing
+    return f"{existing}\n\n{ocr}"
+
+
+def _normalize_text_for_merge(text: str) -> str:
+    return re.sub(r"\s+", " ", text.casefold()).strip()
 
 
 def _refresh_page_source_spans(pages: list[ExtractedPage]) -> None:
