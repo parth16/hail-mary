@@ -100,8 +100,9 @@ def review_evidence(
     if evidence_id is not None and not evidence_id.strip():
         raise EvidenceReviewError("The --evidence-id value cannot be blank.")
     evidence_id = evidence_id.strip() if evidence_id is not None else None
-    data_dir = _absolute_path(config.data_dir).resolve(strict=False)
-    _ensure_local_data(data_dir)
+    configured_data_dir = _absolute_path(config.data_dir)
+    _ensure_local_data(configured_data_dir)
+    data_dir = configured_data_dir.resolve(strict=False)
     summary_path = data_dir / "processed" / "ingestion_summary.json"
     if not summary_path.exists():
         raise EvidenceReviewError(
@@ -179,6 +180,12 @@ def _ensure_local_data(data_dir: Path) -> None:
             f"The local data directory at {data_dir} is a symlink. Choose the real "
             "Hail Mary data folder."
         )
+    for parent in data_dir.parents:
+        if parent.is_symlink():
+            raise EvidenceReviewError(
+                f"Hail Mary cannot review evidence at {data_dir} because {parent} is "
+                "a symlinked parent folder."
+            )
     if not data_dir.exists():
         raise EvidenceReviewError(
             "No local data initialized. Run `hailmary init` and `hailmary ingest-folder` "
@@ -451,6 +458,11 @@ def _issue_summaries(store: EvidenceStore) -> list[ReviewIssueSummary]:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
     issues = [
         _issue(
+            "No usable evidence",
+            1 if not store.evidence else 0,
+            "Re-run ingestion after adding readable source documents or enabling needed OCR.",
+        ),
+        _issue(
             "OCR-applied evidence",
             sum(1 for evidence in store.evidence if evidence.ocr_applied),
             "Review image-read text against the source document before relying on it.",
@@ -549,7 +561,9 @@ def _citation_is_valid(
 
 
 def _missing_source_span(evidence: EvidenceRecord) -> bool:
-    return evidence.source_span_start is None or evidence.source_span_end is None
+    start = evidence.source_span_start
+    end = evidence.source_span_end
+    return start is None or end is None or start < 0 or end <= start
 
 
 def _absolute_path(path: Path) -> Path:

@@ -570,6 +570,64 @@ def test_review_evidence_malformed_evidence_store_has_plain_english_error(
     assert "Traceback" not in result.output
 
 
+def test_review_evidence_rejects_symlinked_data_dir(tmp_path: Path) -> None:
+    real_data_dir = _write_review_ingestion_summary(
+        tmp_path,
+        [_review_store(deal_id="deal_link", company_name="LinkCo")],
+    )
+    symlink_data_dir = tmp_path / "linked-data"
+    symlink_data_dir.symlink_to(real_data_dir, target_is_directory=True)
+
+    result = runner.invoke(
+        app,
+        ["review-evidence", "--data-dir", str(symlink_data_dir)],
+    )
+
+    assert result.exit_code != 0
+    assert "data directory" in result.output
+    assert "symlink" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_review_evidence_flags_empty_evidence_store(tmp_path: Path) -> None:
+    store = _review_store(
+        deal_id="deal_empty",
+        company_name="EmptyReviewCo",
+        evidence=[],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "No usable evidence" in normalized_output
+    assert "Re-run ingestion" in normalized_output
+    assert "No review issues found" not in normalized_output
+
+
+def test_review_evidence_flags_invalid_source_spans(tmp_path: Path) -> None:
+    evidence = _review_evidence_record(
+        "ev_invalid_span",
+        "Valuation cap $8M.",
+        deal_id="deal_invalid_span",
+    ).model_copy(update={"source_span_start": 5, "source_span_end": 5})
+    store = _review_store(
+        deal_id="deal_invalid_span",
+        company_name="InvalidSpanCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Missing source spans" in normalized_output
+    assert "missing source span" in normalized_output
+
+
 def test_review_evidence_quote_limit_shows_only_bounded_excerpt(tmp_path: Path) -> None:
     evidence = _review_evidence_record(
         "ev_excerpt",
@@ -798,13 +856,17 @@ def _review_store(
     claims: list[ClaimRecord] | None = None,
     conflicts: list[ClaimConflict] | None = None,
 ) -> EvidenceStore:
-    evidence_records = evidence or [
-        _review_evidence_record(
-            "ev_default",
-            "Valuation cap $8M.",
-            deal_id=deal_id,
-        )
-    ]
+    evidence_records = (
+        evidence
+        if evidence is not None
+        else [
+            _review_evidence_record(
+                "ev_default",
+                "Valuation cap $8M.",
+                deal_id=deal_id,
+            )
+        ]
+    )
     return EvidenceStore(
         deal_id=deal_id,
         company_name=company_name,

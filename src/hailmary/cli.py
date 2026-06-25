@@ -710,9 +710,14 @@ def _evidence_flags(evidence: object) -> str:
             flags.append("OCR")
         else:
             flags.append(f"OCR {_format_review_percent(ocr_confidence)}")
-    if getattr(evidence, "source_span_start", None) is None or getattr(
-        evidence, "source_span_end", None
-    ) is None:
+    source_span_start = getattr(evidence, "source_span_start", None)
+    source_span_end = getattr(evidence, "source_span_end", None)
+    if (
+        source_span_start is None
+        or source_span_end is None
+        or source_span_start < 0
+        or source_span_end <= source_span_start
+    ):
         flags.append("missing source span")
     return ", ".join(flags) if flags else "none"
 
