@@ -27,6 +27,11 @@ from hailmary.research import (
     ResearchProviderCategory,
     ResearchTaskStatus,
     ResearchTemplateError,
+    SbirApiError,
+    SbirAwardRecord,
+    SbirAwardsResponse,
+    SbirCollectionRunSummary,
+    UrlLibSbirAwardsClient,
     UrlLibUsaspendingAwardsClient,
     UsaspendingApiError,
     UsaspendingAwardRecord,
@@ -34,6 +39,7 @@ from hailmary.research import (
     UsaspendingCollectionRunSummary,
     WebResearchError,
     builtin_research_providers,
+    collect_sbir_awards,
     collect_usaspending_awards,
     collect_web_research,
     import_research_results,
@@ -1381,6 +1387,730 @@ def test_collect_usaspending_awards_command_reports_incomplete_search_warning(
     assert "No results file was saved" in output
 
 
+def test_collect_sbir_awards_requires_enabled_web_research(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ResearchCollectionError, match="Local-only mode is on"):
+        collect_sbir_awards(
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                local_only=True,
+                enable_web_research=True,
+            ),
+            company_names=["Acme AI"],
+        )
+
+
+def test_collect_sbir_awards_writes_private_exact_matches(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSbirAwardsClient(
+        {
+            ("Acme AI", 0): _sbir_response(
+                [
+                    _sbir_award(
+                        firm="Acme AI",
+                        award_title="Autonomous sensor research",
+                        award_amount=250000.0,
+                        abstract="Research and development support.",
+                    ),
+                    _sbir_award(
+                        firm="Acme AI Holdings",
+                        award_title="Related but not exact",
+                    ),
+                ],
+            ),
+            ("Beta Robotics", 0): _sbir_response([]),
+        }
+    )
+
+    result = collect_sbir_awards(
+        config=config,
+        company_names=["Acme AI", "Beta Robotics"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == [("Acme AI", 5, 0), ("Beta Robotics", 5, 0)]
+    assert result.output_path is not None
+    assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
+    assert result.result_count == 1
+    assert [(deal.company_name, deal.result_count) for deal in result.deals] == [
+        ("Acme AI", 1),
+        ("Beta Robotics", 0),
+    ]
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert len(saved["results"]) == 1
+    prepared = saved["results"][0]
+    assert prepared["company_name"] == "Acme AI"
+    assert prepared["provider_id"] == "sbir"
+    assert prepared["provider_name"] == "SBIR/STTR award search"
+    assert prepared["title"] == "SBIR/STTR award Autonomous sensor research for Acme AI"
+    assert prepared["retrieved_at"] == "2026-01-01T00:00:00Z"
+    assert prepared["source_url"] == "https://www.sbir.gov/awards/123"
+    assert prepared["source_api"] == (
+        "https://api.www.sbir.gov/public/api/awards?firm=Acme+AI&rows=5&start=0"
+    )
+    assert "Award amount: $250,000.00." in prepared["text"]
+    assert "Research and development support" in prepared["text"]
+    assert "Acme AI Holdings" not in prepared["text"]
+    assert "founder@example.com" not in prepared["text"]
+    assert "555-0100" not in prepared["text"]
+    assert prepared["confidence"].startswith("medium:")
+    assert "SBIR/STTR API" in prepared["licensing_notes"]
+
+
+def test_collect_sbir_awards_paginates_until_exact_match(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSbirAwardsClient(
+        {
+            ("Acme AI", 0): _sbir_response(
+                [
+                    _sbir_award(
+                        firm="Acme AI Federal",
+                        award_title="Fuzzy first page",
+                    ),
+                ],
+            ),
+            ("Acme AI", 1): _sbir_response(
+                [
+                    _sbir_award(
+                        firm="Acme AI",
+                        award_title="Exact second page",
+                        award_link="https://www.sbir.gov/awards/222",
+                    ),
+                ],
+            ),
+        }
+    )
+
+    result = collect_sbir_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=1,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == [("Acme AI", 1, 0), ("Acme AI", 1, 1)]
+    assert result.result_count == 1
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["title"] == "SBIR/STTR award Exact second page for Acme AI"
+
+
+def test_collect_sbir_awards_does_not_report_no_match_after_page_cap(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSbirAwardsClient(
+        {
+            ("Acme AI", start): _sbir_response(
+                [
+                    _sbir_award(
+                        firm="Acme AI Federal",
+                        award_title=f"Fuzzy page {start}",
+                        award_link=f"https://www.sbir.gov/awards/fuzzy-{start}",
+                    )
+                ],
+            )
+            for start in range(20)
+        }
+    )
+
+    result = collect_sbir_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=1,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is None
+    assert result.result_count == 0
+    assert result.warnings
+    assert "did not find exact firm-name matches" in result.warnings[0]
+
+
+def test_collect_sbir_awards_skips_unrelated_malformed_rows(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSbirAwardsClient(
+        {
+            ("Acme AI", 0): _sbir_raw_response(
+                [
+                    {"award_title": "Broken no firm"},
+                    {"firm": None, "award_title": "Broken null firm"},
+                    {"firm": "Acme AI Federal"},
+                    _sbir_award(
+                        firm="Acme AI",
+                        award_title="Exact award",
+                        award_link="https://www.sbir.gov/awards/321",
+                    ).model_dump(),
+                ]
+            ),
+        }
+    )
+
+    result = collect_sbir_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.result_count == 1
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["title"] == "SBIR/STTR award Exact award for Acme AI"
+
+
+def test_collect_sbir_awards_fails_on_malformed_exact_row(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSbirAwardsClient(
+        {
+            ("Acme AI", 0): _sbir_raw_response(
+                [{"firm": "Acme AI"}],
+            ),
+        }
+    )
+
+    with pytest.raises(
+        ResearchCollectionError,
+        match="award_title must not be blank",
+    ):
+        collect_sbir_awards(
+            config=config,
+            company_names=["Acme AI"],
+            limit=5,
+            client=client,
+            collected_at=BUILT_AT,
+        )
+
+
+def test_collect_sbir_awards_keeps_matches_when_page_cap_is_hit(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    responses = {
+        ("Acme AI", 0): _sbir_response(
+            [
+                _sbir_award(
+                    firm="Acme AI",
+                    award_title="Exact first page",
+                    award_link="https://www.sbir.gov/awards/123",
+                ),
+                _sbir_award(
+                    firm="Acme AI Federal",
+                    award_title="Fuzzy first page",
+                    award_link="https://www.sbir.gov/awards/fuzzy-first",
+                ),
+            ],
+        )
+    }
+    responses.update(
+        {
+            ("Acme AI", start): _sbir_response(
+                [
+                    _sbir_award(
+                        firm="Acme AI Federal",
+                        award_title=f"Fuzzy page {start}",
+                        award_link=f"https://www.sbir.gov/awards/fuzzy-{start}",
+                    ),
+                    _sbir_award(
+                        firm="Acme AI Federal Two",
+                        award_title=f"Fuzzy second row {start}",
+                        award_link=f"https://www.sbir.gov/awards/fuzzy-two-{start}",
+                    ),
+                ],
+            )
+            for start in range(2, 40, 2)
+        }
+    )
+    client = _FakeSbirAwardsClient(responses)
+
+    result = collect_sbir_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=2,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.result_count == 1
+    assert result.output_path is not None
+    assert result.warnings
+    assert "more SBIR/STTR results may exist" in result.warnings[0]
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["title"] == "SBIR/STTR award Exact first page for Acme AI"
+
+
+def test_collect_sbir_awards_preserves_prior_company_results_at_page_cap(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    responses = {
+        ("Acme AI", 0): _sbir_response(
+            [
+                _sbir_award(
+                    firm="Acme AI",
+                    award_title="Exact award",
+                    award_link="https://www.sbir.gov/awards/123",
+                )
+            ]
+        )
+    }
+    responses.update(
+        {
+            ("Beta Robotics", start): _sbir_response(
+                [
+                    _sbir_award(
+                        firm="Beta Robotics Federal",
+                        award_title=f"Fuzzy beta page {start}",
+                        award_link=f"https://www.sbir.gov/awards/beta-{start}",
+                    ),
+                    _sbir_award(
+                        firm="Beta Robotics Federal Two",
+                        award_title=f"Fuzzy beta second row {start}",
+                        award_link=f"https://www.sbir.gov/awards/beta-two-{start}",
+                    ),
+                ],
+            )
+            for start in range(0, 40, 2)
+        }
+    )
+    client = _FakeSbirAwardsClient(responses)
+
+    result = collect_sbir_awards(
+        config=config,
+        company_names=["Acme AI", "Beta Robotics"],
+        limit=2,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.result_count == 1
+    assert [(deal.company_name, deal.result_count) for deal in result.deals] == [
+        ("Acme AI", 1),
+        ("Beta Robotics", 0),
+    ]
+    assert result.warnings
+    assert "Beta Robotics" in result.warnings[0]
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert len(saved["results"]) == 1
+    assert saved["results"][0]["company_name"] == "Acme AI"
+
+
+def test_collect_sbir_awards_dry_run_does_not_call_api(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSbirAwardsClient({})
+
+    result = collect_sbir_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=3,
+        dry_run=True,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.output_path is None
+    assert result.dry_run is True
+    assert result.deal_count == 1
+    assert result.result_count == 0
+
+
+def test_collect_sbir_awards_surfaces_api_failures(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeSbirAwardsClient(
+        {},
+        error=SbirApiError("Could not reach SBIR/STTR: timed out"),
+    )
+
+    with pytest.raises(ResearchCollectionError, match="Could not reach SBIR/STTR"):
+        collect_sbir_awards(
+            config=config,
+            company_names=["Acme AI"],
+            client=client,
+            collected_at=BUILT_AT,
+        )
+
+
+def test_sbir_response_requires_result_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_sbir_resolved_public_endpoint",
+        lambda _url: None,
+    )
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module._sbir_awards_api_url("Acme AI", rows=1, start=0)
+
+        def read(self, _size: int) -> bytes:
+            return b'["not an object"]'
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(SbirApiError, match="not a JSON object"):
+        UrlLibSbirAwardsClient().search_awards(
+            "Acme AI",
+            rows=1,
+            start=0,
+            timeout_seconds=1.0,
+        )
+
+
+def test_sbir_response_rejects_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_sbir_resolved_public_endpoint",
+        lambda _url: None,
+    )
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module._sbir_awards_api_url("Acme AI", rows=1, start=0)
+
+        def read(self, _size: int) -> bytes:
+            return b"{not-json"
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(SbirApiError, match="not valid JSON"):
+        UrlLibSbirAwardsClient().search_awards(
+            "Acme AI",
+            rows=1,
+            start=0,
+            timeout_seconds=1.0,
+        )
+
+
+def test_sbir_redirect_handler_validates_before_following() -> None:
+    handler = collection_module._SbirRedirectHandler()
+    request = urllib.request.Request(
+        collection_module._sbir_awards_api_url("Acme AI", rows=1, start=0)
+    )
+
+    with pytest.raises(SbirApiError, match="SBIR/STTR API URL"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "http://127.0.0.1:8000/private",
+        )
+
+
+def test_sbir_client_vets_dns_before_opening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked_urls: list[str] = []
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> object:
+            _ = timeout
+            raise AssertionError("The API should not be opened after DNS validation fails.")
+
+    def fake_ensure_public_endpoint(url: str) -> None:
+        checked_urls.append(url)
+        raise SbirApiError(
+            "SBIR/STTR host api.www.sbir.gov resolves to a private, local, "
+            "or reserved network address."
+        )
+
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_sbir_resolved_public_endpoint",
+        fake_ensure_public_endpoint,
+    )
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    with pytest.raises(SbirApiError, match="private, local, or reserved"):
+        UrlLibSbirAwardsClient().search_awards(
+            "Acme AI",
+            rows=1,
+            start=0,
+            timeout_seconds=1.0,
+        )
+
+    assert checked_urls == [
+        collection_module._sbir_awards_api_url("Acme AI", rows=1, start=0)
+    ]
+
+
+def test_sbir_client_disables_ambient_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8888")
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_sbir_resolved_public_endpoint",
+        lambda _url: None,
+    )
+    captured_handlers: list[object] = []
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module._sbir_awards_api_url("Acme AI", rows=1, start=0)
+
+        def read(self, _size: int) -> bytes:
+            return b"[]"
+
+    class FakeOpener:
+        def open(
+            self,
+            _request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            return FakeResponse()
+
+    def fake_build_opener(
+        *handlers: object,
+    ) -> FakeOpener:
+        captured_handlers.extend(handlers)
+        return FakeOpener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
+
+    response = UrlLibSbirAwardsClient().search_awards(
+        "Acme AI",
+        rows=1,
+        start=0,
+        timeout_seconds=1.0,
+    )
+
+    assert response.results == []
+    proxy_handlers = [
+        handler
+        for handler in captured_handlers
+        if isinstance(handler, urllib.request.ProxyHandler)
+    ]
+    assert proxy_handlers
+    proxy_handler = cast(_ProxyHandlerWithProxies, proxy_handlers[0])
+    assert proxy_handler.proxies == {}
+
+
+def test_collect_sbir_awards_command_dry_run_reports_no_api_contact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-sbir-awards",
+            "--company",
+            "Acme AI",
+            "--limit",
+            "3",
+            "--dry-run",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "SBIR/STTR preview" in result.output
+    assert "would send 1 company to the SBIR/STTR public API" in _plain_cli_output(
+        result.output
+    )
+    assert "up to 3 award records per page for up to 20 pages" in _plain_cli_output(
+        result.output
+    )
+    assert "No API requests were sent" in result.output
+    assert not list((tmp_path / "data" / "research-results").glob("*.json"))
+
+
+def test_collect_sbir_awards_command_reports_incomplete_search_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_collect_sbir_awards(
+        *,
+        config: AppConfig,
+        company_names: list[str] | None,
+        limit: int,
+        dry_run: bool,
+    ) -> SbirCollectionRunSummary:
+        _ = config
+        assert company_names == ["Acme AI"]
+        assert limit == 5
+        assert dry_run is False
+        return SbirCollectionRunSummary(
+            output_path=None,
+            collected_at=BUILT_AT,
+            deals=[
+                ResearchCollectionDealSummary(
+                    company_name="Acme AI",
+                    result_count=0,
+                )
+            ],
+            warnings=[
+                "SBIR/STTR still returned full fuzzy result pages for Acme AI "
+                "after Hail Mary checked 20 pages. Hail Mary did not find "
+                "exact firm-name matches, but more SBIR/STTR results may exist."
+            ],
+        )
+
+    monkeypatch.setattr(
+        cli_module,
+        "collect_sbir_awards",
+        fake_collect_sbir_awards,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-sbir-awards",
+            "--company",
+            "Acme AI",
+            "--limit",
+            "5",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = _plain_cli_output(result.output)
+    assert "No exact firm-name SBIR/STTR results were found" in output
+    assert "Warning: SBIR/STTR still returned full fuzzy result pages" in output
+    assert "No results file was saved" in output
+
+
 def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     tmp_path: Path,
 ) -> None:
@@ -2099,6 +2829,145 @@ def test_prepare_public_research_results_combines_free_public_source_files(
     titles = {item["title"] for item in saved["results"]}
     assert "Acme AI Holdings SAM.gov result" not in titles
     assert all(item["company_name"] == "Acme AI" for item in saved["results"])
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "source_api"),
+    [
+        ("sec_form_d", "https://data.sec.gov/submissions/CIK0000000000.json"),
+        ("sam_gov", "https://api.sam.gov/opportunities/v2/search?title=Acme+AI"),
+        ("usaspending", "https://api.usaspending.gov/api/v2/search/spending_by_award/"),
+        ("sbir", "https://api.www.sbir.gov/public/api/awards?firm=Acme+AI"),
+        ("uspto", "https://data.uspto.gov/apis/bulk-data/search"),
+        ("github", "https://api.github.com/search/repositories?q=Acme+AI"),
+    ],
+)
+def test_public_source_file_loader_accepts_source_api_for_each_provider(
+    tmp_path: Path,
+    provider_id: str,
+    source_api: str,
+) -> None:
+    results_path = tmp_path / f"{provider_id}-results.json"
+    _write_public_source_results(
+        results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": f"Acme AI {provider_id} result",
+                "text": "Acme AI has a public source result.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_api": source_api,
+            }
+        ],
+    )
+
+    results_file = collection_module._load_public_source_search_results(
+        results_path,
+        provider_id=provider_id,
+        description=f"{provider_id} results",
+    )
+
+    assert results_file.results[0].source_url is None
+    assert results_file.results[0].source_api == source_api
+
+
+def test_prepare_public_research_results_writes_source_api_only_results(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    github_results_path = tmp_path / "github-results.json"
+    _write_public_source_results(
+        github_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI GitHub API result",
+                "text": "Acme AI has a public GitHub repository result.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_api": "https://api.github.com/search/repositories?q=Acme+AI",
+            }
+        ],
+    )
+
+    result = prepare_public_research_results(
+        config=config,
+        company_names=["Acme AI"],
+        github_results_path=github_results_path,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    prepared = saved["results"][0]
+    assert prepared["provider_id"] == "github"
+    assert "source_url" not in prepared
+    assert prepared["source_api"] == "https://api.github.com/search/repositories?q=Acme+AI"
+
+    dry_run = import_research_results(
+        config=config,
+        results_path=result.output_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+    assert dry_run.imported_count == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "source_api", "message"),
+    [
+        (
+            "sec_form_d",
+            "https://example.com/sec-result",
+            "source_api must use an SEC website host",
+        ),
+        (
+            "sam_gov",
+            "https://example.com/sam-result",
+            "source_api must use a SAM.gov website host",
+        ),
+        (
+            "sbir",
+            "https://example.com/sbir-result",
+            "source_api must use an SBIR website host",
+        ),
+        (
+            "uspto",
+            "https://example.com/uspto-result",
+            "source_api must use a USPTO website host",
+        ),
+        (
+            "github",
+            "https://example.com/github-result",
+            "source_api must use the GitHub website host",
+        ),
+    ],
+)
+def test_public_source_file_loader_rejects_wrong_provider_source_api_host(
+    tmp_path: Path,
+    provider_id: str,
+    source_api: str,
+    message: str,
+) -> None:
+    results_path = tmp_path / f"bad-{provider_id}-results.json"
+    _write_public_source_results(
+        results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": f"Acme AI {provider_id} result",
+                "text": "Acme AI has a public source result.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_api": source_api,
+            }
+        ],
+    )
+
+    with pytest.raises(ResearchCollectionError, match=message):
+        collection_module._load_public_source_search_results(
+            results_path,
+            provider_id=provider_id,
+            description=f"{provider_id} results",
+        )
 
 
 def test_prepare_public_research_results_returns_no_file_when_no_results(
@@ -3499,6 +4368,37 @@ class _FakeUsaspendingAwardsClient:
             ) from exc
 
 
+class _FakeSbirAwardsClient:
+    def __init__(
+        self,
+        responses: dict[tuple[str, int], SbirAwardsResponse],
+        *,
+        error: SbirApiError | None = None,
+    ) -> None:
+        self.responses = responses
+        self.error = error
+        self.calls: list[tuple[str, int, int]] = []
+
+    def search_awards(
+        self,
+        company_name: str,
+        *,
+        rows: int,
+        start: int,
+        timeout_seconds: float,
+    ) -> SbirAwardsResponse:
+        _ = timeout_seconds
+        self.calls.append((company_name, rows, start))
+        if self.error is not None:
+            raise self.error
+        try:
+            return self.responses[(company_name, start)]
+        except KeyError as exc:
+            raise AssertionError(
+                f"No fake SBIR/STTR response for {company_name} start {start}."
+            ) from exc
+
+
 def _usaspending_response(
     results: list[UsaspendingAwardRecord],
     *,
@@ -3525,6 +4425,18 @@ def _usaspending_raw_response(
     )
 
 
+def _sbir_response(results: list[SbirAwardRecord]) -> SbirAwardsResponse:
+    return SbirAwardsResponse.model_validate(
+        {
+            "results": [result.model_dump() for result in results],
+        }
+    )
+
+
+def _sbir_raw_response(results: list[dict[str, object]]) -> SbirAwardsResponse:
+    return SbirAwardsResponse.model_validate({"results": results})
+
+
 def _usaspending_award(
     *,
     recipient_name: str,
@@ -3548,6 +4460,41 @@ def _usaspending_award(
             "Start Date": "2025-01-01",
             "End Date": "2025-12-31",
             "Description": description,
+        }
+    )
+
+
+def _sbir_award(
+    *,
+    firm: str,
+    award_title: str,
+    award_link: str | None = "https://www.sbir.gov/awards/123",
+    award_amount: float | None = None,
+    abstract: str | None = None,
+) -> SbirAwardRecord:
+    return SbirAwardRecord.model_validate(
+        {
+            "firm": firm,
+            "award_title": award_title,
+            "agency": "NSF",
+            "branch": "Example Branch",
+            "phase": "Phase I",
+            "program": "SBIR",
+            "agency_tracking_number": f"TRACK-{award_title}",
+            "contract": f"CONTRACT-{award_title}",
+            "proposal_award_date": "2025-01-01",
+            "contract_end_date": "2025-12-31",
+            "solicitation_number": "SOL-123",
+            "solicitation_year": "2025",
+            "topic_code": "AI",
+            "award_year": "2025",
+            "award_amount": award_amount,
+            "uei": "UEI123",
+            "research_area_keywords": "synthetic fixtures",
+            "abstract": abstract,
+            "award_link": award_link,
+            "poc_email": "founder@example.com",
+            "poc_phone": "555-0100",
         }
     )
 
