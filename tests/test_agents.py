@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import stat
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -1050,6 +1051,25 @@ def test_prepare_agent_packets_allocates_capital_by_ranked_score(tmp_path: Path)
     assert packets_by_company["B Higher Score"].score.check_size == 2_500
     assert packets_by_company["A Lower Score"].score.recommendation == Recommendation.PASS
     assert packets_by_company["A Lower Score"].score.check_size == 0
+
+
+def test_prepare_agent_packets_allocates_after_reserve_percent(tmp_path: Path) -> None:
+    store = _strong_store(deal_id="deal_reserved", company_name="Reserved Packet")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = prepare_agent_packets(
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            capital_budget=5_000,
+            reserve_percent=Decimal("100"),
+        ),
+        roles=(AgentRole.FINAL_DECISION,),
+    )
+
+    packet = load_agent_input_packet(result.packets[0].path)
+    assert packet.score.recommendation == Recommendation.PASS
+    assert packet.score.check_size == 0
+    assert "No configured check size fits" in packet.score.one_line_reason
 
 
 def test_prepare_agent_packets_missing_summary_has_plain_english_error(

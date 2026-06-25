@@ -32,6 +32,7 @@ from hailmary.schemas.agents import (
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal
+from hailmary.scoring.portfolio import portfolio_scenario
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -221,7 +222,7 @@ def evaluate_deal_folder(
     scored_deal = score_evidence_store(
         store,
         config=config,
-        capital_remaining=config.capital_budget,
+        capital_remaining=portfolio_scenario(config).allocatable_capital,
     )
 
     _stage(stage_callback, "agent packet preparation")

@@ -251,6 +251,27 @@ def test_portfolio_report_explains_score_below_threshold_skip() -> None:
     assert "Score below the 75/100 INVEST threshold." in report
 
 
+def test_portfolio_report_prefers_score_reason_over_budget_for_low_scoring_skip() -> None:
+    evidence = [
+        _evidence(
+            "ev_all",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_all"),
+        _claim("discount", "20%", "ev_all"),
+        _claim("round size", "$1M", "ev_all"),
+    ]
+    config = AppConfig(data_dir=Path("data"), capital_budget=0)
+    scored = score_evidence_store(_store(evidence=evidence, claims=claims), config=config)
+
+    report = render_portfolio_report([scored], config=config)
+
+    assert "Score below the 75/100 INVEST threshold." in report
+    assert "No allocatable capital remained for an allowed nonzero check." not in report
+
+
 def test_score_evidence_store_passes_when_terms_conflict() -> None:
     evidence = [_evidence("ev_terms", "Valuation cap $8M. Valuation cap $10M.")]
     claims = [
@@ -1512,6 +1533,29 @@ def test_render_portfolio_report_includes_net_return_math_after_fees_carry_and_d
     assert "| Sensitivity 1x | 1x |" in report
     assert "| Sensitivity 3x | 3x |" in report
     assert "| Sensitivity 10x | 10x |" in report
+
+
+def test_render_portfolio_report_formats_large_return_assumptions_without_crashing(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        capital_budget=10**40,
+        gross_return_multiple=Decimal("1e20"),
+    )
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_large", company_name="Large Math"),
+        config=config,
+    )
+
+    report = render_portfolio_report([scored], config=config)
+
+    expected_budget = (
+        "Starting capital budget: "
+        "$10,000,000,000,000,000,000,000,000,000,000,000,000,000"
+    )
+    assert expected_budget in report
+    assert "| Configured | 100000000000000000000x |" in report
 
 
 def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> None:

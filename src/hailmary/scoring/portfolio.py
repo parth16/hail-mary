@@ -133,6 +133,8 @@ def skip_reason(deal: ScoredDeal) -> str:
         return "No usable source-linked evidence was available."
     if "Platform minimum above maximum check" in triggered_gate_names:
         return "The platform minimum check is above the configured maximum check size."
+    if deal.total_score < INVEST_MINIMUM_SCORE:
+        return f"Score below the {INVEST_MINIMUM_SCORE}/100 INVEST threshold."
     if "No available check size" in triggered_gate_names:
         if (deal.capital_remaining_before or 0) <= 0:
             return "No allocatable capital remained for an allowed nonzero check."
@@ -140,8 +142,6 @@ def skip_reason(deal: ScoredDeal) -> str:
     if triggered_gate_names:
         gate_text = "; ".join(triggered_gate_names)
         return f"Triggered kill gate: {gate_text}."
-    if deal.total_score < INVEST_MINIMUM_SCORE:
-        return f"Score below the {INVEST_MINIMUM_SCORE}/100 INVEST threshold."
     return "Deterministic guardrails require PASS."
 
 

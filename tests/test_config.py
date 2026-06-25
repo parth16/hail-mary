@@ -796,6 +796,18 @@ def test_negative_reserve_dollars_is_rejected(
         load_config()
 
 
+def test_reserve_dollars_above_capital_budget_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="reserve dollars cannot be higher"):
+        create_local_state(
+            AppConfig(capital_budget=1_000, reserve_dollars=1_001),
+            force=True,
+        )
+
+
 def test_reserve_percent_and_dollars_cannot_both_be_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

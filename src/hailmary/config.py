@@ -442,6 +442,8 @@ def _ensure_investment_limits(config: AppConfig) -> None:
         raise ConfigError("The capital budget cannot be negative.")
     if config.reserve_dollars < 0:
         raise ConfigError("The reserve dollars cannot be negative.")
+    if config.reserve_dollars > config.capital_budget:
+        raise ConfigError("The reserve dollars cannot be higher than the capital budget.")
     if config.max_check > MAX_CHECK_SIZE:
         raise ConfigError("The maximum check size cannot be above $10K.")
     if config.max_check not in CHECK_SIZE_TIERS:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -671,7 +671,7 @@ def _format_check_size(check_size: int) -> str:
 
 
 def _format_dollars(value: int | Decimal) -> str:
-    amount = Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    amount = _quantize_decimal(Decimal(value), Decimal("0.01"))
     prefix = "-" if amount < 0 else ""
     absolute_amount = abs(amount)
     if absolute_amount == absolute_amount.to_integral_value():
@@ -688,8 +688,16 @@ def _format_multiple(value: Decimal) -> str:
 
 
 def _format_net_multiple(value: Decimal) -> str:
-    rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    rounded = _quantize_decimal(value, Decimal("0.01"))
     return f"{_format_decimal(rounded)}x"
+
+
+def _quantize_decimal(value: Decimal, quantizer: Decimal) -> Decimal:
+    digits_before_decimal = max(value.adjusted() + 1, 1)
+    precision = max(len(value.as_tuple().digits), digits_before_decimal) + 4
+    with localcontext() as context:
+        context.prec = precision
+        return value.quantize(quantizer, rounding=ROUND_HALF_UP)
 
 
 def _format_decimal(value: Decimal) -> str:
