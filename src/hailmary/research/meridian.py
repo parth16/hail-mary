@@ -23,10 +23,15 @@ MERIDIAN_WORKFLOW_TEMPLATE_MARKER = (
 )
 MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER = (
     "Generated Meridian placeholder. Replace the evidence text, time viewed, "
-    "confidence, and licensing notes before import."
+    "confidence, and licensing notes before import. Keep source_url unchanged. "
+    "If you do not collect this fact, leave the row untouched."
 )
 MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX = "Generated Meridian source URL: "
 MERIDIAN_PLACEHOLDER_CONFIDENCE = (
+    "Replace with confidence, such as high: exact short page excerpt; medium: "
+    "partial match; or low: needs follow-up."
+)
+MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE = (
     "Replace with confidence, such as high: exact page text; medium: partial "
     "match; or low: needs follow-up."
 )
@@ -43,6 +48,8 @@ MERIDIAN_RECOMMENDED_FACTS = [
     "Revenue claims",
     "Team or founder facts",
     "Market claims",
+    "Product facts, if visible",
+    "Use of funds, if visible",
     "Risks or disclaimers",
     "Closing date or allocation deadline, if visible",
 ]
@@ -53,7 +60,7 @@ class MeridianWorkflowError(RuntimeError):
 
 
 class MeridianWorkflow(BaseModel):
-    version: str = "2"
+    version: str = "3"
     created_at: datetime
     company_name: str
     meridian_url: str
@@ -63,8 +70,12 @@ class MeridianWorkflow(BaseModel):
     manual_steps: list[str] = Field(default_factory=list)
     do_not_collect: list[str] = Field(default_factory=list)
     term_definitions: dict[str, str] = Field(default_factory=dict)
+    required_when_visible_sections: dict[str, list[str]] = Field(default_factory=dict)
+    optional_when_visible_sections: dict[str, list[str]] = Field(default_factory=dict)
+    before_import_checklist: list[str] = Field(default_factory=list)
     recommended_facts: list[str] = Field(default_factory=list)
     import_command: str
+    dry_run_command: str
 
 
 class MeridianWorkflowRunSummary(BaseModel):
@@ -104,6 +115,10 @@ def prepare_meridian_workflow(
             meridian_url=cleaned_meridian_url,
         )
     }
+    dry_run_command = _import_dry_run_command(
+        template_path=template_path,
+        data_dir=config.data_dir,
+    )
     workflow = MeridianWorkflow(
         created_at=created_at,
         company_name=cleaned_company_name,
@@ -114,12 +129,12 @@ def prepare_meridian_workflow(
         manual_steps=_manual_steps(),
         do_not_collect=_do_not_collect(),
         term_definitions=_term_definitions(),
+        required_when_visible_sections=_required_when_visible_sections(),
+        optional_when_visible_sections=_optional_when_visible_sections(),
+        before_import_checklist=_before_import_checklist(),
         recommended_facts=MERIDIAN_RECOMMENDED_FACTS,
-        import_command=(
-            "hailmary import-research-results "
-            f"{shlex.quote(str(template_path))} "
-            f"--data-dir {shlex.quote(str(config.data_dir))} --dry-run"
-        ),
+        import_command=dry_run_command,
+        dry_run_command=dry_run_command,
     )
 
     _write_private_json(
@@ -136,6 +151,14 @@ def prepare_meridian_workflow(
         output_path=workflow_path,
         result_template_path=template_path,
         workflow=workflow,
+    )
+
+
+def _import_dry_run_command(*, template_path: Path, data_dir: Path) -> str:
+    return (
+        "hailmary import-research-results "
+        f"{shlex.quote(str(template_path))} "
+        f"--data-dir {shlex.quote(str(data_dir))} --dry-run"
     )
 
 
@@ -277,8 +300,9 @@ def _safety_rules() -> list[str]:
             "paywalls, or platform restrictions."
         ),
         (
-            "Do not save browser profiles, cookies, tokens, signed links, "
-            "screenshots, full-page dumps, or raw portal pages in the repository."
+            "Do not save browser profiles, cookies, tokens, signed URLs, "
+            "screenshots, full-page dumps, raw portal pages, hidden page data, "
+            "or unrelated account data."
         ),
         "Copy only short facts and excerpts you are allowed to save locally.",
         (
@@ -306,6 +330,10 @@ def _manual_steps() -> list[str]:
             "Paste each allowed fact into the generated results template as evidence "
             "text, not as a raw page dump."
         ),
+        (
+            "Use the workflow sections to decide which short facts to collect; leave "
+            "any unused placeholder rows untouched."
+        ),
         "Keep source_url as the generated Meridian page URL for completed rows.",
         "Run the import-research-results dry-run command before importing evidence.",
     ]
@@ -326,8 +354,90 @@ def _do_not_collect() -> list[str]:
     ]
 
 
+def _required_when_visible_sections() -> dict[str, list[str]]:
+    return {
+        "deal_terms": [
+            "Round type, such as SAFE, convertible note, priced equity, or debt.",
+            "Valuation cap or pre-money valuation, if the page states one.",
+            "Discount, interest rate, maturity date, or other investor economics.",
+            "Minimum investment and any platform fee or carry statement.",
+            "Target raise, amount raised, allocation size, and notable investors.",
+        ],
+        "traction_customer_evidence": [
+            "Customer names, counts, contracts, pilots, usage, retention, or growth claims.",
+            "Whether traction claims are live, signed, recurring, waitlisted, or planned.",
+        ],
+        "revenue_evidence": [
+            "Revenue, ARR, MRR, bookings, gross merchandise value, or paid-customer claims.",
+            "The period and currency for any revenue figure, if visible.",
+        ],
+        "founder_team_facts": [
+            "Founder names, roles, relevant prior companies, domain experience, or education.",
+            "Hiring gaps or key open roles called out by the company.",
+        ],
+        "risks_disclaimers": [
+            "Risk factors, disclaimers, unresolved diligence items, or platform warnings.",
+            "Any statement that limits, qualifies, or conflicts with a positive claim.",
+        ],
+        "deadline_allocation": [
+            "Closing date, deadline, allocation limit, oversubscription note, or waitlist status.",
+            "Any minimum or maximum check constraints visible on the page.",
+        ],
+    }
+
+
+def _optional_when_visible_sections() -> dict[str, list[str]]:
+    return {
+        "product": [
+            "Product description, launch status, customer workflow, or technical milestone.",
+        ],
+        "market": [
+            "Market size, category, competitor, or buyer-budget claim.",
+        ],
+        "use_of_funds": [
+            "How the company says it will use proceeds from the raise.",
+        ],
+    }
+
+
+def _before_import_checklist() -> list[str]:
+    return [
+        "Each completed row contains only a short allowed fact or excerpt, not a raw page dump.",
+        (
+            "No screenshots, scraping output, browser profiles, cookies, tokens, "
+            "signed URLs, raw portal pages, hidden page data, or unrelated account "
+            "data were saved."
+        ),
+        "source_url still matches the generated safe Meridian deal URL.",
+        "source_api is blank for every Meridian row.",
+        (
+            "retrieved_at is the time you viewed the page in ISO format, such as "
+            "2026-01-01T12:00:00Z."
+        ),
+        "confidence is your own note and no longer contains the placeholder text.",
+        (
+            "licensing_notes explain why the short fact can be saved locally and "
+            "still include the generated marker until import."
+        ),
+        "The dry-run command completed successfully before importing evidence.",
+    ]
+
+
 def _term_definitions() -> dict[str, str]:
     return {
+        "SAFE": (
+            "A Simple Agreement for Future Equity; an investment that can convert into "
+            "company shares later."
+        ),
+        "convertible note": (
+            "A loan that can convert into company shares later, often with interest or "
+            "a maturity date."
+        ),
+        "ARR": "Annual recurring revenue; subscription revenue measured per year.",
+        "MRR": "Monthly recurring revenue; subscription revenue measured per month.",
+        "allocation": (
+            "The amount of the round or investment opportunity available to investors."
+        ),
         "valuation cap": (
             "The highest company value used to convert a SAFE or note into shares."
         ),
@@ -341,8 +451,12 @@ def _term_definitions() -> dict[str, str]:
         "minimum investment": (
             "The smallest check size the platform says an investor can put into the deal."
         ),
+        "target raise": "The amount of money the company is trying to raise.",
         "lead investor": (
             "An investor named as leading the round or setting key deal terms."
+        ),
+        "closing date": (
+            "The date or deadline when the investment opportunity is expected to close."
         ),
     }
 

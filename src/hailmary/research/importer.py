@@ -31,6 +31,7 @@ from hailmary.schemas.evidence import (
 from hailmary.utils.slug import slugify
 
 from .meridian import (
+    MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_RECOMMENDED_FACTS,
     MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
@@ -338,7 +339,10 @@ def _is_untouched_meridian_placeholder_result(result: dict[str, object]) -> bool
 
 
 def _is_meridian_placeholder_confidence(value: object) -> bool:
-    return isinstance(value, str) and value.strip() == MERIDIAN_PLACEHOLDER_CONFIDENCE
+    return isinstance(value, str) and value.strip() in {
+        MERIDIAN_PLACEHOLDER_CONFIDENCE,
+        MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
+    }
 
 
 def _is_meridian_placeholder_title(value: object) -> bool:
@@ -510,7 +514,7 @@ def _validate_completed_meridian_placeholder(
             f"Research result {index} uses a generated Meridian placeholder, so "
             "source_url must stay as the generated Meridian deal page URL."
         )
-    if result.confidence != MERIDIAN_PLACEHOLDER_CONFIDENCE:
+    if not _is_meridian_placeholder_confidence(result.confidence):
         return
     raise ResearchImportError(
         f"Research result {index} uses Meridian placeholder confidence guidance. "
