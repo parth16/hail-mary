@@ -30,6 +30,7 @@ from hailmary.research import (
     import_research_results,
     prepare_meridian_workflow,
     prepare_public_research_results,
+    run_research_workflow,
 )
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
@@ -1031,6 +1032,100 @@ def run_public_source_import_fixture(work_dir: Path) -> None:
     _expect(
         "Use SEC EDGAR public filings" not in packet_json,
         "Expected agent packets to exclude provider licensing metadata.",
+    )
+
+
+def run_research_workflow_v2_fixture(work_dir: Path) -> None:
+    root = (work_dir / "pitch-decks").resolve(strict=False)
+    company = root / "Synthetic WorkflowCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(data_dir=(work_dir / "data").resolve(strict=False))
+    summary = ingest_folder(root, config=config)
+    _expect_equal(
+        len(summary.deals),
+        1,
+        "Expected workflow fixture setup to ingest one synthetic deal.",
+    )
+    deal = summary.deals[0]
+    _expect(
+        deal.evidence_store_path is not None,
+        "Expected workflow fixture setup to write an evidence store.",
+    )
+    if deal.evidence_store_path is None:
+        raise EvalFixtureFailure("Expected workflow fixture setup to write a store.")
+    before_store = deal.evidence_store_path.read_text(encoding="utf-8")
+
+    sec_results_path = (work_dir / "workflow-sec-results.json").resolve(strict=False)
+    sec_results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Synthetic WorkflowCo",
+                        "title": "Synthetic WorkflowCo Form D",
+                        "text": "Synthetic WorkflowCo filed a public financing notice.",
+                        "retrieved_at": "2025-12-31T12:00:00Z",
+                        "source_url": (
+                            "https://www.sec.gov/Archives/edgar/data/"
+                            "synthetic-workflowco/form-d"
+                        ),
+                    },
+                    {
+                        "company_name": "Synthetic WorkflowCo Holdings",
+                        "title": "Related entity Form D",
+                        "text": "Related entity evidence that must not import.",
+                        "retrieved_at": "2025-12-31T12:00:00Z",
+                        "source_url": (
+                            "https://www.sec.gov/Archives/edgar/data/"
+                            "synthetic-workflowco-holdings/form-d"
+                        ),
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    workflow = run_research_workflow(
+        config=config,
+        company_names=["Synthetic WorkflowCo", "Synthetic MissingCo"],
+        sec_form_d_results_path=sec_results_path,
+        created_at=BUILT_AT,
+    )
+    _expect(
+        workflow.plan_path.exists() and workflow.result_template_path.exists(),
+        "Expected workflow to write plan and template artifacts.",
+    )
+    local_public = next(
+        collection
+        for collection in workflow.collections
+        if collection.source_id == "local_public"
+    )
+    _expect_equal(
+        local_public.result_count,
+        1,
+        "Expected workflow to prepare one exact public-source result.",
+    )
+    _expect_equal(
+        local_public.skipped_non_exact_company_names,
+        ["Synthetic WorkflowCo Holdings"],
+        "Expected workflow to report related public-source rows as skipped.",
+    )
+    _expect_equal(
+        workflow.ready_to_import_count,
+        1,
+        "Expected workflow import dry-run to find one import-ready result.",
+    )
+    _expect_equal(
+        workflow.no_prepared_result_companies,
+        ["Synthetic MissingCo"],
+        "Expected workflow to name companies with no prepared results.",
+    )
+    _expect_equal(
+        deal.evidence_store_path.read_text(encoding="utf-8"),
+        before_store,
+        "Expected workflow import preview to avoid mutating evidence stores.",
     )
 
 

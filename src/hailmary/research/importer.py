@@ -1011,6 +1011,55 @@ def _first_validation_detail(exc: ValidationError) -> str:
     if not errors:
         return "The JSON did not match the expected shape."
     first_error = errors[0]
-    location = ".".join(str(part) for part in first_error.get("loc", ()))
+    location_parts = tuple(first_error.get("loc", ()))
+    location = ".".join(str(part) for part in location_parts)
     message = str(first_error.get("msg", "Invalid value."))
-    return f"{location}: {message}" if location else message
+    field_name = str(location_parts[-1]) if location_parts else ""
+    plain_message = _plain_research_result_validation_message(
+        field_name=field_name,
+        message=message,
+    )
+    return f"{location}: {plain_message}" if location else plain_message
+
+
+def _plain_research_result_validation_message(
+    *,
+    field_name: str,
+    message: str,
+) -> str:
+    if field_name == "retrieved_at":
+        return (
+            "retrieved_at is required. Enter the time the source was retrieved or "
+            "viewed, such as 2026-01-01T12:00:00Z."
+        )
+    if field_name == "licensing_notes":
+        return (
+            "licensing_notes is required. Explain why this source or short excerpt "
+            "can be saved and used for diligence."
+        )
+    if field_name == "confidence":
+        return (
+            "confidence is required. Add your confidence note, such as high: exact "
+            "source match, or leave an untouched generated placeholder row unchanged."
+        )
+    if field_name == "text":
+        return (
+            "text is required. Add only the short source-backed evidence text, or "
+            "leave an untouched generated placeholder row unchanged."
+        )
+    if field_name == "title":
+        return (
+            "title is required. Complete the row with a short source-backed title, "
+            "or leave an untouched generated placeholder row unchanged."
+        )
+    if field_name == "source_url":
+        return (
+            "source_url is incomplete. Use the exact source URL, or use source_api "
+            "for an API source reference."
+        )
+    if field_name == "source_api":
+        return (
+            "source_api is incomplete. Use the exact API source reference, or use "
+            "source_url for a web page."
+        )
+    return message

@@ -641,6 +641,7 @@ class ResearchCollectionRunSummary(BaseModel):
     collected_at: datetime
     provider_ids: list[str]
     deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
+    skipped_non_exact_company_names: list[str] = Field(default_factory=list)
 
     @property
     def deal_count(self) -> int:
@@ -649,6 +650,10 @@ class ResearchCollectionRunSummary(BaseModel):
     @property
     def result_count(self) -> int:
         return sum(deal.result_count for deal in self.deals)
+
+    @property
+    def skipped_non_exact_count(self) -> int:
+        return len(self.skipped_non_exact_company_names)
 
 
 class UsaspendingCollectionRunSummary(BaseModel):
@@ -1352,23 +1357,34 @@ def prepare_public_research_results(
             "Hail Mary will not fetch websites or software data feeds in this command."
         )
 
-    adapters = [
-        PublicSourceFileAdapter(
-            provider_id=source_file.provider_id,
-            client=LocalPublicSourceSearchClient(
-                tuple(
-                    _load_public_source_search_results(
-                        source_file.path,
-                        provider_id=source_file.provider_id,
-                        description=source_file.description,
-                    ).results
-                )
+    source_results = [
+        (
+            source_file,
+            _load_public_source_search_results(
+                source_file.path,
+                provider_id=source_file.provider_id,
+                description=source_file.description,
             ),
         )
         for source_file in source_files
     ]
+    adapters = [
+        PublicSourceFileAdapter(
+            provider_id=source_file.provider_id,
+            client=LocalPublicSourceSearchClient(tuple(results_file.results)),
+        )
+        for source_file, results_file in source_results
+    ]
     provider_ids = [adapter.provider_id for adapter in adapters]
     deals = [ResearchCollectionDeal(company_name=company_name) for company_name in companies]
+    skipped_non_exact_company_names = _skipped_non_exact_company_names(
+        requested_company_names=companies,
+        source_results=[
+            result
+            for _source_file, results_file in source_results
+            for result in results_file.results
+        ],
+    )
     results: list[ResearchResultInput] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
@@ -1391,6 +1407,7 @@ def prepare_public_research_results(
             collected_at=collected_at,
             provider_ids=provider_ids,
             deals=deal_summaries,
+            skipped_non_exact_company_names=skipped_non_exact_company_names,
         )
 
     try:
@@ -1420,6 +1437,7 @@ def prepare_public_research_results(
         collected_at=collected_at,
         provider_ids=provider_ids,
         deals=deal_summaries,
+        skipped_non_exact_company_names=skipped_non_exact_company_names,
     )
 
 
@@ -3307,6 +3325,28 @@ def _exact_company_name_match(query_company_name: str, result_company_name: str)
     return query == result
 
 
+def _skipped_non_exact_company_names(
+    *,
+    requested_company_names: list[str],
+    source_results: list[PublicSourceSearchResult],
+) -> list[str]:
+    requested = [_normalize_company_name(company_name) for company_name in requested_company_names]
+    skipped: list[str] = []
+    seen: set[str] = set()
+    for result in source_results:
+        if any(
+            _exact_company_name_match(company_name, result.company_name)
+            for company_name in requested_company_names
+        ):
+            continue
+        normalized = _normalize_company_name(result.company_name)
+        if not normalized or normalized in requested or normalized in seen:
+            continue
+        seen.add(normalized)
+        skipped.append(result.company_name)
+    return skipped
+
+
 def _normalize_company_name(value: str) -> str:
     return re.sub(r"\s+", " ", value.casefold()).strip()
 
@@ -3460,9 +3500,45 @@ def _write_private_json(path: Path, text: str, *, description: str) -> None:
 
 def _first_validation_detail(exc: ValidationError) -> str:
     first_error = exc.errors()[0]
-    location = ".".join(str(part) for part in first_error.get("loc", ()))
+    location_parts = tuple(first_error.get("loc", ()))
+    location = ".".join(str(part) for part in location_parts)
     message = str(first_error.get("msg", "invalid value"))
-    return f"{location}: {message}" if location else message
+    field_name = str(location_parts[-1]) if location_parts else ""
+    plain_message = _plain_public_source_validation_message(
+        field_name=field_name,
+        message=message,
+    )
+    return f"{location}: {plain_message}" if location else plain_message
+
+
+def _plain_public_source_validation_message(
+    *,
+    field_name: str,
+    message: str,
+) -> str:
+    if field_name == "retrieved_at":
+        return (
+            "retrieved_at is required. Enter the time the source was retrieved or "
+            "viewed, such as 2026-01-01T12:00:00Z."
+        )
+    if field_name == "source_url":
+        return (
+            "source_url is incomplete. Use the exact source URL, or use source_api "
+            "for an API source reference."
+        )
+    if field_name == "source_api":
+        return (
+            "source_api is incomplete. Use the exact API source reference, or use "
+            "source_url for a web page."
+        )
+    if field_name == "licensing_notes":
+        return (
+            "licensing_notes is required. Explain why this source or short excerpt "
+            "can be saved and used for diligence."
+        )
+    if field_name == "company_name":
+        return "company_name is required and must exactly match the requested company."
+    return message
 
 
 def _as_utc(value: datetime) -> datetime:

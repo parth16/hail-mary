@@ -54,6 +54,10 @@ hailmary prepare-agent-packets
 hailmary validate-agent-output output.json packet.json
 hailmary run-evals
 hailmary list-research-providers
+hailmary research-workflow --company "ExampleCo"
+HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
+HAILMARY_SEC_USER_AGENT="Hail Mary research operator@example.com" \
+  hailmary research-workflow --company "ExampleCo" --website "https://example.com"
 hailmary prepare-research-plan --company "ExampleCo"
 HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
   hailmary collect-web-research --dry-run
@@ -85,7 +89,9 @@ hailmary import-research-results research-results.json
 
 `run-evals` runs local synthetic correctness checks. The built-in evals cover text extraction and ingestion, citation span validation, conflicting deal terms, prompt-injection safeguards, missing evidence, score calibration, and Markdown memo snapshot checks. They do not use real deal documents.
 
-`list-research-providers` shows free public, authenticated, and optional paid sources that Hail Mary can plan around. `prepare-research-plan` writes a private JSON checklist under `data/research-plans/` from either the latest ingestion summary or manually supplied `--company` values. It does not contact websites, APIs, paid databases, or Meridian. Any external fact imported later must record the provider, timestamp, exact URL or API source, confidence, and licensing notes.
+`list-research-providers` shows free public, authenticated, and optional paid sources that Hail Mary can plan around. `research-workflow` is the higher-level plan → collect/manual-fill → import-preview loop. It writes a private research plan and fillable results template, prepares local public-source result files when you pass them, creates a Meridian manual workflow when you pass `--meridian-url`, runs `import-research-results --dry-run` on completed result files, and names sources or companies that still need diligence. When `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`, it also runs available free live public collectors; SEC Form D collection also requires `HAILMARY_SEC_USER_AGENT` with an application or company name and contact email. It does not run paid sources, scrape Meridian, save screenshots, save cookies, save browser profiles, save raw portal HTML, save hidden authenticated data, or save signed URLs.
+
+`prepare-research-plan` writes a private JSON checklist under `data/research-plans/` from either the latest ingestion summary or manually supplied `--company` values. It does not contact websites, APIs, paid databases, or Meridian. Any external fact imported later must record the provider, timestamp, exact URL or API source, confidence, and licensing notes.
 
 `collect-web-research` can fetch direct public web-page tasks from a research plan after you explicitly turn off local-only mode and enable web research with `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run` to see which public URLs would be fetched. The command skips paid, authenticated, Meridian, local-only, missing-URL, generated search-result, localhost, and private-network sources. It writes exact source pages to a private JSON file under `data/research-results/`; run `import-research-results --dry-run` before adding that text to evidence stores.
 
