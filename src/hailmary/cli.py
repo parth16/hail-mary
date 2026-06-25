@@ -46,6 +46,7 @@ from hailmary.research import (
     ResearchTemplateError,
     WebResearchError,
     builtin_research_providers,
+    collect_sbir_awards,
     collect_usaspending_awards,
     collect_web_research,
     import_research_results,
@@ -1142,6 +1143,125 @@ def collect_usaspending_awards_command(
             )
         )
     _print_section("USAspending results collected", lines, style="green")
+
+
+@app.command("collect-sbir-awards")
+def collect_sbir_awards_command(
+    company: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--company",
+            help=(
+                "Company to search for in SBIR/STTR awards. Use more than once "
+                "for multiple companies."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            min=1,
+            max=25,
+            help="Maximum SBIR/STTR award records to request per company.",
+        ),
+    ] = 10,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show what would be sent to SBIR/STTR without contacting the API.",
+        ),
+    ] = False,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should write the private results file.",
+        ),
+    ] = None,
+) -> None:
+    """Collect public SBIR/STTR award evidence for exact firm-name matches."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = collect_sbir_awards(
+            config=config,
+            company_names=company or [],
+            limit=limit,
+            dry_run=dry_run,
+        )
+    except ResearchCollectionError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    company_word = "company" if result.deal_count == 1 else "companies"
+    result_word = "result" if result.result_count == 1 else "results"
+    if result.dry_run:
+        _print_section(
+            "SBIR/STTR preview",
+            [
+                _plain(
+                    f"Dry run: Hail Mary would send {result.deal_count} "
+                    f"{company_word} to the SBIR/STTR public API."
+                ),
+                _plain(
+                    f"A live run can request up to {limit} award records per page "
+                    f"for up to 20 pages per company while looking for exact matches."
+                ),
+                _plain("No API requests were sent and no results file was saved."),
+            ],
+            style="yellow",
+        )
+        return
+
+    if result.output_path is None:
+        lines = [
+            _plain(
+                f"No exact firm-name SBIR/STTR {result_word} were found "
+                f"for {result.deal_count} {company_word}."
+            ),
+            _plain("No results file was saved."),
+        ]
+        for warning in result.warnings:
+            lines.append(_plain(f"Warning: {warning}"))
+        _print_section(
+            "SBIR/STTR results",
+            lines,
+            style="yellow",
+        )
+        return
+
+    data_dir_option = (
+        f" --data-dir {shlex.quote(str(config.data_dir))}" if data_dir is not None else ""
+    )
+    next_command = (
+        f"`hailmary import-research-results {shlex.quote(str(result.output_path))}"
+        f"{data_dir_option} --dry-run`."
+    )
+    lines = [
+        _plain(
+            f"Collected {result.result_count} SBIR/STTR {result_word} for "
+            f"{result.deal_count} {company_word}."
+        ),
+        _plain(f"Saved the private JSON results file to {result.output_path}."),
+        _plain(
+            "Only exact firm-name matches were prepared. Confirm entity identity "
+            "before relying on the evidence."
+        ),
+        _plain(f"Next, run {next_command}"),
+    ]
+    for warning in result.warnings:
+        lines.append(_plain(f"Warning: {warning}"))
+    zero_result_companies = [deal.company_name for deal in result.deals if deal.result_count == 0]
+    if zero_result_companies:
+        lines.append(
+            _plain(
+                f"No exact SBIR/STTR matches were prepared for: "
+                f"{', '.join(zero_result_companies)}."
+            )
+        )
+    _print_section("SBIR/STTR results collected", lines, style="green")
 
 
 @app.command("prepare-meridian-workflow")

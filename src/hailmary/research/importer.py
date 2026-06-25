@@ -42,7 +42,7 @@ from .schemas import (
     ResearchResultInput,
     ResearchResultsFile,
 )
-from .source_urls import validate_provider_source_url
+from .source_urls import source_reference_looks_like_url, validate_provider_source_url
 
 
 class ResearchImportError(RuntimeError):
@@ -383,7 +383,7 @@ def _validate_url_reference(source_url: str, *, index: int, field_name: str) -> 
 
 
 def _validate_source_api(source_api: str, *, index: int) -> None:
-    if _source_api_looks_like_url(source_api):
+    if source_reference_looks_like_url(source_api):
         _validate_url_reference(source_api, index=index, field_name="source_api")
 
 
@@ -424,13 +424,6 @@ def _validate_saved_meridian_licensing_notes(
     )
 
 
-def _source_api_looks_like_url(source_api: str) -> bool:
-    return (
-        source_api.startswith(("http://", "https://", "//"))
-        or "://" in source_api
-    )
-
-
 def _validate_known_provider_source_kind(
     result: ResearchResultInput,
     *,
@@ -457,7 +450,7 @@ def _validate_known_provider_source_locations(
             index=index,
             field_name="source_url",
         )
-    if result.source_api is not None and _source_api_looks_like_url(result.source_api):
+    if result.source_api is not None and source_reference_looks_like_url(result.source_api):
         _validate_provider_reference_host(
             result.provider_id,
             result.source_api,

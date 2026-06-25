@@ -63,6 +63,8 @@ hailmary prepare-public-research-results \
   --sam-gov-results sam-gov-results.json
 HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
   hailmary collect-usaspending-awards --company "ExampleCo" --dry-run
+HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
+  hailmary collect-sbir-awards --company "ExampleCo" --dry-run
 hailmary prepare-meridian-workflow \
   --company "ExampleCo" \
   --meridian-url "https://portal.angellist.com/m/example/invest"
@@ -82,7 +84,7 @@ hailmary import-research-results research-results.json
 
 `prepare-research-results-template` turns a private research plan into a fillable JSON file under `data/research-results-templates/`. It copies company names, provider IDs, source kinds, licensing notes, and ingested deal IDs when available, but leaves fact fields and citation URLs blank so the file cannot be mistaken for validated evidence.
 
-`prepare-public-research-results` normalizes local public-source JSON files into an import-ready results file under `data/research-results/`. It supports local files for SEC Form D, SAM.gov, USAspending, SBIR/STTR, USPTO, and GitHub. It only imports exact company-name matches and checks that each result URL belongs to the expected source. It does not fetch websites, browse pages, call software data feeds, or use paid data. A minimal input file for any supported source looks like:
+`prepare-public-research-results` normalizes local public-source JSON files into an import-ready results file under `data/research-results/`. It supports local files for SEC Form D, SAM.gov, USAspending, SBIR/STTR, USPTO, and GitHub. It only imports exact company-name matches and checks that each result URL or URL-like API source belongs to the expected source. It does not fetch websites, browse pages, call software data feeds, or use paid data. A minimal input file for any supported source looks like:
 
 ```json
 {
@@ -101,6 +103,8 @@ hailmary import-research-results research-results.json
 Use the matching option for each local source file: `--sec-form-d-results`, `--sam-gov-results`, `--usaspending-results`, `--sbir-results`, `--uspto-results`, or `--github-results`.
 
 `collect-usaspending-awards` is an optional live public API collector for USAspending award records. It requires `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run`; a real run sends only the `--company` values you provide to the USAspending public API, keeps only exact recipient-name matches, and writes a private JSON results file under `data/research-results/`.
+
+`collect-sbir-awards` is an optional live public API collector for SBIR/STTR award records. It requires `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run`; a real run sends only the `--company` values you provide to the SBIR/STTR public API, keeps only exact firm-name matches, saves the API request URL as the source, and writes a private JSON results file under `data/research-results/`. Hail Mary does not save SBIR/STTR contact phone or email fields into generated evidence text.
 
 `prepare-meridian-workflow` writes a private manual workflow under `data/meridian-workflows/` and a fillable Meridian results template under `data/research-results-templates/`. It does not open Meridian, sign in, bypass access controls, or save portal content. Use normal authenticated access, collect only facts you are allowed to save locally, fill in the template with the time viewed and Meridian page URL, then run `import-research-results --dry-run`. Use the base Meridian deal URL without extra text after `?` or `#`.
 

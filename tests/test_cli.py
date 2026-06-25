@@ -102,6 +102,28 @@ def test_ingest_folder_warns_when_documents_need_image_text_reading(
     assert "before Hail Mary can use all of their content" in normalized_output
 
 
+def test_ingest_folder_warns_for_image_only_deal(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "pitch-decks" / "ImageOnlyCo"
+    source.mkdir(parents=True)
+    (source / "scan.png").write_bytes(b"synthetic image placeholder")
+    data_dir = tmp_path / "data"
+
+    result = runner.invoke(app, ["ingest-folder", str(source.parent), "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Found 1 deal and 1 document" in normalized_output
+    assert "No usable evidence text was built for deal: ImageOnlyCo" in normalized_output
+    assert "may need image-based text reading (OCR)" in normalized_output
+
+    summary_path = data_dir / "processed" / "ingestion_summary.json"
+    saved_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    saved_document = saved_summary["deals"][0]["documents"][0]
+    assert saved_document["source"]["ocr_recommended"]
+    assert saved_document["source"]["vision_recommended"]
+
+
 def test_ingest_folder_warns_when_no_usable_evidence_is_built(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

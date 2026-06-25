@@ -55,3 +55,10 @@ def validate_provider_source_url(
     if host == allowed_host or host.endswith(f".{allowed_host}"):
         return
     raise ValueError(f"{field_name} must use {description}")
+
+
+def source_reference_looks_like_url(source_reference: str) -> bool:
+    return (
+        source_reference.startswith(("http://", "https://", "//"))
+        or "://" in source_reference
+    )
