@@ -4,6 +4,7 @@ import csv
 import io
 import re
 import zipfile
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -598,19 +599,24 @@ def _merge_existing_page_text_with_ocr(*, existing_text: str, ocr_text: str) -> 
     ocr_lines = _normalized_nonblank_lines(ocr)
     if existing_lines == ocr_lines:
         return existing
-    existing_line_set = set(existing_lines)
-    ocr_line_set = set(ocr_lines)
-    if existing_lines and set(existing_lines).issubset(ocr_line_set):
+    existing_line_counts = Counter(existing_lines)
+    ocr_line_counts = Counter(ocr_lines)
+    if existing_lines and existing_line_counts <= ocr_line_counts:
         return ocr
-    if ocr_lines and set(ocr_lines).issubset(existing_line_set):
+    if ocr_lines and ocr_line_counts <= existing_line_counts:
         return existing
 
     merged_lines = [line.strip() for line in existing.splitlines() if line.strip()]
-    merged_lines.extend(
-        line.strip()
-        for line in ocr.splitlines()
-        if line.strip() and _normalize_text_for_merge(line) not in existing_line_set
-    )
+    remaining_existing_counts = Counter(existing_lines)
+    for line in ocr.splitlines():
+        clean_line = line.strip()
+        normalized_line = _normalize_text_for_merge(clean_line)
+        if not clean_line or not normalized_line:
+            continue
+        if remaining_existing_counts[normalized_line] > 0:
+            remaining_existing_counts[normalized_line] -= 1
+            continue
+        merged_lines.append(clean_line)
     return "\n\n".join(merged_lines)
 
 

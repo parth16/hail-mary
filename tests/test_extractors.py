@@ -650,6 +650,40 @@ def test_pdf_useful_ocr_does_not_duplicate_existing_page_text(
     assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
 
 
+def test_pdf_useful_ocr_keeps_repeated_existing_lines_when_ocr_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "image-backed.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+    existing_text = "Valuation cap\n$8M\nRound size\n$8M"
+
+    class ImageBackedTextPage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return existing_text
+
+    class Reader:
+        pages = [ImageBackedTextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+    engine = FakeOcrEngine(
+        pdf_results={
+            1: LocalOcrResult(
+                text="Valuation cap\n$8M\nRound size",
+                confidence=0.91,
+            )
+        }
+    )
+
+    result = extract_document(pdf_path, ocr_engine=engine)
+
+    assert result.ocr_applied
+    assert result.combined_text == existing_text
+    assert result.combined_text.count("$8M") == 2
+    assert result.pages[0].source_span_end == len(result.pages[0].raw_text)
+
+
 @pytest.mark.parametrize(
     ("existing_text", "ocr_text"),
     [
