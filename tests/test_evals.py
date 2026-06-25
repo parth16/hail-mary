@@ -34,7 +34,7 @@ def test_builtin_eval_metadata_covers_required_phase_6_categories() -> None:
 def test_run_builtin_evals_passes_all_synthetic_cases(tmp_path: Path) -> None:
     summary = run_builtin_evals(work_dir=tmp_path)
 
-    assert summary.total_count == 18
+    assert summary.total_count == 21
     assert summary.passed
     assert summary.failed_results == []
 
@@ -48,6 +48,8 @@ def test_run_builtin_evals_filters_by_category(tmp_path: Path) -> None:
     assert {result.id for result in summary.results} == {
         "score-strong-invest",
         "score-borderline-pass",
+        "score-stage-aware-v2",
+        "score-return-math-missing-v2",
     }
     assert summary.passed
 

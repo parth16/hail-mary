@@ -101,7 +101,7 @@ class ClaimConflict(BaseModel):
 
 
 class EvidenceStore(BaseModel):
-    version: str = "1"
+    version: str = "2"
     deal_id: str
     company_name: str
     created_at: datetime

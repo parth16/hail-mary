@@ -40,7 +40,7 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import Recommendation, ScoredDeal
+from hailmary.schemas.scoring import CompanyStage, Recommendation, ScoredDeal, ValuationRisk
 from hailmary.scoring.memo import render_markdown_memo, render_portfolio_report
 from hailmary.scoring.scorer import (
     score_evidence_store,
@@ -1127,6 +1127,78 @@ def run_borderline_score_fixture() -> None:
     )
 
 
+def run_stage_aware_score_fixture() -> None:
+    pre_seed_evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_stage", "Pre-seed beta with a design partner."),
+    ]
+    series_a_evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_stage", "Series A beta with a design partner."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", pre_seed_evidence[0]),
+        _claim("discount", "20%", pre_seed_evidence[0]),
+        _claim("round size", "$1M", pre_seed_evidence[0]),
+    ]
+    pre_seed_score = score_evidence_store(
+        _store(evidence=pre_seed_evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+    series_a_score = score_evidence_store(
+        _store(evidence=series_a_evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    _expect_equal(
+        pre_seed_score.company_stage,
+        CompanyStage.PRE_SEED,
+        "Expected explicit pre-seed stage evidence to set the company stage.",
+    )
+    _expect_equal(
+        series_a_score.company_stage,
+        CompanyStage.SERIES_A,
+        "Expected explicit Series A stage evidence to set the company stage.",
+    )
+    _expect(
+        _score_factor_score(pre_seed_score, "Stage and product-market fit")
+        > _score_factor_score(series_a_score, "Stage and product-market fit"),
+        "Expected the same early PMF evidence to score differently by stage.",
+    )
+    _expect_equal(
+        _score_factor_evidence_ids(pre_seed_score, "Stage and product-market fit"),
+        ["ev_stage"],
+        "Expected stage-aware score impact to cite the stage and PMF evidence.",
+    )
+
+
+def run_return_math_missing_fixture() -> None:
+    scored = score_evidence_store(
+        _strong_store(),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    _expect_equal(
+        scored.valuation_risk,
+        ValuationRisk.LOW,
+        "Expected the synthetic low valuation to classify as low valuation risk.",
+    )
+    _expect_equal(
+        scored.net_return.net_return_multiple,
+        None,
+        "Expected missing return inputs not to produce an invented net return.",
+    )
+    _expect_equal(
+        scored.net_return.missing_inputs,
+        ["dilution", "fees or carry", "gross exit scenario"],
+        "Expected missing dilution, fee or carry, and exit inputs to be reported.",
+    )
+    _expect(
+        "did not invent a net return" in scored.net_return.explanation,
+        "Expected return-math explanation to say that missing data was not invented.",
+    )
+
+
 def run_missing_data_fixture() -> None:
     scored = score_evidence_store(
         _store(evidence=[], claims=[]),
@@ -1196,7 +1268,7 @@ def run_memo_snapshot_fixture() -> None:
         "Synthetic EvalCo",
         "## Deal Details",
         "Key risks:",
-        "Evidence: ev\\_traction.",
+        "Evidence: ev\\_traction, ev\\_funding.",
         "This report is a diligence aid, not legal, tax, financial, or investment advice.",
     ]
     missing_portfolio_fragments = [
@@ -1209,6 +1281,27 @@ def run_memo_snapshot_fixture() -> None:
         "Expected the portfolio report snapshot to contain required sections "
         "and cited evidence IDs.",
         missing_fragments=", ".join(missing_portfolio_fragments),
+    )
+
+
+def run_memo_v2_score_evidence_fixture() -> None:
+    store = _strong_store()
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    memo = render_markdown_memo(scored, store)
+
+    expected_fragments = [
+        "**Stage:** seed",
+        "**Valuation risk:** low",
+        "**Net return math:** $8M entry valuation",
+        "- Valuation and net return: 13/20.",
+        "Support: NEEDS_DILIGENCE.",
+        "Evidence: ev_terms.",
+    ]
+    missing_fragments = [fragment for fragment in expected_fragments if fragment not in memo]
+    _expect(
+        not missing_fragments,
+        "Expected v2 memo score impacts to include stage, valuation, return math, and evidence.",
+        missing_fragments=", ".join(missing_fragments),
     )
 
 
@@ -1366,9 +1459,33 @@ def _format_check_size(check_size: int) -> str:
 
 
 def _score_factor_evidence_ids(scored_deal: ScoredDeal, name: str) -> list[str]:
+    aliases = {
+        "Deal-term clarity": "Deal terms and platform access",
+        "Product-market fit evidence": "Stage and product-market fit",
+        "Next-round fundability": "Fundability and next-round risk",
+        "Evidence quality": "Evidence authority and freshness",
+    }
+    resolved_name = aliases.get(name, name)
     for factor in scored_deal.score_factors:
-        if factor.name == name:
+        if factor.name == resolved_name:
             return factor.evidence_ids
+    raise EvalFixtureFailure(
+        "Expected score factor to be present.",
+        {"factor": name},
+    )
+
+
+def _score_factor_score(scored_deal: ScoredDeal, name: str) -> int:
+    aliases = {
+        "Deal-term clarity": "Deal terms and platform access",
+        "Product-market fit evidence": "Stage and product-market fit",
+        "Next-round fundability": "Fundability and next-round risk",
+        "Evidence quality": "Evidence authority and freshness",
+    }
+    resolved_name = aliases.get(name, name)
+    for factor in scored_deal.score_factors:
+        if factor.name == resolved_name:
+            return factor.score
     raise EvalFixtureFailure(
         "Expected score factor to be present.",
         {"factor": name},

@@ -241,6 +241,30 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="score-stage-aware-v2",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Stage-aware v2 score calibration",
+                description=(
+                    "Checks that the same early PMF evidence scores differently by "
+                    "company stage and cites the supporting synthetic evidence."
+                ),
+            ),
+            run=lambda _: fixtures.run_stage_aware_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-return-math-missing-v2",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Missing return-math input handling",
+                description=(
+                    "Checks that v2 net-return math reports missing dilution, fees or "
+                    "carry, and exit assumptions without inventing values."
+                ),
+            ),
+            run=lambda _: fixtures.run_return_math_missing_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="missing-data-pass",
                 category=EvalCategory.MISSING_DATA,
                 name="Missing data pass gate",
@@ -262,6 +286,18 @@ def _eval_definitions() -> list[EvalDefinition]:
                 ),
             ),
             run=lambda _: fixtures.run_memo_snapshot_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="memo-v2-score-evidence",
+                category=EvalCategory.MEMO_SNAPSHOT,
+                name="Memo v2 score impact evidence",
+                description=(
+                    "Checks that memos render v2 stage, valuation, return math, support "
+                    "status, and evidence IDs for score impacts."
+                ),
+            ),
+            run=lambda _: fixtures.run_memo_v2_score_evidence_fixture(),
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(

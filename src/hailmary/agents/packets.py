@@ -282,6 +282,9 @@ def build_agent_input_packet(
             one_line_reason=scored_deal.one_line_reason,
             pmf_level=scored_deal.pmf_level,
             fundability_risk=scored_deal.fundability_risk,
+            company_stage=scored_deal.company_stage,
+            valuation_risk=scored_deal.valuation_risk,
+            net_return=scored_deal.net_return,
         ),
         evidence=[
             _evidence_item(

@@ -30,6 +30,7 @@ from hailmary.schemas.evidence import (
     VerificationStatus,
 )
 from hailmary.schemas.scoring import (
+    CompanyStage,
     ConfidenceLevel,
     DiligenceQuestion,
     FundabilityRisk,
@@ -38,6 +39,7 @@ from hailmary.schemas.scoring import (
     Recommendation,
     ScoredDeal,
     ScoreFactor,
+    ValuationRisk,
 )
 from hailmary.scoring import (
     render_markdown_memo,
@@ -196,6 +198,117 @@ def test_score_evidence_store_keeps_65_to_74_as_pass() -> None:
     assert 65 <= scored.total_score <= 74
     assert scored.recommendation == Recommendation.PASS
     assert scored.check_size == 0
+
+
+def test_stage_aware_score_changes_are_deterministic_and_evidence_linked() -> None:
+    pre_seed_evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_stage", "Pre-seed beta with a design partner."),
+    ]
+    series_a_evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_stage", "Series A beta with a design partner."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    pre_seed = score_evidence_store(
+        _store(evidence=pre_seed_evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+    series_a = score_evidence_store(
+        _store(evidence=series_a_evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert pre_seed.company_stage == CompanyStage.PRE_SEED
+    assert series_a.company_stage == CompanyStage.SERIES_A
+    assert pre_seed.pmf_level == PMFLevel.EARLY
+    assert series_a.pmf_level == PMFLevel.EARLY
+    assert _score_factor(pre_seed, "Stage and product-market fit").score > _score_factor(
+        series_a,
+        "Stage and product-market fit",
+    ).score
+    assert _score_factor(pre_seed, "Stage and product-market fit").evidence_ids == [
+        "ev_stage"
+    ]
+
+
+def test_score_evidence_store_gates_valuation_far_ahead_of_evidence() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Pre-seed company. Valuation cap $80M. Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$80M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert scored.company_stage == CompanyStage.PRE_SEED
+    assert scored.valuation_risk == ValuationRisk.HIGH
+    valuation_gate = next(
+        gate
+        for gate in scored.triggered_kill_gates
+        if gate.name == "Valuation far ahead of evidence"
+    )
+    assert valuation_gate.evidence_ids == ["ev_terms"]
+
+
+def test_net_return_math_reports_missing_inputs_without_inventing_data() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_strong", company_name="StrongCo"),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.entry_valuation == 8_000_000
+    assert scored.net_return.net_return_multiple is None
+    assert scored.net_return.missing_inputs == [
+        "dilution",
+        "fees or carry",
+        "gross exit scenario",
+    ]
+    assert "did not invent a net return" in scored.net_return.explanation
+    assert _score_factor(scored, "Valuation and net return").evidence_ids == ["ev_terms"]
+
+
+def test_net_return_math_uses_cited_inputs_when_available() -> None:
+    evidence = [
+        _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_return",
+            "Estimated dilution 20%. Expenses 5%. Carry 20%. Exit value $1B.",
+        ),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.net_return_multiple == 75
+    assert scored.net_return.missing_inputs == []
+    assert scored.net_return.evidence_ids == ["ev_terms", "ev_return"]
+    assert _score_factor(scored, "Valuation and net return").score == 20
 
 
 def test_score_evidence_store_passes_when_terms_conflict() -> None:
@@ -846,6 +959,23 @@ def test_render_markdown_memo_includes_fixed_outputs_and_evidence_ids() -> None:
     assert "not legal, tax, financial, or investment advice" in markdown
 
 
+def test_render_markdown_memo_includes_v2_score_context_and_citations() -> None:
+    store = _strong_store(deal_id="deal_strong", company_name="StrongCo")
+    scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert "**Stage:** seed" in markdown
+    assert "**Valuation risk:** low" in markdown
+    assert (
+        "**Net return math:** $8M entry valuation; missing dilution, fees or carry, "
+        "gross exit scenario"
+    ) in markdown
+    assert "- Valuation and net return: 13/20." in markdown
+    assert "Support: NEEDS_DILIGENCE." in markdown
+    assert "Evidence: ev_terms." in markdown
+
+
 def test_render_markdown_memo_escapes_untrusted_document_paths() -> None:
     evidence = [
         _evidence("ev_terms", "Valuation cap $8M.").model_copy(
@@ -1017,7 +1147,8 @@ def test_score_latest_ingestion_does_not_penalize_fresh_local_files(
         encoding="utf-8",
     )
     (company / "traction.txt").write_text(
-        "ARR revenue growth with paid customers and retention.",
+        "Seed stage ARR revenue growth with paid customers and retention. "
+        "Lead investor committed.",
         encoding="utf-8",
     )
     config = AppConfig(data_dir=tmp_path / "data")
@@ -1026,9 +1157,9 @@ def test_score_latest_ingestion_does_not_penalize_fresh_local_files(
     result = score_latest_ingestion(config=config)
 
     scored = result.scored_deals[0]
-    assert scored.total_score == 75
     assert scored.recommendation == Recommendation.INVEST
-    assert scored.check_size == 2_500
+    assert scored.check_size > 0
+    assert _score_factor(scored, "Evidence authority and freshness").score == 11
 
 
 def test_score_latest_ingestion_writes_private_markdown_memos(tmp_path: Path) -> None:
@@ -1213,8 +1344,8 @@ def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> 
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert "INFERRED: Product-market fit evidence scored" in report
-    assert "Evidence: ev\\_traction." in report
+    assert "VERIFIED: Stage and product-market fit scored" in report
+    assert "Evidence: ev\\_traction, ev\\_funding." in report
     assert "NEEDS_DILIGENCE: No usable source-linked evidence" in report
     assert (
         "NEEDS_DILIGENCE: Find concrete customer, revenue, retention, or usage evidence"
@@ -1572,7 +1703,14 @@ def _write_ingestion_summary(tmp_path: Path, stores: list[EvidenceStore]) -> Non
 
 
 def _score_factor(scored_deal: ScoredDeal, name: str) -> ScoreFactor:
+    aliases = {
+        "Deal-term clarity": "Deal terms and platform access",
+        "Product-market fit evidence": "Stage and product-market fit",
+        "Next-round fundability": "Fundability and next-round risk",
+        "Evidence quality": "Evidence authority and freshness",
+    }
+    resolved_name = aliases.get(name, name)
     for factor in scored_deal.score_factors:
-        if factor.name == name:
+        if factor.name == resolved_name:
             return factor
     raise AssertionError(f"Missing score factor: {name}")

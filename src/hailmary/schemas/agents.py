@@ -11,10 +11,13 @@ from hailmary.config import CHECK_SIZE_TIERS
 from hailmary.schemas.documents import DocumentType, SourceKind
 from hailmary.schemas.evidence import ClaimType, EvidenceKind, SourceFreshness
 from hailmary.schemas.scoring import (
+    CompanyStage,
     ConfidenceLevel,
     FundabilityRisk,
+    NetReturnEstimate,
     PMFLevel,
     Recommendation,
+    ValuationRisk,
 )
 
 
@@ -72,6 +75,9 @@ class AgentScoreSnapshot(BaseModel):
     one_line_reason: str
     pmf_level: PMFLevel
     fundability_risk: FundabilityRisk
+    company_stage: CompanyStage = CompanyStage.UNKNOWN
+    valuation_risk: ValuationRisk = ValuationRisk.UNKNOWN
+    net_return: NetReturnEstimate = Field(default_factory=NetReturnEstimate)
 
 
 class AgentInputPacket(BaseModel):
