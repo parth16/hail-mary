@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,12 @@ class AppConfig(BaseModel):
     capital_budget: int = 100_000
     min_check: int = 1_000
     max_check: int = 10_000
+    reserve_percent: Decimal = Field(default=Decimal("0"))
+    reserve_dollars: int = 0
+    estimated_dilution_percent: Decimal = Field(default=Decimal("0"))
+    platform_fee_percent: Decimal = Field(default=Decimal("0"))
+    carry_percent: Decimal = Field(default=Decimal("0"))
+    gross_return_multiple: Decimal = Field(default=Decimal("5"))
     meridian_profile_dir: Path = Field(default=Path("./data/browser-profiles/meridian"))
     enable_ocr: bool = False
     enable_web_research: bool = False
@@ -103,6 +110,33 @@ def _setting_int(
     return _config_int(config_values, config_name, default)
 
 
+def _env_decimal(name: str, default: Decimal) -> Decimal:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return _parse_decimal(value, source=name)
+
+
+def _config_decimal(values: dict[str, str], name: str, default: Decimal) -> Decimal:
+    value = values.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return _parse_decimal(value, source=f".hailmary/config.yaml field {name}")
+
+
+def _setting_decimal(
+    *,
+    env_name: str,
+    config_values: dict[str, str],
+    config_name: str,
+    default: Decimal,
+) -> Decimal:
+    env_value = os.getenv(env_name)
+    if env_value is not None and env_value.strip() != "":
+        return _env_decimal(env_name, default)
+    return _config_decimal(config_values, config_name, default)
+
+
 def _parse_int(value: str, *, source: str) -> int:
     try:
         return int(value.strip())
@@ -111,6 +145,22 @@ def _parse_int(value: str, *, source: str) -> int:
             f"{source} must be a whole number. Got {value!r}. "
             "Hail Mary did not guess because investment limits should be explicit."
         ) from exc
+
+
+def _parse_decimal(value: str, *, source: str) -> Decimal:
+    try:
+        parsed = Decimal(value.strip())
+    except InvalidOperation as exc:
+        raise ConfigError(
+            f"{source} must be a number. Got {value!r}. "
+            "Hail Mary did not guess because portfolio assumptions should be explicit."
+        ) from exc
+    if not parsed.is_finite():
+        raise ConfigError(
+            f"{source} must be a finite number. Got {value!r}. "
+            "Hail Mary did not guess because portfolio assumptions should be explicit."
+        )
+    return parsed
 
 
 def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> AppConfig:
@@ -173,6 +223,42 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             config_name="max_check",
             default=10_000,
         ),
+        reserve_percent=_setting_decimal(
+            env_name="HAILMARY_RESERVE_PERCENT",
+            config_values=saved_values,
+            config_name="reserve_percent",
+            default=Decimal("0"),
+        ),
+        reserve_dollars=_setting_int(
+            env_name="HAILMARY_RESERVE_DOLLARS",
+            config_values=saved_values,
+            config_name="reserve_dollars",
+            default=0,
+        ),
+        estimated_dilution_percent=_setting_decimal(
+            env_name="HAILMARY_ESTIMATED_DILUTION_PERCENT",
+            config_values=saved_values,
+            config_name="estimated_dilution_percent",
+            default=Decimal("0"),
+        ),
+        platform_fee_percent=_setting_decimal(
+            env_name="HAILMARY_PLATFORM_FEE_PERCENT",
+            config_values=saved_values,
+            config_name="platform_fee_percent",
+            default=Decimal("0"),
+        ),
+        carry_percent=_setting_decimal(
+            env_name="HAILMARY_CARRY_PERCENT",
+            config_values=saved_values,
+            config_name="carry_percent",
+            default=Decimal("0"),
+        ),
+        gross_return_multiple=_setting_decimal(
+            env_name="HAILMARY_GROSS_RETURN_MULTIPLE",
+            config_values=saved_values,
+            config_name="gross_return_multiple",
+            default=Decimal("5"),
+        ),
         meridian_profile_dir=_meridian_profile_dir(
             resolved_data_dir,
             saved_values,
@@ -182,6 +268,12 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         enable_web_research=enable_web_research,
         mock_llm=mock_llm,
     )
+    return validate_investment_settings(config)
+
+
+def validate_investment_settings(config: AppConfig) -> AppConfig:
+    """Validate deterministic investment and portfolio assumptions."""
+
     _ensure_investment_limits(config)
     return config
 
@@ -190,7 +282,7 @@ def validate_local_state(config: AppConfig) -> AppConfig:
     """Validate generated-output paths without creating local folders."""
 
     config = _expand_config_paths(config)
-    _ensure_investment_limits(config)
+    validate_investment_settings(config)
     _ensure_generated_path_not_current_or_root(config.data_dir, purpose="data directory")
     _ensure_data_dir_not_config_dir(config)
     _ensure_dedicated_data_dir(config.data_dir)
@@ -348,6 +440,8 @@ def _display_path_from_cwd(path: Path) -> Path:
 def _ensure_investment_limits(config: AppConfig) -> None:
     if config.capital_budget < 0:
         raise ConfigError("The capital budget cannot be negative.")
+    if config.reserve_dollars < 0:
+        raise ConfigError("The reserve dollars cannot be negative.")
     if config.max_check > MAX_CHECK_SIZE:
         raise ConfigError("The maximum check size cannot be above $10K.")
     if config.max_check not in CHECK_SIZE_TIERS:
@@ -356,6 +450,26 @@ def _ensure_investment_limits(config: AppConfig) -> None:
         raise ConfigError(f"The minimum check size must be one of {CHECK_SIZE_TIER_TEXT}.")
     if config.min_check > config.max_check:
         raise ConfigError("The minimum check size cannot be higher than the maximum check size.")
+    if config.reserve_percent > 0 and config.reserve_dollars > 0:
+        raise ConfigError(
+            "Use either reserve percent or reserve dollars, not both. "
+            "Hail Mary did not guess which reserve should control the portfolio budget."
+        )
+    _ensure_percent(config.reserve_percent, name="reserve percent")
+    _ensure_percent(config.estimated_dilution_percent, name="estimated dilution percent")
+    _ensure_percent(config.platform_fee_percent, name="platform fee percent")
+    _ensure_percent(config.carry_percent, name="carry percent")
+    if not config.gross_return_multiple.is_finite():
+        raise ConfigError("The gross return multiple must be a finite number.")
+    if config.gross_return_multiple < 0:
+        raise ConfigError("The gross return multiple cannot be negative.")
+
+
+def _ensure_percent(value: Decimal, *, name: str) -> None:
+    if not value.is_finite():
+        raise ConfigError(f"The {name} must be a finite number.")
+    if value < 0 or value > 100:
+        raise ConfigError(f"The {name} must be between 0 and 100.")
 
 
 def _read_local_config(path: Path) -> dict[str, str]:
@@ -399,7 +513,7 @@ def _config_scalar_to_string(value: Any, *, path: Path, key: str) -> str | None:
         return None
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, int):
+    if isinstance(value, int | float):
         return str(value)
     if isinstance(value, str):
         return value.strip()
@@ -772,11 +886,21 @@ log_level: {_yaml_string(config.log_level)}
 capital_budget: {config.capital_budget}
 min_check: {config.min_check}
 max_check: {config.max_check}
+reserve_percent: {_decimal_text(config.reserve_percent)}
+reserve_dollars: {config.reserve_dollars}
+estimated_dilution_percent: {_decimal_text(config.estimated_dilution_percent)}
+platform_fee_percent: {_decimal_text(config.platform_fee_percent)}
+carry_percent: {_decimal_text(config.carry_percent)}
+gross_return_multiple: {_decimal_text(config.gross_return_multiple)}
 meridian_profile_dir: {_yaml_string(config.meridian_profile_dir.as_posix())}
 enable_ocr: {enable_ocr}
 enable_web_research: {web_research}
 mock_llm: {mock_llm}
 """
+
+
+def _decimal_text(value: Decimal) -> str:
+    return format(value.normalize(), "f")
 
 
 def _yaml_string(value: str) -> str:

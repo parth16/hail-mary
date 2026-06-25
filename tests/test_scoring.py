@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import stat
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -152,6 +153,38 @@ def test_score_evidence_store_passes_with_no_evidence() -> None:
     assert scored.triggered_kill_gates[0].name == "No usable source-linked evidence"
 
 
+def test_scored_deal_rejects_invalid_check_size_contracts() -> None:
+    def make_scored_deal(
+        *,
+        recommendation: Recommendation,
+        check_size: int,
+    ) -> ScoredDeal:
+        return ScoredDeal(
+            deal_id="deal_contract",
+            company_name="ContractCo",
+            recommendation=recommendation,
+            check_size=check_size,
+            total_score=80,
+            one_line_reason="Synthetic contract test.",
+        )
+
+    with pytest.raises(ValueError, match="check_size must be one of"):
+        make_scored_deal(
+            recommendation=Recommendation.PASS,
+            check_size=3_000,
+        )
+    with pytest.raises(ValueError, match="PASS recommendations must use"):
+        make_scored_deal(
+            recommendation=Recommendation.PASS,
+            check_size=1_000,
+        )
+    with pytest.raises(ValueError, match="INVEST recommendations must use"):
+        make_scored_deal(
+            recommendation=Recommendation.INVEST,
+            check_size=0,
+        )
+
+
 def test_score_evidence_store_invests_when_verified_evidence_is_strong() -> None:
     evidence = [
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
@@ -196,6 +229,26 @@ def test_score_evidence_store_keeps_65_to_74_as_pass() -> None:
     assert 65 <= scored.total_score <= 74
     assert scored.recommendation == Recommendation.PASS
     assert scored.check_size == 0
+
+
+def test_portfolio_report_explains_score_below_threshold_skip() -> None:
+    evidence = [
+        _evidence(
+            "ev_all",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_all"),
+        _claim("discount", "20%", "ev_all"),
+        _claim("round size", "$1M", "ev_all"),
+    ]
+    config = AppConfig(data_dir=Path("data"))
+    scored = score_evidence_store(_store(evidence=evidence, claims=claims), config=config)
+
+    report = render_portfolio_report([scored], config=config)
+
+    assert "Score below the 75/100 INVEST threshold." in report
 
 
 def test_score_evidence_store_passes_when_terms_conflict() -> None:
@@ -1169,6 +1222,53 @@ def test_score_latest_ingestion_allocates_scarce_capital_by_score(
     assert scored_by_company["A Lower Score"].check_size == 0
 
 
+def test_score_latest_ingestion_allocates_after_reserve_percent(
+    tmp_path: Path,
+) -> None:
+    stores = [
+        _strong_store(deal_id="deal_alpha", company_name="Alpha Reserve"),
+        _strong_store(deal_id="deal_zeta", company_name="Zeta Reserve"),
+    ]
+    _write_ingestion_summary(tmp_path, stores)
+
+    result = score_latest_ingestion(
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            capital_budget=5_000,
+            reserve_percent=Decimal("50"),
+        )
+    )
+
+    scored_by_company = {deal.company_name: deal for deal in result.scored_deals}
+    assert scored_by_company["Alpha Reserve"].recommendation == Recommendation.INVEST
+    assert scored_by_company["Alpha Reserve"].check_size == 2_500
+    assert scored_by_company["Zeta Reserve"].recommendation == Recommendation.PASS
+    assert scored_by_company["Zeta Reserve"].check_size == 0
+
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    assert "Reserve: $2,500 (50% reserve)" in report
+    assert "Allocatable capital after reserve: $2,500" in report
+    assert "No allocatable capital remained for an allowed nonzero check." in report
+
+
+def test_score_latest_ingestion_respects_max_check_in_portfolio_allocation(
+    tmp_path: Path,
+) -> None:
+    store = _strong_store(deal_id="deal_max", company_name="Max Check")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = score_latest_ingestion(
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            max_check=1_000,
+        )
+    )
+
+    assert result.scored_deals[0].recommendation == Recommendation.INVEST
+    assert result.scored_deals[0].check_size == 1_000
+
+
 def test_score_latest_ingestion_does_not_penalize_fresh_local_files(
     tmp_path: Path,
 ) -> None:
@@ -1235,13 +1335,20 @@ def test_score_latest_ingestion_writes_private_portfolio_report(tmp_path: Path) 
     assert stat.S_IMODE(portfolio_report_path.stat().st_mode) == 0o600
     report = portfolio_report_path.read_text(encoding="utf-8")
     assert report.startswith("# Hail Mary Portfolio Comparison Report")
-    assert "## Portfolio Constraints" in report
+    assert "## Portfolio Scenario And Constraints" in report
+    assert "Starting capital budget: $100,000" in report
+    assert "Reserve: $0 (no reserve)" in report
+    assert "Allocatable capital after reserve: $100,000" in report
     assert "Allowed check sizes: $0, $1K, $2.5K, $5K, $7.5K, $10K" in report
     assert "Configured minimum check: $1K" in report
     assert "Configured maximum check: $10K" in report
     assert "## Ranked Deals" in report
+    assert "## Skipped Deals" in report
+    assert "## Net Return Math" in report
     assert "## Deal Details" in report
     assert "Memo path:" in report
+    assert "Carry means the share of profits paid to the fund manager or platform." in report
+    assert "Dilution means ownership reduction from future fundraising." in report
 
 
 def test_render_portfolio_report_ranks_final_scored_deals_deterministically(
@@ -1359,6 +1466,52 @@ def test_portfolio_report_preserves_allocation_order_when_early_pass_spends_no_c
     assert report.index(high_minimum_row) < report.index(affordable_row)
     assert "| $2.5K | $2.5K |" in report
     assert "| $2.5K | $0 |" in report
+
+
+def test_portfolio_report_handles_all_pass_portfolio(tmp_path: Path) -> None:
+    stores = [
+        _store(evidence=[], claims=[], deal_id="deal_empty_a", company_name="Empty A"),
+        _store(evidence=[], claims=[], deal_id="deal_empty_b", company_name="Empty B"),
+    ]
+    _write_ingestion_summary(tmp_path, stores)
+
+    result = score_latest_ingestion(config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert all(deal.recommendation == Recommendation.PASS for deal in result.scored_deals)
+    assert all(deal.check_size == 0 for deal in result.scored_deals)
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    assert "No capital was allocated, so every return case starts from $0 invested." in report
+    assert "| 1 | Empty A | 9/100 | No usable source-linked evidence was available. |" in report
+    assert "| 2 | Empty B | 9/100 | No usable source-linked evidence was available. |" in report
+
+
+def test_render_portfolio_report_includes_net_return_math_after_fees_carry_and_dilution(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        estimated_dilution_percent=Decimal("10"),
+        platform_fee_percent=Decimal("2"),
+        carry_percent=Decimal("20"),
+        gross_return_multiple=Decimal("3"),
+    )
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_return", company_name="Return Math"),
+        config=config,
+    )
+
+    report = render_portfolio_report([scored], config=config)
+
+    assert "Carry means the share of profits paid to the fund manager or platform." in report
+    assert "Dilution means ownership reduction from future fundraising." in report
+    assert (
+        "| Configured | 3x | $5,000 | $15,000 | $13,500 | $100 | $1,700 | "
+        "$11,800 | $6,700 | 2.31x |"
+    ) in report
+    assert "| Sensitivity 1x | 1x |" in report
+    assert "| Sensitivity 3x | 3x |" in report
+    assert "| Sensitivity 10x | 10x |" in report
 
 
 def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> None:
@@ -1567,6 +1720,66 @@ def test_score_deals_command_has_rich_success_output(tmp_path: Path) -> None:
     assert "Scored 1 deal." in result.output
     assert "Saved the portfolio comparison report to" in result.output
     assert "portfolio-comparison-report.md" in result.output
+
+
+def test_score_deals_command_accepts_portfolio_scenario_overrides(tmp_path: Path) -> None:
+    store = _strong_store(deal_id="deal_one", company_name="Deal One")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(
+        app,
+        [
+            "score-deals",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--capital-budget",
+            "2500",
+            "--reserve-dollars",
+            "1500",
+            "--estimated-dilution-percent",
+            "10",
+            "--platform-fee-percent",
+            "5",
+            "--carry-percent",
+            "20",
+            "--gross-return-multiple",
+            "8",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report_path = tmp_path / "data" / "reports" / "portfolio-comparison-report.md"
+    report = report_path.read_text(encoding="utf-8")
+    assert "Starting capital budget: $2,500" in report
+    assert "Reserve: $1,500 (configured reserve dollars)" in report
+    assert "Allocatable capital after reserve: $1,000" in report
+    assert "Estimated dilution: 10%" in report
+    assert "Platform fee: 5%" in report
+    assert "Carry: 20%" in report
+    assert "Gross return multiple: 8x" in report
+    assert "| 1 | Deal One | INVEST | $1K |" in report
+
+
+def test_score_deals_command_rejects_conflicting_reserve_overrides(tmp_path: Path) -> None:
+    store = _strong_store(deal_id="deal_one", company_name="Deal One")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(
+        app,
+        [
+            "score-deals",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--reserve-percent",
+            "10",
+            "--reserve-dollars",
+            "1000",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Use either reserve percent or reserve dollars" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_score_deals_missing_ingestion_summary_has_plain_english_error(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -518,6 +519,62 @@ def test_load_config_accepts_yaml_comments_and_quotes(
     assert config.enable_web_research is True
 
 
+def test_load_config_reads_portfolio_scenario_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "data_dir: local-data",
+                "reserve_percent: 12.5",
+                "reserve_dollars: 0",
+                "estimated_dilution_percent: '20'",
+                "platform_fee_percent: 2.5",
+                "carry_percent: 10",
+                "gross_return_multiple: '7.25'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config()
+
+    assert config.reserve_percent == Decimal("12.5")
+    assert config.reserve_dollars == 0
+    assert config.estimated_dilution_percent == Decimal("20")
+    assert config.platform_fee_percent == Decimal("2.5")
+    assert config.carry_percent == Decimal("10")
+    assert config.gross_return_multiple == Decimal("7.25")
+
+
+def test_portfolio_scenario_env_overrides_saved_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "\n".join(
+            [
+                "data_dir: local-data",
+                "carry_percent: 10",
+                "gross_return_multiple: 4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HAILMARY_CARRY_PERCENT", "15.5")
+    monkeypatch.setenv("HAILMARY_GROSS_RETURN_MULTIPLE", "8")
+
+    config = load_config()
+
+    assert config.carry_percent == Decimal("15.5")
+    assert config.gross_return_multiple == Decimal("8")
+
+
 def test_load_config_rejects_nested_yaml_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -727,6 +784,61 @@ def test_init_rejects_negative_capital_budget(
 
     with pytest.raises(ConfigError, match="capital budget cannot be negative"):
         create_local_state(AppConfig(capital_budget=-1), force=True)
+
+
+def test_negative_reserve_dollars_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_RESERVE_DOLLARS", "-1")
+
+    with pytest.raises(ConfigError, match="reserve dollars cannot be negative"):
+        load_config()
+
+
+def test_reserve_percent_and_dollars_cannot_both_be_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="either reserve percent or reserve dollars"):
+        create_local_state(
+            AppConfig(
+                reserve_percent=Decimal("10"),
+                reserve_dollars=1_000,
+            ),
+            force=True,
+        )
+
+
+def test_portfolio_percent_above_100_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_PLATFORM_FEE_PERCENT", "100.01")
+
+    with pytest.raises(ConfigError, match="platform fee percent must be between 0 and 100"):
+        load_config()
+
+
+def test_negative_gross_return_multiple_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_GROSS_RETURN_MULTIPLE", "-0.1")
+
+    with pytest.raises(ConfigError, match="gross return multiple cannot be negative"):
+        load_config()
+
+
+def test_nonfinite_portfolio_decimal_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_CARRY_PERCENT", "NaN")
+
+    with pytest.raises(ConfigError, match="must be a finite number"):
+        load_config()
 
 
 def test_non_tier_check_sizes_are_rejected(

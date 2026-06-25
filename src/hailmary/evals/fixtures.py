@@ -2367,9 +2367,14 @@ def run_memo_snapshot_fixture() -> None:
     )
     expected_portfolio_fragments = [
         "# Hail Mary Portfolio Comparison Report",
-        "## Portfolio Constraints",
+        "## Portfolio Scenario And Constraints",
+        "Starting capital budget: $100,000",
         "Allowed check sizes: $0, $1K, $2.5K, $5K, $7.5K, $10K",
         "## Ranked Deals",
+        "## Skipped Deals",
+        "## Net Return Math",
+        "Carry means the share of profits paid to the fund manager or platform.",
+        "Dilution means ownership reduction from future fundraising.",
         "Synthetic EvalCo",
         "## Deal Details",
         "Key risks:",
