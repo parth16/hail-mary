@@ -141,6 +141,34 @@ def test_raw_only_text_page_is_kept_after_watermark_cleanup(tmp_path: Path) -> N
     assert "Not for distribution" in result.combined_raw_text
 
 
+def test_image_extraction_records_vision_needed_metadata(tmp_path: Path) -> None:
+    image_path = tmp_path / "scan.png"
+    image_path.write_bytes(b"synthetic image placeholder")
+
+    result = extract_document(image_path)
+
+    assert result.extraction_quality == ExtractionQuality.LOW
+    assert result.ocr_recommended
+    assert result.vision_recommended
+    assert result.page_count == 1
+    assert result.pages[0].needs_ocr
+    assert result.pages[0].vision_recommended
+    assert result.pages[0].source_span_start == 0
+    assert result.pages[0].source_span_end == 0
+    assert result.combined_text == ""
+    assert result.notes is not None
+    assert "local OCR" in result.notes
+
+
+def test_missing_image_file_is_recorded_without_crashing(tmp_path: Path) -> None:
+    result = extract_document(tmp_path / "missing.png")
+
+    assert result.pages == []
+    assert result.extraction_quality == ExtractionQuality.LOW
+    assert result.notes is not None
+    assert "Could not read the image file" in result.notes
+
+
 def test_pdf_empty_page_is_marked_for_ocr_and_vision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -164,6 +192,10 @@ def test_pdf_empty_page_is_marked_for_ocr_and_vision(
     assert result.pages[0].vision_recommended
     assert result.pages[0].source_span_start == 0
     assert result.pages[0].source_span_end == 0
+    assert result.pages[0].notes is not None
+    assert "no extracted text" in result.pages[0].notes
+    assert result.notes is not None
+    assert "local OCR" in result.notes
 
 
 def test_pdf_short_text_page_does_not_recommend_ocr(
@@ -203,9 +235,9 @@ def test_pdf_repeated_short_text_pages_recommend_ocr(
 
     class Reader:
         pages = [
-            TextPage("Customer logo slide"),
-            TextPage("Product demo slide"),
-            TextPage("Market map slide"),
+            TextPage("Customer logo slide with visual proof"),
+            TextPage("Product demo slide with embedded screenshot"),
+            TextPage("Market map slide with competitor logos"),
         ]
 
     monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
@@ -215,6 +247,41 @@ def test_pdf_repeated_short_text_pages_recommend_ocr(
     assert result.ocr_recommended
     assert result.vision_recommended
     assert [page.needs_ocr for page in result.pages] == [True, True, True]
+    assert result.notes is not None
+    assert "local OCR" in result.notes
+
+
+def test_pdf_image_backed_low_text_page_recommends_ocr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf_path = tmp_path / "scan.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+
+    class ImagePage:
+        images = [object()]
+
+        def extract_text(self) -> str:
+            return "1"
+
+    class TextPage:
+        def extract_text(self) -> str:
+            return "Readable traction text with customer growth and revenue context."
+
+    class Reader:
+        pages = [ImagePage(), TextPage()]
+
+    monkeypatch.setattr(extractors, "PdfReader", lambda _: Reader())
+
+    result = extract_document(pdf_path)
+
+    assert result.ocr_recommended
+    assert result.vision_recommended
+    assert result.pages[0].needs_ocr
+    assert result.pages[0].vision_recommended
+    assert result.pages[0].notes is not None
+    assert "image content" in result.pages[0].notes
+    assert result.notes is not None
+    assert "local OCR" in result.notes
 
 
 def test_pdf_low_text_page_recommends_ocr(
@@ -265,6 +332,7 @@ def test_pdf_low_text_divider_with_readable_page_does_not_warn_document(
     assert result.pages[0].needs_ocr
     assert not result.ocr_recommended
     assert not result.vision_recommended
+    assert result.notes is None
 
 
 def test_pdf_empty_page_with_readable_page_warns_document(
@@ -292,6 +360,10 @@ def test_pdf_empty_page_with_readable_page_warns_document(
 
     assert result.ocr_recommended
     assert result.vision_recommended
+    assert result.pages[0].notes is not None
+    assert "no extracted text" in result.pages[0].notes
+    assert result.notes is not None
+    assert "local OCR" in result.notes
 
 
 def test_pdf_mostly_low_text_pages_recommend_ocr(
