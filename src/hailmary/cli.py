@@ -1096,15 +1096,18 @@ def collect_usaspending_awards_command(
         return
 
     if result.output_path is None:
+        lines = [
+            _plain(
+                f"No exact recipient-name USAspending {result_word} were found "
+                f"for {result.deal_count} {company_word}."
+            ),
+            _plain("No results file was saved."),
+        ]
+        for warning in result.warnings:
+            lines.append(_plain(f"Warning: {warning}"))
         _print_section(
             "USAspending results",
-            [
-                _plain(
-                    f"No exact recipient-name USAspending {result_word} were found "
-                    f"for {result.deal_count} {company_word}."
-                ),
-                _plain("No results file was saved."),
-            ],
+            lines,
             style="yellow",
         )
         return

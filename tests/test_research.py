@@ -12,6 +12,7 @@ from typing import Protocol, cast
 import pytest
 from typer.testing import CliRunner
 
+import hailmary.cli as cli_module
 import hailmary.research.collection as collection_module
 from hailmary.agents.packets import build_agent_input_packet
 from hailmary.cli import app
@@ -19,6 +20,7 @@ from hailmary.config import AppConfig
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.research import (
     MeridianWorkflowError,
+    ResearchCollectionDealSummary,
     ResearchCollectionError,
     ResearchImportError,
     ResearchPlanError,
@@ -29,6 +31,7 @@ from hailmary.research import (
     UsaspendingApiError,
     UsaspendingAwardRecord,
     UsaspendingAwardsResponse,
+    UsaspendingCollectionRunSummary,
     WebResearchError,
     builtin_research_providers,
     collect_usaspending_awards,
@@ -727,14 +730,18 @@ def test_collect_usaspending_awards_does_not_report_no_match_after_page_cap(
         }
     )
 
-    with pytest.raises(ResearchCollectionError, match="more than 20 pages"):
-        collect_usaspending_awards(
-            config=config,
-            company_names=["Acme AI"],
-            limit=5,
-            client=client,
-            collected_at=BUILT_AT,
-        )
+    result = collect_usaspending_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is None
+    assert result.result_count == 0
+    assert result.warnings
+    assert "did not find exact recipient-name matches" in result.warnings[0]
 
 
 def test_collect_usaspending_awards_skips_unrelated_malformed_rows(
@@ -856,6 +863,63 @@ def test_collect_usaspending_awards_keeps_matches_when_page_cap_is_hit(
     assert "more fuzzy result pages" in result.warnings[0]
     saved = json.loads(result.output_path.read_text(encoding="utf-8"))
     assert saved["results"][0]["title"] == "USAspending award FAKE-123 for Acme AI"
+
+
+def test_collect_usaspending_awards_preserves_prior_company_results_at_page_cap(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    responses = {
+        ("Acme AI", 1): _usaspending_response(
+            [
+                _usaspending_award(
+                    recipient_name="Acme AI",
+                    award_id="FAKE-123",
+                    generated_internal_id="CONT_AWD_FAKE_123",
+                )
+            ]
+        )
+    }
+    responses.update(
+        {
+            ("Beta Robotics", page): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Beta Robotics Federal",
+                        award_id=f"FAKE-BETA-{page}",
+                        generated_internal_id=f"CONT_AWD_BETA_{page}",
+                    )
+                ],
+                has_next=True,
+            )
+            for page in range(1, 21)
+        }
+    )
+    client = _FakeUsaspendingAwardsClient(responses)
+
+    result = collect_usaspending_awards(
+        config=config,
+        company_names=["Acme AI", "Beta Robotics"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.result_count == 1
+    assert [(deal.company_name, deal.result_count) for deal in result.deals] == [
+        ("Acme AI", 1),
+        ("Beta Robotics", 0),
+    ]
+    assert result.warnings
+    assert "Beta Robotics" in result.warnings[0]
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert len(saved["results"]) == 1
+    assert saved["results"][0]["company_name"] == "Acme AI"
 
 
 def test_collect_usaspending_awards_normalizes_saved_company_name(
@@ -1256,6 +1320,65 @@ def test_collect_usaspending_awards_command_dry_run_reports_no_api_contact(
     )
     assert "No API requests were sent" in result.output
     assert not list((tmp_path / "data" / "research-results").glob("*.json"))
+
+
+def test_collect_usaspending_awards_command_reports_incomplete_search_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_collect_usaspending_awards(
+        *,
+        config: AppConfig,
+        company_names: list[str] | None,
+        limit: int,
+        dry_run: bool,
+    ) -> UsaspendingCollectionRunSummary:
+        _ = config
+        assert company_names == ["Acme AI"]
+        assert limit == 5
+        assert dry_run is False
+        return UsaspendingCollectionRunSummary(
+            output_path=None,
+            collected_at=BUILT_AT,
+            deals=[
+                ResearchCollectionDealSummary(
+                    company_name="Acme AI",
+                    result_count=0,
+                )
+            ],
+            warnings=[
+                "USAspending still had more fuzzy result pages for Acme AI "
+                "after Hail Mary checked 20 pages. Hail Mary did not find "
+                "exact recipient-name matches, but more USAspending results may exist."
+            ],
+        )
+
+    monkeypatch.setattr(
+        cli_module,
+        "collect_usaspending_awards",
+        fake_collect_usaspending_awards,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-usaspending-awards",
+            "--company",
+            "Acme AI",
+            "--limit",
+            "5",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = _plain_cli_output(result.output)
+    assert "No exact recipient-name USAspending results were found" in output
+    assert "Warning: USAspending still had more fuzzy result pages" in output
+    assert "No results file was saved" in output
 
 
 def test_prepare_meridian_workflow_writes_private_workflow_and_template(

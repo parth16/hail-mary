@@ -624,21 +624,25 @@ def collect_usaspending_awards(
                     break
                 page += 1
                 if page > USASPENDING_MAX_PAGES:
-                    if deal_results:
-                        run_warnings.append(
-                            "USAspending still had more fuzzy result pages for "
-                            f"{deal.company_name} after Hail Mary checked "
-                            f"{USASPENDING_MAX_PAGES} pages. Hail Mary saved "
-                            f"{len(deal_results)} exact recipient-name matches "
-                            "it already validated, but more "
-                            "USAspending results may exist."
+                    match_count = len(deal_results)
+                    if match_count == 1:
+                        match_text = (
+                            "saved 1 exact recipient-name match it already validated"
                         )
-                        break
-                    raise UsaspendingApiError(
-                        "USAspending returned more than 20 pages before Hail Mary "
-                        "could finish checking exact recipient-name matches. Narrow "
-                        "the company name and try again."
+                    elif match_count > 1:
+                        match_text = (
+                            f"saved {match_count} exact recipient-name matches it "
+                            "already validated"
+                        )
+                    else:
+                        match_text = "did not find exact recipient-name matches"
+                    run_warnings.append(
+                        "USAspending still had more fuzzy result pages for "
+                        f"{deal.company_name} after Hail Mary checked "
+                        f"{USASPENDING_MAX_PAGES} pages. Hail Mary {match_text}, "
+                        "but more USAspending results may exist."
                     )
+                    break
         except UsaspendingApiError as exc:
             raise ResearchCollectionError(str(exc)) from exc
         results.extend(deal_results)
