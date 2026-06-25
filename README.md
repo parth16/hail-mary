@@ -50,6 +50,9 @@ uv run hailmary prepare-research-results-template
 uv run hailmary prepare-public-research-results \
   --company "ExampleCo" \
   --sec-form-d-results sec-form-d-results.json
+uv run hailmary prepare-meridian-workflow \
+  --company "ExampleCo" \
+  --meridian-url "https://portal.angellist.com/m/example/invest"
 uv run hailmary import-research-results research-results.json --dry-run
 uv run hailmary import-research-results research-results.json
 ```
@@ -79,6 +82,8 @@ uv run hailmary import-research-results research-results.json
   ]
 }
 ```
+
+`prepare-meridian-workflow` writes a private manual workflow under `data/meridian-workflows/` and a fillable Meridian results template under `data/research-results-templates/`. It does not open Meridian, sign in, bypass access controls, or save portal content. Use normal authenticated access, collect only facts you are allowed to save locally, fill in the template with the time viewed and Meridian page URL, then run `import-research-results --dry-run`. Use the base Meridian deal URL without extra text after `?` or `#`.
 
 `import-research-results` reads a local JSON file of manually collected external research and appends validated records to the ignored evidence stores under `data/processed/`. Use `--dry-run` first to validate the file and preview new or duplicate records without writing anything. The command does not fetch websites or call APIs. Each imported result must name the deal by `deal_id` or exact `company_name`, include provider details, `retrieved_at`, either `source_url` or `source_api`, confidence, licensing notes, and the evidence text to cite later. A minimal file looks like:
 

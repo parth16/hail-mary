@@ -29,6 +29,11 @@ from hailmary.schemas.evidence import (
 )
 from hailmary.utils.slug import slugify
 
+from .meridian import (
+    MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
+    MeridianWorkflowError,
+    clean_meridian_url,
+)
 from .providers import builtin_research_providers
 from .schemas import (
     ResearchImportDealSummary,
@@ -65,12 +70,10 @@ RESEARCH_RESULT_FIELDS = {
     "source_kind",
     "document_type",
 }
-TEMPLATE_FACT_FIELDS = {
+TEMPLATE_REQUIRED_FACT_FIELDS = {
     "title",
     "text",
     "retrieved_at",
-    "source_url",
-    "source_api",
     "confidence",
 }
 
@@ -266,11 +269,45 @@ def _is_blank_template_result(result: object) -> bool:
         return False
     if set(result) != RESEARCH_RESULT_FIELDS:
         return False
-    return all(_is_blank_template_value(result.get(field)) for field in TEMPLATE_FACT_FIELDS)
+    if not all(
+        _is_blank_template_value(result.get(field))
+        for field in TEMPLATE_REQUIRED_FACT_FIELDS
+    ):
+        return False
+    if _is_blank_template_value(result.get("source_url")) and _is_blank_template_value(
+        result.get("source_api")
+    ):
+        return True
+    return _is_blank_prefilled_meridian_template_result(result)
 
 
 def _is_blank_template_value(value: object) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _is_blank_prefilled_meridian_template_result(result: dict[str, object]) -> bool:
+    if result.get("provider_id") != "meridian":
+        return False
+    if result.get("source_kind") != SourceKind.MERIDIAN.value:
+        return False
+    if result.get("document_type") != DocumentType.PLATFORM_DEAL_PAGE.value:
+        return False
+    licensing_notes = result.get("licensing_notes")
+    if (
+        not isinstance(licensing_notes, str)
+        or MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes
+    ):
+        return False
+    if not _is_blank_template_value(result.get("source_api")):
+        return False
+    source_url = result.get("source_url")
+    if not isinstance(source_url, str) or not source_url.strip():
+        return False
+    try:
+        clean_meridian_url(source_url)
+    except MeridianWorkflowError:
+        return False
+    return True
 
 
 def _validate_results(results: list[ResearchResultInput], *, imported_at: datetime) -> None:
@@ -292,6 +329,9 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
                 index=display_index,
                 field_name="source_url",
             )
+        if result.source_kind == SourceKind.MERIDIAN:
+            _validate_meridian_result_source(result, index=display_index)
+            _validate_saved_meridian_licensing_notes(result, index=display_index)
         if result.source_api is not None:
             _validate_source_api(result.source_api, index=display_index)
         _validate_known_provider_source_kind(result, index=display_index)
@@ -343,6 +383,43 @@ def _validate_url_reference(source_url: str, *, index: int, field_name: str) -> 
 def _validate_source_api(source_api: str, *, index: int) -> None:
     if _source_api_looks_like_url(source_api):
         _validate_url_reference(source_api, index=index, field_name="source_api")
+
+
+def _validate_meridian_result_source(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    if result.source_url is None:
+        raise ResearchImportError(
+            f"Research result {index} uses Meridian evidence, so source_url must be "
+            "a Meridian deal page URL."
+        )
+    if result.source_api is not None:
+        raise ResearchImportError(
+            f"Research result {index} uses Meridian evidence, so source_api must be "
+            "blank. Keep the safe Meridian deal page URL in source_url."
+        )
+    try:
+        clean_meridian_url(result.source_url)
+    except MeridianWorkflowError as exc:
+        raise ResearchImportError(
+            f"Research result {index} source_url is not a safe Meridian deal page URL: "
+            f"{exc}"
+        ) from exc
+
+
+def _validate_saved_meridian_licensing_notes(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    if _saved_licensing_notes(result.licensing_notes):
+        return
+    raise ResearchImportError(
+        f"Research result {index} uses Meridian evidence, so licensing_notes must "
+        "explain the source permissions after the generated template marker is removed."
+    )
 
 
 def _source_api_looks_like_url(source_api: str) -> bool:
@@ -560,7 +637,15 @@ def _evidence_record_for_result(
         source_api=result.source_api,
         retrieved_at=_as_utc(result.retrieved_at),
         external_confidence=result.confidence,
-        licensing_notes=result.licensing_notes,
+        licensing_notes=_saved_licensing_notes(result.licensing_notes),
+    )
+
+
+def _saved_licensing_notes(licensing_notes: str) -> str:
+    if MERIDIAN_WORKFLOW_TEMPLATE_MARKER not in licensing_notes:
+        return licensing_notes
+    return " ".join(
+        licensing_notes.replace(MERIDIAN_WORKFLOW_TEMPLATE_MARKER, "").split()
     )
 
 
