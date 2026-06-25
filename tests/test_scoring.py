@@ -1141,6 +1141,63 @@ def test_score_latest_ingestion_allocates_tied_deals_in_report_rank_order(
     assert "| $2.5K | $0 |" in report
 
 
+def test_portfolio_report_preserves_allocation_order_when_early_pass_spends_no_capital(
+    tmp_path: Path,
+) -> None:
+    high_minimum_evidence = [
+        _evidence(
+            "ev_high_min_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. Minimum investment $5K.",
+            deal_id="deal_high_min",
+        ),
+        _evidence(
+            "ev_high_min_traction",
+            "ARR revenue growth with paid customers and retention.",
+            deal_id="deal_high_min",
+        ),
+        _evidence(
+            "ev_high_min_funding",
+            "Lead investor committed and seed round is active.",
+            deal_id="deal_high_min",
+        ),
+    ]
+    high_minimum_store = _store(
+        evidence=high_minimum_evidence,
+        claims=[
+            _claim("valuation cap", "$8M", "ev_high_min_terms", deal_id="deal_high_min"),
+            _claim("discount", "20%", "ev_high_min_terms", deal_id="deal_high_min"),
+            _claim("round size", "$1M", "ev_high_min_terms", deal_id="deal_high_min"),
+            _claim(
+                "minimum investment",
+                "$5K",
+                "ev_high_min_terms",
+                deal_id="deal_high_min",
+            ),
+        ],
+        deal_id="deal_high_min",
+        company_name="High Minimum",
+    )
+    affordable_store = _strong_store(
+        deal_id="deal_affordable",
+        company_name="Affordable",
+    )
+    _write_ingestion_summary(tmp_path, [high_minimum_store, affordable_store])
+
+    result = score_latest_ingestion(
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=2_500)
+    )
+
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    high_minimum_row = "| 1 | High Minimum | PASS | $0 |"
+    affordable_row = "| 2 | Affordable | INVEST | $2.5K |"
+    assert high_minimum_row in report
+    assert affordable_row in report
+    assert report.index(high_minimum_row) < report.index(affordable_row)
+    assert "| $2.5K | $2.5K |" in report
+    assert "| $2.5K | $0 |" in report
+
+
 def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> None:
     strong_scored = score_evidence_store(
         _strong_store(deal_id="deal_strong", company_name="StrongCo"),

@@ -68,6 +68,7 @@ class ScoredDeal(BaseModel):
     capital_remaining_before: int | None = None
     capital_remaining_after: int | None = None
     memo_path: Path | None = None
+    portfolio_rank: int | None = None
 
     @property
     def triggered_kill_gates(self) -> list[KillGate]:

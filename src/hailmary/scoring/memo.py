@@ -73,11 +73,12 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
 
     remaining_capital = config.capital_budget
     scored_by_index: dict[int, ScoredDeal] = {}
+    portfolio_rank_by_index: dict[int, int] = {}
     ranked_inputs = sorted(
         enumerate(scoring_inputs),
         key=lambda item: _portfolio_rank_key(item[1][1]),
     )
-    for index, (store, _, _) in ranked_inputs:
+    for portfolio_rank, (index, (store, _, _)) in enumerate(ranked_inputs, start=1):
         scored_deal = score_evidence_store(
             store,
             config=config,
@@ -85,6 +86,7 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
         )
         remaining_capital = scored_deal.capital_remaining_after or 0
         scored_by_index[index] = scored_deal
+        portfolio_rank_by_index[index] = portfolio_rank
 
     scored_deals: list[ScoredDeal] = []
     for index, (store, _, memo_path) in enumerate(scoring_inputs):
@@ -94,7 +96,14 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
             render_markdown_memo(scored_deal, store),
             description="Markdown memo",
         )
-        scored_deals.append(scored_deal.model_copy(update={"memo_path": memo_path}))
+        scored_deals.append(
+            scored_deal.model_copy(
+                update={
+                    "memo_path": memo_path,
+                    "portfolio_rank": portfolio_rank_by_index[index],
+                }
+            )
+        )
 
     portfolio_report_path = report_dir / PORTFOLIO_REPORT_FILENAME
     _write_private_text(
@@ -182,7 +191,7 @@ def render_portfolio_report(
     *,
     config: AppConfig,
 ) -> str:
-    ranked_deals = sorted(scored_deals, key=_portfolio_rank_key)
+    ranked_deals = sorted(scored_deals, key=_portfolio_report_order_key)
     allocated_capital = sum(deal.check_size for deal in scored_deals)
     remaining_capital = max(0, config.capital_budget - allocated_capital)
     lines = [
@@ -275,6 +284,23 @@ def _portfolio_rank_key(deal: ScoredDeal) -> tuple[int, int, int, int, str, str]
         -deal.check_size,
         deal.company_name.casefold(),
         deal.deal_id.casefold(),
+    )
+
+
+def _portfolio_report_order_key(deal: ScoredDeal) -> tuple[int, int, int, int, int, str, str]:
+    if deal.portfolio_rank is not None:
+        return (0, deal.portfolio_rank, 0, 0, 0, "", "")
+    recommendation_rank, score_rank, confidence_rank, check_rank, company, deal_id = (
+        _portfolio_rank_key(deal)
+    )
+    return (
+        1,
+        recommendation_rank,
+        score_rank,
+        confidence_rank,
+        check_rank,
+        company,
+        deal_id,
     )
 
 
