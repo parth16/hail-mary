@@ -49,6 +49,7 @@ uv sync
 hailmary init
 hailmary ingest-folder ./pitch-decks
 hailmary ingest-folder ./pitch-decks --enable-ocr
+hailmary review-evidence
 hailmary score-deals
 hailmary prepare-agent-packets
 hailmary validate-agent-output output.json packet.json
@@ -77,7 +78,7 @@ hailmary import-research-results research-results.json --dry-run
 hailmary import-research-results research-results.json
 ```
 
-`init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `score-deals` reads the local evidence stores and writes deterministic Markdown memos under `data/reports/`.
+`init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `review-evidence` reads those ignored local evidence stores and shows plain-English summaries of evidence records, claim status, conflicts, OCR use, source freshness, source spans, and citation gaps without printing confidential evidence text by default. Use `--show-text` or `--quote-limit` only when you intentionally want short local excerpts. `score-deals` reads the local evidence stores and writes deterministic Markdown memos under `data/reports/`.
 
 `ingest-folder --enable-ocr` turns on local image-based text reading (OCR). OCR means reading text from images. This can extract text from standalone PNG/JPG files and from PDF pages that look empty or image-backed. Hail Mary uses local `tesseract` and Poppler `pdftoppm` commands when they are available on `PATH`; it does not call cloud OCR services. If those commands are missing or a page cannot be read, ingestion keeps the current OCR-needed warning, saves plain-English notes in the private generated metadata, and continues without crashing. You can also set `HAILMARY_ENABLE_OCR=true` or `enable_ocr: true` in `.hailmary/config.yaml`.
 

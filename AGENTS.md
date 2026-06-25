@@ -102,3 +102,4 @@ Rules for all future Codex runs:
 - PR #49 loop 4: Evidence source spans should survive OCR merge whitespace normalization when the evidence text is the full cleaned page; drop spans only when boilerplate, table removal, or partial evidence changes the mapped text.
 - PR #49 loop 5: OCR merge dedupe should recognize terms wrapped across existing PDF lines before appending one-line OCR text, otherwise repeated deal terms can create duplicate evidence and claims.
 - PR #52 loop 1: Final-decision committee context should include successful specialist limitations, deterministic no-evidence memos must not describe skipped model review as model advice, and capped agent packets should omit conflicts unless every conflict side is visible in selected evidence.
+- PR #51: Evidence review CLIs should stay read-only, avoid local-state validators that mutate Git exclude files, and keep evidence text hidden by default behind explicit bounded excerpts.
