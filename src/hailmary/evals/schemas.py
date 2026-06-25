@@ -9,6 +9,7 @@ class EvalCategory(StrEnum):
     EXTRACTION = "extraction"
     CITATION = "citation"
     CONTRADICTION = "contradiction"
+    RESEARCH_IMPORT = "research_import"
     PROMPT_INJECTION = "prompt_injection"
     SCORE_CALIBRATION = "score_calibration"
     MISSING_DATA = "missing_data"

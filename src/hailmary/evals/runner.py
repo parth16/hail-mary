@@ -74,6 +74,30 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="extraction-ocr-low-text-documents",
+                category=EvalCategory.EXTRACTION,
+                name="OCR and low-text PDF extraction",
+                description=(
+                    "Checks that synthetic PDFs distinguish divider pages, repeated "
+                    "low-text pages, empty pages, OCR flags, vision flags, and source spans."
+                ),
+            ),
+            run=fixtures.run_ocr_low_text_documents_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="extraction-table-edge-cases",
+                category=EvalCategory.EXTRACTION,
+                name="Table extraction edge cases",
+                description=(
+                    "Checks nested HTML tables, row and column spans, sparse XLSX gaps, "
+                    "and empty far-right spreadsheet cells."
+                ),
+            ),
+            run=fixtures.run_table_edge_cases_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="citation-span-mismatch",
                 category=EvalCategory.CITATION,
                 name="Citation span mismatch rejection",
@@ -86,6 +110,18 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="citation-packet-quote-preservation",
+                category=EvalCategory.CITATION,
+                name="Packet truncation preserves cited quotes",
+                description=(
+                    "Checks that agent packet truncation preserves selected claim quotes "
+                    "instead of blindly keeping leading text."
+                ),
+            ),
+            run=lambda _: fixtures.run_packet_quote_preservation_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="contradiction-valid-conflict",
                 category=EvalCategory.CONTRADICTION,
                 name="Conflicting deal-term gate",
@@ -95,6 +131,42 @@ def _eval_definitions() -> list[EvalDefinition]:
                 ),
             ),
             run=lambda _: fixtures.run_contradiction_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="contradiction-stale-conflict-cleanup",
+                category=EvalCategory.CONTRADICTION,
+                name="Stale conflict citation cleanup",
+                description=(
+                    "Checks that stale conflict citations do not trigger the conflict "
+                    "kill gate or displace still-valid score-factor evidence."
+                ),
+            ),
+            run=lambda _: fixtures.run_stale_conflict_cleanup_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="research-public-source-import",
+                category=EvalCategory.RESEARCH_IMPORT,
+                name="Public-source research import lineage",
+                description=(
+                    "Checks local public-source result preparation, exact-match import, "
+                    "source lineage, refreshed claims, and packet metadata minimization."
+                ),
+            ),
+            run=fixtures.run_public_source_import_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="research-usaspending-api-pagination",
+                category=EvalCategory.RESEARCH_IMPORT,
+                name="USAspending pagination and page-cap handling",
+                description=(
+                    "Checks fake USAspending pagination, exact-match retention, page-cap "
+                    "warnings, and multi-company result preservation without network calls."
+                ),
+            ),
+            run=fixtures.run_usaspending_pagination_fixture,
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
@@ -131,6 +203,18 @@ def _eval_definitions() -> list[EvalDefinition]:
                 ),
             ),
             run=fixtures.run_prompt_injection_docx_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="prompt-injection-boundaries",
+                category=EvalCategory.PROMPT_INJECTION,
+                name="Prompt-injection boundary detection",
+                description=(
+                    "Checks prefixed, punctuation-joined, and mid-line source "
+                    "instructions while allowing benign prompt-product examples."
+                ),
+            ),
+            run=lambda _: fixtures.run_prompt_injection_boundaries_fixture(),
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
@@ -178,6 +262,19 @@ def _eval_definitions() -> list[EvalDefinition]:
                 ),
             ),
             run=lambda _: fixtures.run_memo_snapshot_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="memo-cited-conflict-evidence",
+                category=EvalCategory.MEMO_SNAPSHOT,
+                name="Memo includes cited and valid conflict evidence",
+                description=(
+                    "Checks that memos include required sections, cited evidence beyond "
+                    "the first 25 records, and valid conflict evidence while excluding "
+                    "stale conflict evidence."
+                ),
+            ),
+            run=lambda _: fixtures.run_memo_cited_conflict_evidence_fixture(),
         ),
     ]
 

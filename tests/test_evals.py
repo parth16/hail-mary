@@ -23,6 +23,7 @@ def test_builtin_eval_metadata_covers_required_phase_6_categories() -> None:
         EvalCategory.EXTRACTION,
         EvalCategory.CITATION,
         EvalCategory.CONTRADICTION,
+        EvalCategory.RESEARCH_IMPORT,
         EvalCategory.PROMPT_INJECTION,
         EvalCategory.SCORE_CALIBRATION,
         EvalCategory.MISSING_DATA,
@@ -33,7 +34,7 @@ def test_builtin_eval_metadata_covers_required_phase_6_categories() -> None:
 def test_run_builtin_evals_passes_all_synthetic_cases(tmp_path: Path) -> None:
     summary = run_builtin_evals(work_dir=tmp_path)
 
-    assert summary.total_count == 10
+    assert summary.total_count == 18
     assert summary.passed
     assert summary.failed_results == []
 
@@ -63,6 +64,20 @@ def test_run_builtin_evals_filters_prompt_injection_document_cases(
         "prompt-injection-recommendation",
         "prompt-injection-pdf-recommendation",
         "prompt-injection-docx-recommendation",
+        "prompt-injection-boundaries",
+    }
+    assert summary.passed
+
+
+def test_run_builtin_evals_filters_research_import_cases(tmp_path: Path) -> None:
+    summary = run_builtin_evals(
+        categories=[EvalCategory.RESEARCH_IMPORT],
+        work_dir=tmp_path,
+    )
+
+    assert {result.id for result in summary.results} == {
+        "research-public-source-import",
+        "research-usaspending-api-pagination",
     }
     assert summary.passed
 
