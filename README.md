@@ -65,6 +65,10 @@ HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
   hailmary collect-usaspending-awards --company "ExampleCo" --dry-run
 HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
   hailmary collect-sbir-awards --company "ExampleCo" --dry-run
+HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
+  hailmary collect-sec-form-d-filings --company "ExampleCo" --dry-run
+HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
+  hailmary collect-github-repositories --company "ExampleCo" --dry-run
 hailmary prepare-meridian-workflow \
   --company "ExampleCo" \
   --meridian-url "https://portal.angellist.com/m/example/invest"
@@ -102,7 +106,13 @@ hailmary import-research-results research-results.json
 
 Use the matching option for each local source file: `--sec-form-d-results`, `--sam-gov-results`, `--usaspending-results`, `--sbir-results`, `--uspto-results`, or `--github-results`.
 
+`collect-sec-form-d-filings` is an optional live public collector for SEC EDGAR Form D filings. It requires `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run`; a real run sends only the `--company` values you provide to SEC EDGAR, keeps only exact issuer-name matches for Form D or amended Form D filings, saves parsed filing metadata, and writes a private JSON results file under `data/research-results/`. Hail Mary does not save raw SEC filings, contact people, phone numbers, email addresses, or addresses.
+
+`collect-github-repositories` is an optional live public API collector for GitHub repository metadata. It requires `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run`; a real run sends only the `--company` values you provide to the GitHub public repository search API, keeps only repositories where the owner slug or repository slug exactly matches the requested company slug, and writes a private JSON results file under `data/research-results/`. Hail Mary does not clone repositories, fetch code, or fetch README files.
+
 `collect-usaspending-awards` is an optional live public API collector for USAspending award records. It requires `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run`; a real run sends only the `--company` values you provide to the USAspending public API, keeps only exact recipient-name matches, and writes a private JSON results file under `data/research-results/`.
+
+SAM.gov and USPTO stay in the manual or local-file workflow in this phase because their official public API documentation requires API keys. Use `prepare-public-research-results` with local JSON files after you manually confirm exact source URLs and licensing notes.
 
 `prepare-meridian-workflow` writes a private Meridian manual workflow under `data/meridian-workflows/` and a fillable Meridian results template under `data/research-results-templates/`. It does not open Meridian, sign in, scrape pages, bypass access controls, save browser profiles, save cookies, or save portal content. Use normal authenticated access in your own browser, manually copy only short allowed facts into the generated placeholder rows, keep the safe Meridian deal URL in `source_url`, and run `import-research-results --dry-run` before importing evidence. The workflow includes plain-English reminders for terms such as valuation cap, pre-money valuation, discount, minimum investment, and lead investor. Use the exact base Meridian deal URL without extra path text, extra slashes, `?`, or `#`.
 

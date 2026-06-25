@@ -76,7 +76,10 @@ def _free_public_adapters() -> list[ProviderAdapter]:
                     "Public government source. Record the filing URL and timestamp if facts "
                     "are later imported."
                 ),
-                operator_note="Search for the company and related legal entity names.",
+                operator_note=(
+                    "The live collector searches SEC EDGAR for exact issuer-name matches. "
+                    "Use the file workflow for related legal entity names."
+                ),
             ),
             build_url=lambda company_name, _website_url: (
                 "https://www.sec.gov/edgar/search/#/q="
@@ -95,7 +98,11 @@ def _free_public_adapters() -> list[ProviderAdapter]:
                     "Public government source. Record the exact result URL and timestamp "
                     "before importing any fact."
                 ),
-                operator_note="Check exact company names, subsidiaries, and founder entities.",
+                operator_note=(
+                    "SAM.gov public APIs require API keys, so Hail Mary keeps this as a "
+                    "manual or local-file workflow. Check exact company names, subsidiaries, "
+                    "and founder entities."
+                ),
             ),
             build_url=lambda company_name, _website_url: (
                 "https://sam.gov/search/?index=opp&keywords="
@@ -154,7 +161,11 @@ def _free_public_adapters() -> list[ProviderAdapter]:
                     "Public government source. Record the trademark result URL and timestamp "
                     "before importing any fact."
                 ),
-                operator_note="Check whether important brands or products have trademark records.",
+                operator_note=(
+                    "Official USPTO Open Data Portal APIs require API keys, so Hail Mary "
+                    "keeps this as a manual or local-file workflow. Check important brands "
+                    "or products."
+                ),
             ),
             build_url=lambda company_name, _website_url: (
                 "https://tmsearch.uspto.gov/search/search-results?query="
@@ -174,7 +185,8 @@ def _free_public_adapters() -> list[ProviderAdapter]:
                     "and timestamp for any later evidence."
                 ),
                 operator_note=(
-                    "Useful for developer tools, infrastructure, and open-source companies."
+                    "The live collector saves public repository metadata only when the "
+                    "owner or repository slug exactly matches the requested company."
                 ),
             ),
             build_url=lambda company_name, _website_url: (

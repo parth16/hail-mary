@@ -13,8 +13,13 @@ from hailmary.config import AppConfig
 from hailmary.ingest.extractors import extract_document
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.research import (
+    GitHubRepositorySearchResponse,
+    SecFormDFilingRecord,
+    SecFormDFilingsResponse,
     UsaspendingAwardRecord,
     UsaspendingAwardsResponse,
+    collect_github_repositories,
+    collect_sec_form_d_filings,
     collect_usaspending_awards,
     import_research_results,
     prepare_public_research_results,
@@ -696,6 +701,143 @@ def run_usaspending_pagination_fixture(work_dir: Path) -> None:
     )
 
 
+def run_free_public_collectors_v2_fixture(work_dir: Path) -> None:
+    root = (work_dir / "pitch-decks").resolve(strict=False)
+    company = root / "Synthetic CollectorCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=(work_dir / "data").resolve(strict=False),
+        local_only=False,
+        enable_web_research=True,
+    )
+    ingest_folder(root, config=config)
+
+    sec_client = _FakeSecFormDFilingsClient(
+        {
+            ("Synthetic CollectorCo", 0): _sec_form_d_response(
+                [
+                    _sec_form_d_filing(
+                        issuer_name="Synthetic CollectorCo",
+                        total_offering_amount="$1,000,000",
+                    ),
+                    _sec_form_d_filing(
+                        issuer_name="Synthetic CollectorCo Holdings",
+                        accession_number="0001234567-26-000002",
+                    ),
+                ]
+            )
+        }
+    )
+    sec_result = collect_sec_form_d_filings(
+        config=config,
+        company_names=["Synthetic CollectorCo"],
+        limit=5,
+        client=sec_client,
+        collected_at=BUILT_AT,
+    )
+    _expect_equal(
+        sec_client.calls,
+        [("Synthetic CollectorCo", 5, 0)],
+        "Expected fake SEC collection to request only explicit company names.",
+    )
+    _expect_equal(
+        sec_result.result_count,
+        1,
+        "Expected fake SEC collection to keep only the exact issuer-name match.",
+    )
+    _expect(
+        sec_result.output_path is not None and sec_result.output_path.exists(),
+        "Expected fake SEC collection to write import-ready results.",
+    )
+    if sec_result.output_path is None:
+        raise EvalFixtureFailure("Expected fake SEC collection to write results.")
+    sec_payload = json.loads(sec_result.output_path.read_text(encoding="utf-8"))
+    _expect_equal(
+        sec_payload["results"][0]["source_url"].startswith("https://www.sec.gov/"),
+        True,
+        "Expected fake SEC result to keep exact SEC source lineage.",
+    )
+    _expect(
+        "Synthetic CollectorCo Holdings" not in sec_payload["results"][0]["text"],
+        "Expected fake SEC collector to skip related entity names.",
+    )
+    sec_import = import_research_results(
+        config=config,
+        results_path=sec_result.output_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+    _expect_equal(
+        sec_import.imported_count,
+        1,
+        "Expected fake SEC collector output to pass import dry-run.",
+    )
+
+    github_client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Synthetic CollectorCo", 1): _github_repository_response(
+                [
+                    _github_repository(
+                        name="synthetic-collectorco",
+                        full_name="synthetic/synthetic-collectorco",
+                        owner_login="synthetic",
+                    ),
+                    _github_repository(
+                        name="synthetic-collectorco-related",
+                        full_name="synthetic/synthetic-collectorco-related",
+                        owner_login="synthetic",
+                    ),
+                ]
+            )
+        }
+    )
+    github_result = collect_github_repositories(
+        config=config,
+        company_names=["Synthetic CollectorCo"],
+        limit=5,
+        client=github_client,
+        collected_at=BUILT_AT,
+    )
+    _expect_equal(
+        github_client.calls,
+        [("Synthetic CollectorCo", 5, 1)],
+        "Expected fake GitHub collection to request only explicit company names.",
+    )
+    _expect_equal(
+        github_result.result_count,
+        1,
+        "Expected fake GitHub collection to keep only the exact repository slug match.",
+    )
+    _expect(
+        github_result.output_path is not None and github_result.output_path.exists(),
+        "Expected fake GitHub collection to write import-ready results.",
+    )
+    if github_result.output_path is None:
+        raise EvalFixtureFailure("Expected fake GitHub collection to write results.")
+    github_payload = json.loads(github_result.output_path.read_text(encoding="utf-8"))
+    _expect_equal(
+        github_payload["results"][0]["source_url"],
+        "https://github.com/synthetic/synthetic-collectorco",
+        "Expected fake GitHub result to keep exact repository source URL.",
+    )
+    _expect(
+        "synthetic-collectorco-related" not in github_payload["results"][0]["text"],
+        "Expected fake GitHub collector to skip related repository names.",
+    )
+    github_import = import_research_results(
+        config=config,
+        results_path=github_result.output_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+    _expect_equal(
+        github_import.imported_count,
+        1,
+        "Expected fake GitHub collector output to pass import dry-run.",
+    )
+
+
 def run_prompt_injection_html_fixture(work_dir: Path) -> None:
     _run_prompt_injection_fixture(work_dir, file_type="html")
 
@@ -1034,6 +1176,66 @@ class _FakeUsaspendingAwardsClient:
             ) from exc
 
 
+class _FakeSecFormDFilingsClient:
+    def __init__(
+        self,
+        responses: dict[tuple[str, int], SecFormDFilingsResponse],
+    ) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, int, int]] = []
+
+    def search_filings(
+        self,
+        company_name: str,
+        *,
+        count: int,
+        start: int,
+        timeout_seconds: float,
+    ) -> SecFormDFilingsResponse:
+        _ = timeout_seconds
+        self.calls.append((company_name, count, start))
+        try:
+            return self.responses[(company_name, start)]
+        except KeyError as exc:
+            raise EvalFixtureFailure(
+                "Missing fake SEC Form D response.",
+                {
+                    "company_name": company_name,
+                    "start": str(start),
+                },
+            ) from exc
+
+
+class _FakeGitHubRepositorySearchClient:
+    def __init__(
+        self,
+        responses: dict[tuple[str, int], GitHubRepositorySearchResponse],
+    ) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, int, int]] = []
+
+    def search_repositories(
+        self,
+        company_name: str,
+        *,
+        per_page: int,
+        page: int,
+        timeout_seconds: float,
+    ) -> GitHubRepositorySearchResponse:
+        _ = timeout_seconds
+        self.calls.append((company_name, per_page, page))
+        try:
+            return self.responses[(company_name, page)]
+        except KeyError as exc:
+            raise EvalFixtureFailure(
+                "Missing fake GitHub response.",
+                {
+                    "company_name": company_name,
+                    "page": str(page),
+                },
+            ) from exc
+
+
 def _usaspending_response(
     results: list[UsaspendingAwardRecord],
     *,
@@ -1043,6 +1245,27 @@ def _usaspending_response(
         {
             "results": [result.model_dump(by_alias=True) for result in results],
             "page_metadata": {"hasNext": has_next},
+        }
+    )
+
+
+def _sec_form_d_response(results: list[SecFormDFilingRecord]) -> SecFormDFilingsResponse:
+    return SecFormDFilingsResponse.model_validate(
+        {
+            "results": [result.model_dump() for result in results],
+            "has_next": False,
+        }
+    )
+
+
+def _github_repository_response(
+    results: list[dict[str, object]],
+) -> GitHubRepositorySearchResponse:
+    return GitHubRepositorySearchResponse.model_validate(
+        {
+            "total_count": len(results),
+            "incomplete_results": False,
+            "items": results,
         }
     )
 
@@ -1063,6 +1286,67 @@ def _usaspending_award(
             "Description": "Synthetic public award description.",
         }
     )
+
+
+def _sec_form_d_filing(
+    *,
+    issuer_name: str,
+    accession_number: str = "0001234567-26-000001",
+    total_offering_amount: str | None = None,
+) -> SecFormDFilingRecord:
+    accession_digits = accession_number.replace("-", "")
+    return SecFormDFilingRecord.model_validate(
+        {
+            "issuer_name": issuer_name,
+            "filing_type": "D",
+            "accession_number": accession_number,
+            "source_url": (
+                "https://www.sec.gov/Archives/edgar/data/1234567890/"
+                f"{accession_digits}/{accession_digits}.txt"
+            ),
+            "source_api": (
+                "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
+                f"&company={issuer_name.replace(' ', '+')}&type=D&owner=exclude"
+                "&output=atom&count=5&start=0"
+            ),
+            "filing_date": "2026-01-01",
+            "form_name": "Notice of Exempt Offering of Securities",
+            "total_offering_amount": total_offering_amount,
+            "total_amount_sold": "$250,000",
+            "minimum_investment_accepted": "$2,500",
+            "total_investors": "5",
+            "industry_group": "Other Technology",
+            "federal_exemptions": ["06b"],
+        }
+    )
+
+
+def _github_repository(
+    *,
+    name: str,
+    full_name: str,
+    owner_login: str,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "full_name": full_name,
+        "owner": {"login": owner_login},
+        "html_url": f"https://github.com/{full_name}",
+        "url": f"https://api.github.com/repos/{full_name}",
+        "description": "Synthetic public repository metadata.",
+        "language": "Python",
+        "stargazers_count": 42,
+        "forks_count": 7,
+        "open_issues_count": 3,
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "pushed_at": "2026-01-02T00:00:00Z",
+        "license": {"name": "MIT License"},
+        "private": False,
+        "fork": False,
+        "archived": False,
+        "disabled": False,
+    }
 
 
 def run_strong_score_fixture() -> None:

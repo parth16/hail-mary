@@ -170,6 +170,18 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="research-free-public-collectors-v2",
+                category=EvalCategory.RESEARCH_IMPORT,
+                name="Free public collector exact matching",
+                description=(
+                    "Checks fake SEC Form D and GitHub collectors, exact-match "
+                    "filtering, source lineage, and import dry-run compatibility."
+                ),
+            ),
+            run=fixtures.run_free_public_collectors_v2_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="prompt-injection-recommendation",
                 category=EvalCategory.PROMPT_INJECTION,
                 name="HTML prompt-injection recommendation rejection",
