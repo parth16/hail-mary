@@ -1153,6 +1153,8 @@ def _cited_evidence_lines(
     for claim in validated_verified_claims(store):
         for citation in claim.citations:
             add_id(citation.evidence_id)
+    for evidence_id in _conflict_evidence_ids(store):
+        add_id(evidence_id)
     for reference in _all_agent_references(
         specialist_results,
         final_output=final_output,

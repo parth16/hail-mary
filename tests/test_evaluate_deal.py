@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,20 @@ from hailmary.schemas.agents import (
     AgentSummaryPoint,
     AgentValidationIssue,
 )
-from hailmary.schemas.scoring import ConfidenceLevel, Recommendation
+from hailmary.schemas.documents import DocumentType, FileType, SourceKind
+from hailmary.schemas.evidence import (
+    ClaimConflict,
+    ClaimRecord,
+    ClaimType,
+    EvidenceCitation,
+    EvidenceKind,
+    EvidenceQuality,
+    EvidenceRecord,
+    EvidenceStore,
+    SourceFreshness,
+    VerificationStatus,
+)
+from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal
 
 runner = CliRunner()
 
@@ -397,6 +411,66 @@ def test_evaluate_deal_renders_final_decision_findings(
     assert "Final caveat: Validate customer concentration before wiring funds." in memo_text
 
 
+def test_cited_evidence_lines_include_validated_conflict_claim_citations() -> None:
+    evidence_a = _evidence_record("ev-conflict-a", "Valuation cap $8M.", "memo-a.txt")
+    evidence_b = _evidence_record("ev-conflict-b", "Valuation cap $10M.", "memo-b.txt")
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="ConflictCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence_a, evidence_b],
+        claims=[
+            _claim_record("claim-a", evidence_a, normalized_value="8000000"),
+            _claim_record("claim-b", evidence_b, normalized_value="10000000"),
+        ],
+        conflicts=[
+            ClaimConflict(
+                id="conflict-1",
+                deal_id="deal-1",
+                claim_type=ClaimType.DEAL_TERM,
+                label="valuation cap",
+                normalized_values=["8000000", "10000000"],
+                claim_ids=["claim-a", "claim-b"],
+                notes="Conflicting valuation caps.",
+            )
+        ],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="ConflictCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Conflicting material terms.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Conflicting material terms require PASS.",
+        evidence=[],
+    )
+    final_output = AgentReviewOutput(
+        deal_id="deal-1",
+        company_name="ConflictCo",
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    lines = evaluation._cited_evidence_lines(
+        store,
+        scored_deal,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+    )
+
+    evidence_text = "\n".join(lines)
+    assert "ev-conflict-a" in evidence_text
+    assert "Valuation cap $8M" in evidence_text
+    assert "ev-conflict-b" in evidence_text
+    assert "Valuation cap $10M" in evidence_text
+
+
 def test_evaluate_deal_final_memo_includes_source_document_location(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -490,6 +564,57 @@ def _write_company_folder(
         text = f"{text} " + ("filler " * 500) + "PRIVATE_FULL_TEXT_MARKER_AT_END"
     (company_dir / "memo.txt").write_text(text, encoding="utf-8")
     return company_dir
+
+
+def _evidence_record(evidence_id: str, text: str, document_path: str) -> EvidenceRecord:
+    return EvidenceRecord(
+        id=evidence_id,
+        deal_id="deal-1",
+        document_id=f"doc-{evidence_id}",
+        document_path=Path(document_path),
+        evidence_kind=EvidenceKind.PAGE_TEXT,
+        source_kind=SourceKind.LOCAL_FILE,
+        document_type=DocumentType.MEMO,
+        file_type=FileType.TXT,
+        text=text,
+        source_freshness=SourceFreshness.CURRENT,
+    )
+
+
+def _claim_record(
+    claim_id: str,
+    evidence: EvidenceRecord,
+    *,
+    normalized_value: str,
+) -> ClaimRecord:
+    return ClaimRecord(
+        id=claim_id,
+        deal_id="deal-1",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        value=evidence.text,
+        normalized_value=normalized_value,
+        raw_text=evidence.text,
+        citations=[
+            EvidenceCitation(
+                evidence_id=evidence.id,
+                quote=evidence.text,
+                source_span_start=0,
+                source_span_end=len(evidence.text),
+                verification_status=VerificationStatus.VERIFIED,
+            )
+        ],
+        verification_status=VerificationStatus.CONFLICTED,
+        quality=EvidenceQuality(
+            claim_type=ClaimType.DEAL_TERM,
+            source_type=SourceKind.LOCAL_FILE,
+            verification_status=VerificationStatus.CONFLICTED,
+            recency=SourceFreshness.CURRENT,
+            reliability="synthetic fixture",
+            confidence=0.9,
+            materiality="high",
+        ),
+    )
 
 
 def _valid_output(packet: AgentInputPacket) -> AgentReviewOutput:
