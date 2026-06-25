@@ -182,13 +182,19 @@ def clean_meridian_url(url: str) -> str:
             "The Meridian URL must use the portal.angellist.com website host."
         )
 
-    path_parts = [part for part in parsed.path.split("/") if part]
-    if len(path_parts) != 3 or path_parts[0] != "m" or path_parts[2] != "invest":
+    path_parts = parsed.path.split("/")
+    if (
+        len(path_parts) != 4
+        or path_parts[0] != ""
+        or path_parts[1] != "m"
+        or path_parts[3] != "invest"
+        or not path_parts[2]
+    ):
         raise MeridianWorkflowError(
             "The Meridian URL must look like a Meridian deal page, such as "
             "https://portal.angellist.com/m/example/invest."
         )
-    if MERIDIAN_DEAL_SLUG_PATTERN.fullmatch(path_parts[1]) is None:
+    if MERIDIAN_DEAL_SLUG_PATTERN.fullmatch(path_parts[2]) is None:
         raise MeridianWorkflowError(
             "The Meridian deal URL can include only letters, numbers, dots, "
             "underscores, or hyphens in the deal name."
