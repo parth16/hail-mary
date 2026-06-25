@@ -1134,6 +1134,26 @@ def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> 
     )
 
 
+def test_render_portfolio_report_filters_allowed_check_sizes_by_config() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_strong", company_name="StrongCo"),
+        config=AppConfig(data_dir=Path("data"), min_check=2_500, max_check=5_000),
+    )
+
+    report = render_portfolio_report(
+        [scored],
+        config=AppConfig(data_dir=Path("data"), min_check=2_500, max_check=5_000),
+    )
+
+    allowed_line = next(
+        line for line in report.splitlines() if line.startswith("- Allowed check sizes:")
+    )
+    assert allowed_line == "- Allowed check sizes: $0, $2.5K, $5K"
+    assert "$1K" not in allowed_line
+    assert "$7.5K" not in allowed_line
+    assert "$10K" not in allowed_line
+
+
 def test_render_portfolio_report_escapes_dynamic_markdown() -> None:
     scored_deal = ScoredDeal(
         deal_id="deal|bad\n# Fake Deal",

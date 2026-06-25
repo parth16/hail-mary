@@ -197,7 +197,7 @@ def render_portfolio_report(
         f"- Capital budget: {_format_check_size(config.capital_budget)}",
         f"- Allocated capital: {_format_check_size(allocated_capital)}",
         f"- Remaining capital after allocation: {_format_check_size(remaining_capital)}",
-        f"- Allowed check sizes: {_check_tier_text()}",
+        f"- Allowed check sizes: {_check_tier_text(config)}",
         f"- Configured minimum check: {_format_check_size(config.min_check)}",
         f"- Configured maximum check: {_format_check_size(config.max_check)}",
         "",
@@ -282,8 +282,13 @@ def _portfolio_rank_key(deal: ScoredDeal) -> tuple[int, int, int, int, str, str]
     )
 
 
-def _check_tier_text() -> str:
-    return ", ".join(_format_check_size(tier) for tier in CHECK_SIZE_TIERS)
+def _check_tier_text(config: AppConfig) -> str:
+    allowed_tiers = [
+        tier
+        for tier in CHECK_SIZE_TIERS
+        if tier == 0 or config.min_check <= tier <= config.max_check
+    ]
+    return ", ".join(_format_check_size(tier) for tier in allowed_tiers)
 
 
 def _optional_check_size(check_size: int | None) -> str:
