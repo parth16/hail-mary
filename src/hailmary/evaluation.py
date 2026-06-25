@@ -504,15 +504,38 @@ def _rule_based_final_decision(
     mode: EvaluationMode,
 ) -> tuple[AgentReviewOutput, GuardedFinalDecision]:
     references = _deterministic_recommendation_evidence(store, scored_deal)
+    citation_limitation = None
+    final_recommendation = scored_deal.recommendation
+    final_check_size = scored_deal.check_size
+    final_reason = (
+        "INFERRED: Rule-based scoring set the final recommendation: "
+        f"{scored_deal.one_line_reason}"
+    )
+    final_confidence = scored_deal.confidence
+    unsupported = not references
+    if scored_deal.recommendation == Recommendation.INVEST and not references:
+        citation_limitation = (
+            "Rule-based scoring suggested INVEST, but Hail Mary could not keep any "
+            "cited evidence after rejecting source-document instructions. The final "
+            "recommendation was changed to PASS until source-linked evidence can be "
+            "verified."
+        )
+        final_recommendation = Recommendation.PASS
+        final_check_size = 0
+        final_reason = f"NEEDS_DILIGENCE: {citation_limitation}"
+        final_confidence = ConfidenceLevel.LOW
+        unsupported = True
     recommendation = AgentRecommendationRationale(
-        recommendation=scored_deal.recommendation,
-        check_size=scored_deal.check_size,
-        reason=(
-            "INFERRED: Rule-based scoring set the final recommendation: "
-            f"{scored_deal.one_line_reason}"
-        ),
+        recommendation=final_recommendation,
+        check_size=final_check_size,
+        reason=final_reason,
         evidence=references,
     )
+    limitations = [
+        limitation
+        for limitation in (mode.limitation, citation_limitation)
+        if limitation
+    ]
     output = AgentReviewOutput(
         deal_id=scored_deal.deal_id,
         company_name=scored_deal.company_name,
@@ -524,7 +547,7 @@ def _rule_based_final_decision(
                     "committee review."
                 ),
                 evidence=references,
-                unsupported=not references,
+                unsupported=unsupported,
             )
         ],
         findings=[
@@ -534,16 +557,17 @@ def _rule_based_final_decision(
                     "The final recommendation is based on fixed scoring checks and "
                     "guardrails, not model judgment."
                 ),
-                confidence=scored_deal.confidence,
+                confidence=final_confidence,
                 materiality="high",
                 evidence=references,
-                unsupported=not references,
+                unsupported=unsupported,
             )
         ],
-        limitations=[mode.limitation] if mode.limitation else [],
+        limitations=limitations,
         recommendation=recommendation,
     )
-    return output, GuardedFinalDecision(recommendation=recommendation, warning=mode.limitation)
+    warning = " ".join(limitations) if limitations else None
+    return output, GuardedFinalDecision(recommendation=recommendation, warning=warning)
 
 
 def render_final_evaluation_memo(
@@ -1049,12 +1073,7 @@ def _validated_deterministic_recommendation_references(
 ) -> list[AgentEvidenceReference]:
     if not references:
         return []
-    packet = build_agent_input_packet(
-        store,
-        scored_deal,
-        role=AgentRole.FINAL_DECISION,
-        created_at=store.created_at,
-    )
+    packet = _full_evidence_validation_packet(store, scored_deal)
     safe_references: list[AgentEvidenceReference] = []
     for reference in references:
         recommendation = AgentRecommendationRationale(
@@ -1084,6 +1103,24 @@ def _validated_deterministic_recommendation_references(
         ):
             safe_references.append(reference)
     return safe_references
+
+
+def _full_evidence_validation_packet(
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> AgentInputPacket:
+    max_evidence_chars = max(
+        (len(evidence.text) for evidence in store.evidence),
+        default=1,
+    )
+    return build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.FINAL_DECISION,
+        created_at=store.created_at,
+        max_evidence_records=max(len(store.evidence), 1),
+        max_evidence_chars=max(max_evidence_chars, 1),
+    )
 
 
 def _deterministic_support_evidence_ids(

@@ -144,7 +144,19 @@ def _candidate_documents(
     candidate_files: list[tuple[Path, str]] = []
 
     scan_paths, unreadable_dirs = _scan_input_paths(root_path)
-    unreadable_paths.extend(_relative_display_path(path, root_path) for path in unreadable_dirs)
+    for path in unreadable_dirs:
+        try:
+            relative_path = path.relative_to(root_path)
+        except ValueError:
+            unreadable_paths.append(_relative_display_path(path, root_path))
+            continue
+        if is_ignored_path(relative_path) or _is_generated_output_path(
+            path,
+            config,
+            allow_private_raw=allow_private_raw_root,
+        ):
+            continue
+        unreadable_paths.append(str(relative_path))
 
     for path in scan_paths:
         relative_path = path.relative_to(root_path)
