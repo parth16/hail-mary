@@ -133,6 +133,7 @@ After the first push:
 
 - create branches named `codex/<short-description>`
 - open PRs as ready for review, not drafts
+- after modifying code, push the `codex/<short-description>` branch and open a ready-for-review PR before ending the session
 - self-review changes before pushing
 - include validation commands, test results, privacy notes, and known limitations in PR bodies
 - when GitHub Codex automatic reviews are enabled, rely on the automatic review trigger; comment `@codex review` only if the trigger does not run and an immediate manual review is needed
