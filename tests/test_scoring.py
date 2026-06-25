@@ -39,6 +39,7 @@ from hailmary.schemas.scoring import (
     Recommendation,
     ScoredDeal,
     ScoreFactor,
+    ScoreSupportStatus,
     ValuationRisk,
 )
 from hailmary.scoring import (
@@ -264,6 +265,43 @@ def test_stage_classification_ignores_negated_future_stage_mentions() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "stage_text",
+    [
+        "Pre-seed company plans to raise Series A next year.",
+        "Pre-seed company will raise Series A next year.",
+        "Not a defense company; pre-seed company.",
+        "Not hard tech; pre-seed company.",
+    ],
+)
+def test_stage_classification_ignores_future_and_negated_category_mentions(
+    stage_text: str,
+) -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            f"{stage_text} Valuation cap $80M. Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$80M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.company_stage == CompanyStage.PRE_SEED
+    assert scored.valuation_risk == ValuationRisk.HIGH
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_score_evidence_store_gates_valuation_far_ahead_of_evidence() -> None:
     evidence = [
         _evidence(
@@ -338,13 +376,19 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
     assert _score_factor(scored, "Valuation and net return").score == 20
 
 
-def test_net_return_math_ignores_customer_fees_without_investment_context() -> None:
+@pytest.mark.parametrize(
+    "return_text",
+    [
+        "Estimated dilution 20%. Customer fees are 5%. Exit value $1B.",
+        "Estimated dilution 20%. Management expenses are 5%. Exit value $1B.",
+    ],
+)
+def test_net_return_math_ignores_non_investment_fees_without_context(
+    return_text: str,
+) -> None:
     evidence = [
         _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
-        _evidence(
-            "ev_return",
-            "Estimated dilution 20%. Customer fees are 5%. Exit value $1B.",
-        ),
+        _evidence("ev_return", return_text),
     ]
     claims = [
         _claim("valuation cap", "$8M", "ev_terms"),
@@ -359,6 +403,25 @@ def test_net_return_math_ignores_customer_fees_without_investment_context() -> N
 
     assert scored.net_return.net_return_multiple is None
     assert "fees or carry" in scored.net_return.missing_inputs
+
+
+def test_missing_key_terms_gate_is_not_verified_without_verified_claims() -> None:
+    scored = score_evidence_store(
+        _store(
+            evidence=[_evidence("ev_notes", "Current source text exists.")],
+            claims=[],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    missing_terms_gate = next(
+        gate
+        for gate in scored.kill_gates
+        if gate.name == "Missing key investment terms"
+    )
+    assert not missing_terms_gate.triggered
+    assert missing_terms_gate.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert missing_terms_gate.reason == "No verified valuation or valuation-cap term was found."
 
 
 def test_score_evidence_store_passes_when_terms_conflict() -> None:

@@ -54,7 +54,8 @@ STAGE_KEYWORDS: tuple[tuple[CompanyStage, tuple[str, ...]], ...] = (
     (CompanyStage.SEED, ("seed",)),
 )
 STAGE_NEGATED_SIGNAL = (
-    r"(?:pre[-\s]?seed|seed|series\s+a|series\s+b|series\s+c|growth\s+stage)"
+    r"(?:pre[-\s]?seed|seed|series\s+a|series\s+b|series\s+c|growth\s+stage|"
+    r"hard[-\s]?tech|defense|aerospace)"
 )
 STAGE_NEGATED_PATTERNS = (
     re.compile(
@@ -71,6 +72,22 @@ STAGE_NEGATED_PATTERNS = (
         rf"(?:is\s+|as\s+)?(?:a\s+|an\s+)?{STAGE_NEGATED_SIGNAL}\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"\b(?:plans?|planned|planning|targets?|targeting|intends?|expects?)\s+"
+        rf"(?:to\s+)?(?:raise|pursue|seek|close)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:will|would|could|may)\s+(?:raise|pursue|seek|close)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:plans?|planned|planning|targets?|targeting|intends?|expects?)\s+"
+        rf"(?:for|toward|towards)\s+(?:a\s+|an\s+|the\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
 )
 RETURN_INPUT_PATTERNS = {
     "dilution": re.compile(
@@ -78,7 +95,8 @@ RETURN_INPUT_PATTERNS = {
         re.IGNORECASE,
     ),
     "fees": re.compile(
-        r"\b(?:fund|platform|spv|investment|investor|wrapper|management)\s+"
+        r"\b(?:fund|platform|spv|investment|investor|wrapper)\s+"
+        r"(?:management\s+)?"
         r"(?:fees?|expenses?)\b\s*(?:are|is|of|at|:)?\s*"
         r"(?P<value>\d+(?:\.\d+)?)\s?%",
         re.IGNORECASE,
@@ -354,7 +372,8 @@ def _kill_gates(
             capital_remaining=capital_remaining,
         )
     )
-    missing_key_terms = has_scorable_deal and not _has_pricing_term(verified_claims)
+    has_pricing_term = _has_pricing_term(verified_claims)
+    missing_key_terms = has_scorable_deal and not has_pricing_term
     valuation_too_high = has_scorable_deal and valuation_risk == ValuationRisk.HIGH
     conflict_evidence_ids = _conflict_evidence_ids(store, valid_conflicts)
     return [
@@ -406,14 +425,14 @@ def _kill_gates(
             triggered=missing_key_terms,
             reason=(
                 "No verified valuation or valuation-cap term was found."
-                if missing_key_terms
+                if not has_pricing_term
                 else "A verified valuation or valuation-cap term is available."
             ),
             evidence_ids=_claim_evidence_ids(verified_claims),
             support_status=(
-                ScoreSupportStatus.NEEDS_DILIGENCE
-                if missing_key_terms
-                else ScoreSupportStatus.VERIFIED
+                ScoreSupportStatus.VERIFIED
+                if has_pricing_term
+                else ScoreSupportStatus.NEEDS_DILIGENCE
             ),
         ),
         KillGate(
