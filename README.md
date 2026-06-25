@@ -54,6 +54,8 @@ hailmary validate-agent-output output.json packet.json
 hailmary run-evals
 hailmary list-research-providers
 hailmary prepare-research-plan --company "ExampleCo"
+HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
+  hailmary collect-web-research --dry-run
 hailmary prepare-research-results-template
 hailmary prepare-public-research-results \
   --company "ExampleCo" \
@@ -73,6 +75,8 @@ hailmary import-research-results research-results.json
 `run-evals` runs local synthetic correctness checks. The built-in evals cover text extraction and ingestion, citation span validation, conflicting deal terms, prompt-injection safeguards, missing evidence, score calibration, and Markdown memo snapshot checks. They do not use real deal documents.
 
 `list-research-providers` shows free public, authenticated, and optional paid sources that Hail Mary can plan around. `prepare-research-plan` writes a private JSON checklist under `data/research-plans/` from either the latest ingestion summary or manually supplied `--company` values. It does not contact websites, APIs, paid databases, or Meridian. Any external fact imported later must record the provider, timestamp, exact URL or API source, confidence, and licensing notes.
+
+`collect-web-research` can fetch direct public web-page tasks from a research plan after you explicitly turn off local-only mode and enable web research with `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run` to see which public URLs would be fetched. The command skips paid, authenticated, Meridian, local-only, missing-URL, localhost, and private-network sources. It writes an import-ready private JSON file under `data/research-results/`; run `import-research-results --dry-run` before adding that text to evidence stores.
 
 `prepare-research-results-template` turns a private research plan into a fillable JSON file under `data/research-results-templates/`. It copies company names, provider IDs, source kinds, licensing notes, and ingested deal IDs when available, but leaves fact fields and citation URLs blank so the file cannot be mistaken for validated evidence.
 

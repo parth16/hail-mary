@@ -41,6 +41,12 @@ from hailmary.research.templates import (
     ResearchTemplateError,
     prepare_research_results_template,
 )
+from hailmary.research.web import (
+    WebResearchError,
+    WebResearchRunSummary,
+    WebResearchTaskSummary,
+    collect_web_research,
+)
 
 __all__ = [
     "ResearchAccessMode",
@@ -69,10 +75,14 @@ __all__ = [
     "ResearchTask",
     "ResearchTaskStatus",
     "ResearchTemplateError",
+    "WebResearchError",
+    "WebResearchRunSummary",
+    "WebResearchTaskSummary",
     "SecFormDPublicAdapter",
     "SecFormDSearchResult",
     "builtin_provider_adapters",
     "builtin_research_providers",
+    "collect_web_research",
     "import_research_results",
     "prepare_meridian_workflow",
     "prepare_public_research_results",
