@@ -153,6 +153,12 @@ def test_score_evidence_store_passes_with_no_evidence() -> None:
     assert scored.recommendation == Recommendation.PASS
     assert scored.check_size == 0
     assert scored.triggered_kill_gates[0].name == "No usable source-linked evidence"
+    no_terms_gate = next(
+        gate
+        for gate in scored.kill_gates
+        if gate.name == "No verified deal terms"
+    )
+    assert no_terms_gate.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
 
 
 def test_score_evidence_store_invests_when_verified_evidence_is_strong() -> None:
@@ -272,6 +278,8 @@ def test_stage_classification_ignores_negated_future_stage_mentions() -> None:
         "Pre-seed company will raise Series A next year.",
         "Not a defense company; pre-seed company.",
         "Not hard tech; pre-seed company.",
+        "Non-defense pre-seed company.",
+        "Non-aerospace pre-seed company.",
     ],
 )
 def test_stage_classification_ignores_future_and_negated_category_mentions(
@@ -332,6 +340,55 @@ def test_score_evidence_store_gates_valuation_far_ahead_of_evidence() -> None:
     assert valuation_gate.evidence_ids == ["ev_terms"]
 
 
+def test_valuation_far_ahead_gate_cites_stage_evidence() -> None:
+    evidence = [
+        _evidence("ev_stage", "Pre-seed company."),
+        _evidence("ev_terms", "Valuation cap $80M. Discount 20%. Round size $1M."),
+    ]
+    claims = [
+        _claim("valuation cap", "$80M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    valuation_gate = next(
+        gate
+        for gate in scored.triggered_kill_gates
+        if gate.name == "Valuation far ahead of evidence"
+    )
+    assert valuation_gate.evidence_ids == ["ev_terms", "ev_stage"]
+
+
+def test_unknown_stage_valuation_risk_stays_conservative_with_traction() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $500M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+    ]
+    claims = [
+        _claim("valuation cap", "$500M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.company_stage == CompanyStage.UNKNOWN
+    assert scored.pmf_level == PMFLevel.DEVELOPING
+    assert scored.valuation_risk == ValuationRisk.HIGH
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_net_return_math_reports_missing_inputs_without_inventing_data() -> None:
     scored = score_evidence_store(
         _strong_store(deal_id="deal_strong", company_name="StrongCo"),
@@ -374,6 +431,47 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
     assert scored.net_return.missing_inputs == []
     assert scored.net_return.evidence_ids == ["ev_terms", "ev_return"]
     assert _score_factor(scored, "Valuation and net return").score == 20
+
+
+def test_net_return_math_adds_round_size_to_pre_money_valuation() -> None:
+    evidence = [
+        _evidence("ev_valuation", "Pre-money valuation $40M."),
+        _evidence("ev_round", "Round size $20M."),
+        _evidence(
+            "ev_return",
+            "Estimated dilution 20%. SPV expenses 5%. Carry 20%. Exit value $1B.",
+        ),
+    ]
+    claims = [
+        _claim("pre-money valuation", "$40M", "ev_valuation"),
+        _claim("round size", "$20M", "ev_round"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.entry_valuation == 60_000_000
+    assert scored.net_return.net_return_multiple == 10
+    assert scored.net_return.evidence_ids == ["ev_valuation", "ev_round", "ev_return"]
+
+
+def test_net_return_math_needs_round_size_for_pre_money_valuation() -> None:
+    evidence = [_evidence("ev_valuation", "Pre-money valuation $40M.")]
+    claims = [_claim("pre-money valuation", "$40M", "ev_valuation")]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.entry_valuation is None
+    assert scored.net_return.net_return_multiple is None
+    assert scored.net_return.missing_inputs == [
+        "verified round size for pre-money valuation"
+    ]
+    assert "verified round size" in scored.net_return.explanation
 
 
 @pytest.mark.parametrize(
@@ -422,6 +520,23 @@ def test_missing_key_terms_gate_is_not_verified_without_verified_claims() -> Non
     assert not missing_terms_gate.triggered
     assert missing_terms_gate.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
     assert missing_terms_gate.reason == "No verified valuation or valuation-cap term was found."
+
+
+def test_stage_pmf_factor_marks_partial_support_needs_diligence() -> None:
+    scored = score_evidence_store(
+        _store(
+            evidence=[_evidence("ev_stage", "Pre-seed company.")],
+            claims=[],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    stage_factor = _score_factor(scored, "Stage and product-market fit")
+    assert stage_factor.evidence_ids == ["ev_stage"]
+    assert stage_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert stage_factor.missing_inputs == [
+        "customer, revenue, retention, usage, pilot, or design-partner proof"
+    ]
 
 
 def test_score_evidence_store_passes_when_terms_conflict() -> None:
@@ -986,6 +1101,9 @@ def test_score_evidence_store_requires_verified_pricing_terms_to_invest() -> Non
         gate.name == "Missing key investment terms"
         for gate in scored.triggered_kill_gates
     )
+    terms_factor = _score_factor(scored, "Deal terms and platform access")
+    assert terms_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert terms_factor.missing_inputs == ["verified valuation or valuation cap"]
 
 
 def test_score_evidence_store_revalidates_claim_citations() -> None:

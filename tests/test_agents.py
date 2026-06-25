@@ -47,7 +47,13 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import ConfidenceLevel, NetReturnEstimate, Recommendation, ScoreFactor
+from hailmary.schemas.scoring import (
+    ConfidenceLevel,
+    NetReturnEstimate,
+    Recommendation,
+    ScoreFactor,
+    ScoreSupportStatus,
+)
 from hailmary.scoring.scorer import score_evidence_store
 
 runner = CliRunner()
@@ -194,6 +200,11 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
         update={
             "net_return": NetReturnEstimate(
                 entry_valuation=8_000_000,
+                estimated_dilution_percent=20,
+                estimated_fees_and_carry_percent=5,
+                gross_exit_value=1_000_000_000,
+                net_return_multiple=95,
+                support_status=ScoreSupportStatus.VERIFIED,
                 evidence_ids=["ev_return_0", "ev_return_1"],
             ),
             "score_factors": [
@@ -217,6 +228,13 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
 
     assert packet.allowed_evidence_ids == ["ev_return_0"]
     assert packet.score.net_return.evidence_ids == ["ev_return_0"]
+    assert packet.score.net_return.entry_valuation is None
+    assert packet.score.net_return.estimated_dilution_percent is None
+    assert packet.score.net_return.estimated_fees_and_carry_percent is None
+    assert packet.score.net_return.gross_exit_value is None
+    assert packet.score.net_return.net_return_multiple is None
+    assert packet.score.net_return.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert "packet evidence for return math" in packet.score.net_return.missing_inputs
 
 
 def test_build_agent_input_packet_does_not_prioritize_invalid_conflict_evidence() -> None:

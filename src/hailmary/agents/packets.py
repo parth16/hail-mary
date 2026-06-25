@@ -20,7 +20,12 @@ from hailmary.schemas.agents import (
 )
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
-from hailmary.schemas.scoring import Recommendation, ScoredDeal
+from hailmary.schemas.scoring import (
+    NetReturnEstimate,
+    Recommendation,
+    ScoredDeal,
+    ScoreSupportStatus,
+)
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -258,20 +263,16 @@ def build_agent_input_packet(
     selected_evidence_ids = [evidence.id for evidence in selected_evidence]
     allowed_evidence_ids = set(selected_evidence_ids)
     quotes_by_evidence_id = _preferred_quotes_by_evidence_id(verified_claims)
-    packet_net_return = scored_deal.net_return.model_copy(
-        update={
-            "evidence_ids": [
-                evidence_id
-                for evidence_id in scored_deal.net_return.evidence_ids
-                if evidence_id in allowed_evidence_ids
-            ]
-        }
-    )
     selected_claims = [
         _claim_item(claim, allowed_evidence_ids=allowed_evidence_ids)
         for claim in verified_claims
         if any(citation.evidence_id in allowed_evidence_ids for citation in claim.citations)
     ]
+    packet_net_return = _packet_net_return_estimate(
+        scored_deal.net_return,
+        allowed_evidence_ids,
+        selected_claims,
+    )
 
     return AgentInputPacket(
         created_at=created_at or datetime.now(UTC),
@@ -308,6 +309,54 @@ def build_agent_input_packet(
             question.question for question in scored_deal.diligence_questions
         ],
     )
+
+
+def _packet_net_return_estimate(
+    net_return: NetReturnEstimate,
+    allowed_evidence_ids: set[str],
+    selected_claims: list[AgentClaimItem],
+) -> NetReturnEstimate:
+    filtered_evidence_ids = [
+        evidence_id
+        for evidence_id in net_return.evidence_ids
+        if evidence_id in allowed_evidence_ids
+    ]
+    if len(filtered_evidence_ids) == len(net_return.evidence_ids):
+        return net_return.model_copy(update={"evidence_ids": filtered_evidence_ids})
+    missing_inputs = list(
+        dict.fromkeys([*net_return.missing_inputs, "packet evidence for return math"])
+    )
+    selected_claim_labels = {claim.label for claim in selected_claims}
+    entry_valuation = (
+        net_return.entry_valuation
+        if _has_packet_entry_valuation_support(selected_claim_labels)
+        else None
+    )
+    return net_return.model_copy(
+        update={
+            "entry_valuation": entry_valuation,
+            "estimated_dilution_percent": None,
+            "estimated_fees_and_carry_percent": None,
+            "gross_exit_value": None,
+            "net_return_multiple": None,
+            "missing_inputs": missing_inputs,
+            "explanation": (
+                "Net return math is omitted from this packet because supporting "
+                "evidence records were not included in the capped packet."
+            ),
+            "evidence_ids": filtered_evidence_ids,
+            "support_status": ScoreSupportStatus.NEEDS_DILIGENCE,
+        }
+    )
+
+
+def _has_packet_entry_valuation_support(selected_claim_labels: set[str]) -> bool:
+    if selected_claim_labels.intersection({"post-money valuation", "valuation cap"}):
+        return True
+    return {
+        "pre-money valuation",
+        "round size",
+    }.issubset(selected_claim_labels)
 
 
 def load_agent_input_packet(path: Path) -> AgentInputPacket:
