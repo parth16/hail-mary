@@ -258,6 +258,15 @@ def build_agent_input_packet(
     selected_evidence_ids = [evidence.id for evidence in selected_evidence]
     allowed_evidence_ids = set(selected_evidence_ids)
     quotes_by_evidence_id = _preferred_quotes_by_evidence_id(verified_claims)
+    packet_net_return = scored_deal.net_return.model_copy(
+        update={
+            "evidence_ids": [
+                evidence_id
+                for evidence_id in scored_deal.net_return.evidence_ids
+                if evidence_id in allowed_evidence_ids
+            ]
+        }
+    )
     selected_claims = [
         _claim_item(claim, allowed_evidence_ids=allowed_evidence_ids)
         for claim in verified_claims
@@ -284,7 +293,7 @@ def build_agent_input_packet(
             fundability_risk=scored_deal.fundability_risk,
             company_stage=scored_deal.company_stage,
             valuation_risk=scored_deal.valuation_risk,
-            net_return=scored_deal.net_return,
+            net_return=packet_net_return,
         ),
         evidence=[
             _evidence_item(

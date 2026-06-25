@@ -237,6 +237,33 @@ def test_stage_aware_score_changes_are_deterministic_and_evidence_linked() -> No
     ]
 
 
+def test_stage_classification_ignores_negated_future_stage_mentions() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Seed stage. Not ready for Series A. Valuation cap $80M. "
+            "Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$80M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.company_stage == CompanyStage.SEED
+    assert scored.valuation_risk == ValuationRisk.HIGH
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_score_evidence_store_gates_valuation_far_ahead_of_evidence() -> None:
     evidence = [
         _evidence(
@@ -289,7 +316,7 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
         _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
         _evidence(
             "ev_return",
-            "Estimated dilution 20%. Expenses 5%. Carry 20%. Exit value $1B.",
+            "Estimated dilution 20%. SPV expenses 5%. Carry 20%. Exit value $1B.",
         ),
         _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
         _evidence("ev_funding", "Lead investor committed and seed round is active."),
@@ -309,6 +336,29 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
     assert scored.net_return.missing_inputs == []
     assert scored.net_return.evidence_ids == ["ev_terms", "ev_return"]
     assert _score_factor(scored, "Valuation and net return").score == 20
+
+
+def test_net_return_math_ignores_customer_fees_without_investment_context() -> None:
+    evidence = [
+        _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_return",
+            "Estimated dilution 20%. Customer fees are 5%. Exit value $1B.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.net_return_multiple is None
+    assert "fees or carry" in scored.net_return.missing_inputs
 
 
 def test_score_evidence_store_passes_when_terms_conflict() -> None:

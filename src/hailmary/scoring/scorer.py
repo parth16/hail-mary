@@ -53,13 +53,34 @@ STAGE_KEYWORDS: tuple[tuple[CompanyStage, tuple[str, ...]], ...] = (
     (CompanyStage.PRE_SEED, ("pre-seed", "pre seed", "preseed")),
     (CompanyStage.SEED, ("seed",)),
 )
+STAGE_NEGATED_SIGNAL = (
+    r"(?:pre[-\s]?seed|seed|series\s+a|series\s+b|series\s+c|growth\s+stage)"
+)
+STAGE_NEGATED_PATTERNS = (
+    re.compile(
+        rf"\bnot\s+(?:yet\s+)?(?:ready\s+for\s+|at\s+|a\s+|an\s+)?"
+        rf"{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:before|prior\s+to|ahead\s+of)\s+(?:the\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:next|future|upcoming|planned|target)\s+(?:round\s+)?"
+        rf"(?:is\s+|as\s+)?(?:a\s+|an\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+)
 RETURN_INPUT_PATTERNS = {
     "dilution": re.compile(
         r"\b(?:estimated\s+)?dilution\b\s*(?:is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
         re.IGNORECASE,
     ),
     "fees": re.compile(
-        r"\b(?:fees?|expenses?)\b\s*(?:are|is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
+        r"\b(?:fund|platform|spv|investment|investor|wrapper|management)\s+"
+        r"(?:fees?|expenses?)\b\s*(?:are|is|of|at|:)?\s*"
+        r"(?P<value>\d+(?:\.\d+)?)\s?%",
         re.IGNORECASE,
     ),
     "carry": re.compile(
@@ -747,7 +768,11 @@ def _missing_data_factor(
 def _company_stage(evidence: list[EvidenceRecord]) -> CompanyStage:
     for stage, keywords in STAGE_KEYWORDS:
         if any(
-            _contains_keyword(record.text, keyword)
+            _contains_positive_keyword(
+                record.text,
+                keyword,
+                negated_patterns=STAGE_NEGATED_PATTERNS,
+            )
             for record in evidence
             for keyword in keywords
         ):
@@ -769,7 +794,14 @@ def _stage_evidence(
     return [
         record
         for record in evidence
-        if any(_contains_keyword(record.text, keyword) for keyword in keywords)
+        if any(
+            _contains_positive_keyword(
+                record.text,
+                keyword,
+                negated_patterns=STAGE_NEGATED_PATTERNS,
+            )
+            for keyword in keywords
+        )
     ]
 
 

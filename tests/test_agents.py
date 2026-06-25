@@ -47,7 +47,7 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoreFactor
+from hailmary.schemas.scoring import ConfidenceLevel, NetReturnEstimate, Recommendation, ScoreFactor
 from hailmary.scoring.scorer import score_evidence_store
 
 runner = CliRunner()
@@ -181,6 +181,42 @@ def test_build_agent_input_packet_caps_cited_evidence_records() -> None:
 
     assert len(packet.evidence) == 50
     assert packet.allowed_evidence_ids == [f"ev_{index}" for index in range(50)]
+
+
+def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_records() -> None:
+    evidence = [
+        _evidence("ev_return_0", "Valuation cap $8M."),
+        _evidence("ev_return_1", "Estimated dilution 20%. SPV expenses 5%. Exit value $1B."),
+    ]
+    store = _store(evidence=evidence, claims=[])
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored_deal = scored_deal.model_copy(
+        update={
+            "net_return": NetReturnEstimate(
+                entry_valuation=8_000_000,
+                evidence_ids=["ev_return_0", "ev_return_1"],
+            ),
+            "score_factors": [
+                ScoreFactor(
+                    name="Return math support",
+                    score=1,
+                    max_score=1,
+                    explanation="Synthetic return math support.",
+                    evidence_ids=["ev_return_0", "ev_return_1"],
+                )
+            ],
+        }
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.RETURN_MATH,
+        max_evidence_records=1,
+    )
+
+    assert packet.allowed_evidence_ids == ["ev_return_0"]
+    assert packet.score.net_return.evidence_ids == ["ev_return_0"]
 
 
 def test_build_agent_input_packet_does_not_prioritize_invalid_conflict_evidence() -> None:
