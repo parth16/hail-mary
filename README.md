@@ -65,10 +65,13 @@ Poppler `pdftoppm` commands when they are available on `PATH`; it does not call 
 OCR services.
 
 `review-evidence` reads ignored local evidence stores and shows plain-English
-summaries of evidence records, claim status, conflicts, OCR use, source freshness,
-source spans, and citation gaps without printing confidential evidence text by
-default. Use `--show-text` or `--quote-limit` only when you intentionally want short
-local excerpts.
+evidence health summaries by source document, source kind, claim status, source
+freshness, materiality, confidence, source lineage, conflicts, image-based text
+reading, source spans, and citation gaps without printing confidential evidence text
+by default. Health issues are labeled as `blocking`, `warning`, or `info` so
+operators know what must be fixed before trusting a memo. The command is read-only;
+evidence exclusion and correction workflows are a future step. Use `--show-text` or
+`--quote-limit` only when you intentionally want short local excerpts.
 
 ### Internal Commands
 

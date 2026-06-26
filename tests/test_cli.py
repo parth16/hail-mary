@@ -675,6 +675,7 @@ def test_review_evidence_single_deal_latest_summary_hides_text_by_default(
     assert result.exit_code == 0, result.output
     assert "Evidence review" in result.output
     assert "SecretCo" in result.output
+    assert "Evidence health summary" in result.output
     assert "Evidence by source document" in result.output
     assert "Claims by label and status" in result.output
     assert "Evidence text is hidden by default" in result.output
@@ -866,7 +867,8 @@ def test_review_evidence_flags_invalid_source_spans(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
-    assert "Missing source spans" in normalized_output
+    assert "missing_spans" in normalized_output
+    assert "warning" in normalized_output
     assert "missing source span" in normalized_output
 
 
@@ -993,17 +995,18 @@ def test_review_evidence_summarizes_review_issues_and_conflicts(tmp_path: Path) 
     assert "Conflicts and why they matter" in normalized_output
     assert "active" in normalized_output
     assert "stale" in normalized_output
-    assert "OCR-applied evidence" in normalized_output
-    assert "Low-confidence OCR" in normalized_output
-    assert "Stale source freshness" in normalized_output
-    assert "Unknown source freshness" in normalized_output
-    assert "Missing source spans" in normalized_output
-    assert "Missing claim citations" in normalized_output
-    assert "Invalid claim citations" in normalized_output
-    assert "quote_mismatch" in normalized_output
-    assert "Low-confidence claims" in normalized_output
-    assert "External evidence missing" in normalized_output
-    assert "confidence notes" in normalized_output
+    assert "image_text" in normalized_output
+    assert "low_image_text" in normalized_output
+    assert "stale_evidence" in normalized_output
+    assert "unknown_freshness" in normalized_output
+    assert "missing_spans" in normalized_output
+    assert "missing_citations" in normalized_output
+    assert "invalid_citations" in normalized_output
+    assert "quote mismatch" in normalized_output
+    assert "low_claim_conf" in normalized_output
+    assert "external_conf" in normalized_output
+    assert "blocking" in normalized_output
+    assert "warning" in normalized_output
 
 
 def test_review_evidence_shows_table_index_with_page_number(tmp_path: Path) -> None:
@@ -1074,8 +1077,10 @@ def test_review_evidence_flags_documents_without_evidence_and_ocr_needed(
 
     assert result.exit_code == 0, result.output
     assert "scan-only.png" in normalized_output
-    assert "Documents with no usable evidence" in normalized_output
-    assert "Documents needing OCR review" in normalized_output
+    assert "doc_no_evidence" in normalized_output
+    assert "doc_needs_image" in normalized_output
+    assert "add readable files" in normalized_output
+    assert "manual review" in normalized_output
     assert "No review issues found" not in normalized_output
 
 
@@ -1089,6 +1094,11 @@ def test_review_evidence_shows_exact_external_source_reference(tmp_path: Path) -
         document_path=Path("external-research/sec/example.json"),
         source_kind=SourceKind.WEB,
         source_url=source_url,
+    ).model_copy(
+        update={
+            "page_number": None,
+            "table_index": None,
+        }
     )
     store = _review_store(
         deal_id="deal_external_lineage",
@@ -1102,6 +1112,34 @@ def test_review_evidence_shows_exact_external_source_reference(tmp_path: Path) -
     assert result.exit_code == 0, result.output
     assert "Exact source" in result.output
     assert source_url in result.output
+    assert "missing page/table location" not in result.output
+
+
+def test_review_evidence_does_not_flag_text_file_without_page_location(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_text_lineage",
+        "Synthetic memo says valuation cap $8M.",
+        deal_id="deal_text_lineage",
+        document_id="doc_text_lineage",
+        document_path=Path("memo.txt"),
+        file_type=FileType.TXT,
+        page_number=None,
+    )
+    store = _review_store(
+        deal_id="deal_text_lineage",
+        company_name="TextLineageCo",
+        evidence=[evidence],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "missing page/table location" not in result.output
+    assert "missing_location" not in result.output
+    assert "complete source lineage" in result.output
 
 
 def _review_evidence_record(
@@ -1114,6 +1152,8 @@ def _review_evidence_record(
     source_kind: SourceKind = SourceKind.LOCAL_FILE,
     source_freshness: SourceFreshness = SourceFreshness.CURRENT,
     source_span: bool = True,
+    file_type: FileType = FileType.TXT,
+    page_number: int | None = 1,
     ocr_applied: bool = False,
     ocr_confidence: float | None = None,
     external_confidence: str | None = "high: exact synthetic source",
@@ -1128,9 +1168,9 @@ def _review_evidence_record(
         evidence_kind=EvidenceKind.PAGE_TEXT,
         source_kind=source_kind,
         document_type=DocumentType.MEMO,
-        file_type=FileType.TXT,
+        file_type=file_type,
         text=text,
-        page_number=1,
+        page_number=page_number,
         source_span_start=0 if source_span else None,
         source_span_end=len(text) if source_span else None,
         ocr_applied=ocr_applied,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
@@ -10,22 +12,64 @@ from pydantic import ValidationError
 from hailmary.config import AppConfig
 from hailmary.evidence.store import verify_citation
 from hailmary.ingest.ocr import LOW_OCR_CONFIDENCE_THRESHOLD
-from hailmary.schemas.documents import IngestedDeal, IngestedDocument, IngestionSummary, SourceKind
+from hailmary.schemas.documents import (
+    FileType,
+    IngestedDeal,
+    IngestedDocument,
+    IngestionSummary,
+    SourceKind,
+)
 from hailmary.schemas.evidence import (
     ClaimConflict,
     ClaimRecord,
     EvidenceCitation,
+    EvidenceKind,
     EvidenceRecord,
     EvidenceStore,
     SourceFreshness,
     VerificationStatus,
 )
+from hailmary.utils.source_instructions import looks_like_embedded_source_instruction
 
 LOW_CLAIM_CONFIDENCE_THRESHOLD = 0.5
+HIGH_CLAIM_CONFIDENCE_THRESHOLD = 0.75
+PAGE_LOCATION_FILE_TYPES = frozenset({FileType.PDF, FileType.PNG, FileType.JPG})
 
 
 class EvidenceReviewError(RuntimeError):
     """Evidence review could not safely read local generated evidence."""
+
+
+class ReviewIssueSeverity(StrEnum):
+    BLOCKING = "blocking"
+    WARNING = "warning"
+    INFO = "info"
+
+
+@dataclass(frozen=True)
+class EvidenceHealthMetric:
+    label: str
+    count: int
+
+
+@dataclass(frozen=True)
+class ReviewIssueSummary:
+    code: str
+    severity: ReviewIssueSeverity
+    issue: str
+    count: int
+    guidance: str
+
+
+@dataclass(frozen=True)
+class EvidenceHealthSummary:
+    source_kinds: list[EvidenceHealthMetric]
+    verification_statuses: list[EvidenceHealthMetric]
+    recency: list[EvidenceHealthMetric]
+    materiality: list[EvidenceHealthMetric]
+    confidence: list[EvidenceHealthMetric]
+    source_lineage: list[EvidenceHealthMetric]
+    issues: list[ReviewIssueSummary]
 
 
 @dataclass(frozen=True)
@@ -59,13 +103,6 @@ class ConflictReviewSummary:
 
 
 @dataclass(frozen=True)
-class ReviewIssueSummary:
-    issue: str
-    count: int
-    guidance: str
-
-
-@dataclass(frozen=True)
 class DealEvidenceReview:
     deal_id: str
     company_name: str
@@ -73,6 +110,7 @@ class DealEvidenceReview:
     evidence_count: int
     claim_count: int
     conflict_count: int
+    health: EvidenceHealthSummary
     source_documents: list[SourceDocumentEvidenceSummary]
     claim_statuses: list[ClaimStatusSummary]
     conflicts: list[ConflictReviewSummary]
@@ -94,6 +132,7 @@ def review_evidence(
     company_name: str | None = None,
     all_deals: bool = False,
     evidence_id: str | None = None,
+    recommendation_evidence_ids: Sequence[str] = (),
 ) -> EvidenceReviewResult:
     """Read local generated evidence stores and return operator review summaries."""
 
@@ -132,11 +171,12 @@ def review_evidence(
         ):
             evidence_id_found = True
         deal_reviews.append(
-            _deal_review(
+            build_deal_evidence_review(
                 deal,
                 store,
                 evidence_store_path=store_path,
                 evidence_id=evidence_id,
+                recommendation_evidence_ids=recommendation_evidence_ids,
             )
         )
 
@@ -150,6 +190,78 @@ def review_evidence(
         data_dir=data_dir,
         summary_path=summary_path,
         deals=deal_reviews,
+    )
+
+
+def build_deal_evidence_review(
+    deal: IngestedDeal,
+    store: EvidenceStore,
+    *,
+    evidence_store_path: Path,
+    evidence_id: str | None = None,
+    recommendation_evidence_ids: Sequence[str] = (),
+) -> DealEvidenceReview:
+    """Build a read-only evidence review for one already loaded evidence store."""
+
+    evidence_records = [
+        evidence
+        for evidence in store.evidence
+        if evidence_id is None or evidence.id == evidence_id
+    ]
+    health = build_evidence_health(
+        store,
+        deal.documents,
+        recommendation_evidence_ids=recommendation_evidence_ids,
+    )
+    return DealEvidenceReview(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        evidence_store_path=evidence_store_path,
+        evidence_count=store.evidence_count,
+        claim_count=store.claim_count,
+        conflict_count=store.conflict_count,
+        health=health,
+        source_documents=_source_document_summaries(store.evidence, deal.documents),
+        claim_statuses=_claim_status_summaries(store),
+        conflicts=_conflict_summaries(store),
+        issues=health.issues,
+        evidence_records=evidence_records,
+    )
+
+
+def build_evidence_health(
+    store: EvidenceStore,
+    documents: Sequence[IngestedDocument],
+    *,
+    recommendation_evidence_ids: Sequence[str] = (),
+) -> EvidenceHealthSummary:
+    """Summarize whether one evidence store is healthy enough for diligence review."""
+
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    claim_statuses = [
+        _claim_review_status(claim, evidence_by_id)
+        for claim in store.claims
+    ]
+    return EvidenceHealthSummary(
+        source_kinds=_metric_counts(
+            _source_kind_label(evidence.source_kind) for evidence in store.evidence
+        ),
+        verification_statuses=_metric_counts(
+            _verification_status_label(status) for status in claim_statuses
+        ),
+        recency=_metric_counts(
+            _source_freshness_label(evidence.source_freshness) for evidence in store.evidence
+        ),
+        materiality=_metric_counts(
+            _blank_as_not_recorded(claim.quality.materiality) for claim in store.claims
+        ),
+        confidence=_metric_counts(_confidence_bucket(claim) for claim in store.claims),
+        source_lineage=_source_lineage_metrics(store.evidence),
+        issues=_issue_summaries(
+            store,
+            documents,
+            recommendation_evidence_ids=recommendation_evidence_ids,
+        ),
     )
 
 
@@ -338,31 +450,6 @@ def _resolve_saved_path(path: Path, *, data_dir: Path, summary_path: Path) -> Pa
     return (absolute_data_dir / path.name).resolve(strict=False)
 
 
-def _deal_review(
-    deal: IngestedDeal,
-    store: EvidenceStore,
-    *,
-    evidence_store_path: Path,
-    evidence_id: str | None,
-) -> DealEvidenceReview:
-    evidence_records = [
-        evidence for evidence in store.evidence if evidence_id is None or evidence.id == evidence_id
-    ]
-    return DealEvidenceReview(
-        deal_id=store.deal_id,
-        company_name=store.company_name,
-        evidence_store_path=evidence_store_path,
-        evidence_count=store.evidence_count,
-        claim_count=store.claim_count,
-        conflict_count=store.conflict_count,
-        source_documents=_source_document_summaries(store.evidence, deal.documents),
-        claim_statuses=_claim_status_summaries(store),
-        conflicts=_conflict_summaries(store),
-        issues=_issue_summaries(store, deal.documents),
-        evidence_records=evidence_records,
-    )
-
-
 def _source_document_summaries(
     evidence_records: list[EvidenceRecord],
     documents: list[IngestedDocument],
@@ -505,38 +592,111 @@ def _conflict_guidance(conflict: ClaimConflict, *, active: bool) -> str:
 
 def _issue_summaries(
     store: EvidenceStore,
-    documents: list[IngestedDocument],
+    documents: Sequence[IngestedDocument],
+    *,
+    recommendation_evidence_ids: Sequence[str],
 ) -> list[ReviewIssueSummary]:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
     document_ids_with_evidence = {evidence.document_id for evidence in store.evidence}
+    citation_status_counts = _claim_citation_status_counts(store, evidence_by_id)
+    cited_evidence_ids = _claim_cited_evidence_ids(store)
+    recommendation_evidence_id_set = {
+        evidence_id.strip()
+        for evidence_id in recommendation_evidence_ids
+        if evidence_id.strip()
+    }
+    cited_or_recommendation_ids = cited_evidence_ids | recommendation_evidence_id_set
+    unsafe_cited_count = sum(
+        1
+        for evidence in store.evidence
+        if evidence.id in cited_or_recommendation_ids
+        and looks_like_embedded_source_instruction(evidence.text)
+    )
+    unsafe_uncited_count = sum(
+        1
+        for evidence in store.evidence
+        if evidence.id not in cited_or_recommendation_ids
+        and looks_like_embedded_source_instruction(evidence.text)
+    )
     issues = [
         _issue(
+            "empty_store",
+            ReviewIssueSeverity.BLOCKING,
             "No usable evidence",
             1 if not store.evidence else 0,
-            "Re-run ingestion after adding readable source documents or enabling needed OCR.",
+            "Re-run ingestion after adding readable source documents or enabling needed "
+            "image-based text reading.",
         ),
         _issue(
+            "external_lineage",
+            ReviewIssueSeverity.BLOCKING,
+            "External evidence missing exact source",
+            sum(1 for evidence in store.evidence if _external_reference_missing(evidence)),
+            "External research evidence needs an exact source URL or data service source "
+            "before it can be trusted.",
+        ),
+        _issue(
+            "missing_evidence",
+            ReviewIssueSeverity.BLOCKING,
+            "Missing cited evidence",
+            citation_status_counts[VerificationStatus.EVIDENCE_NOT_FOUND]
+            + sum(
+                1
+                for evidence_id in recommendation_evidence_id_set
+                if evidence_id not in evidence_by_id
+            ),
+            "A claim or recommendation points to an evidence ID that is not in the "
+            "evidence store.",
+        ),
+        _issue(
+            "broken_citations",
+            ReviewIssueSeverity.BLOCKING,
+            "Broken claim citation spans",
+            citation_status_counts[VerificationStatus.SPAN_MISMATCH]
+            + citation_status_counts[VerificationStatus.QUOTE_MISMATCH],
+            "A saved claim citation no longer matches the stored evidence text. Rebuild "
+            "or re-check the evidence before relying on the claim.",
+        ),
+        _issue(
+            "unsafe_cited",
+            ReviewIssueSeverity.BLOCKING,
+            "Unsafe source-document instructions in cited evidence",
+            unsafe_cited_count,
+            "Cited evidence contains text that looks like instructions from a source "
+            "document, not investment evidence. Remove or replace those citations before "
+            "trusting a recommendation.",
+        ),
+        _issue(
+            "doc_no_evidence",
+            ReviewIssueSeverity.WARNING,
             "Documents with no usable evidence",
             sum(
                 1
                 for document in documents
                 if document.source.id not in document_ids_with_evidence
             ),
-            "Review those source documents, add readable files, or enable OCR before scoring.",
+            "Review those source documents, add readable files, or enable image-based "
+            "text reading before scoring.",
         ),
         _issue(
-            "Documents needing OCR review",
+            "doc_needs_image",
+            ReviewIssueSeverity.WARNING,
+            "Documents needing image-based text review",
             sum(1 for document in documents if _document_needs_image_text_review(document)),
-            "Use image-based text reading (OCR) or manual review before relying on "
-            "missing content.",
+            "Use image-based text reading or manual review before relying on missing "
+            "content.",
         ),
         _issue(
-            "OCR-applied evidence",
+            "image_text",
+            ReviewIssueSeverity.WARNING,
+            "Image-based text reading evidence",
             sum(1 for evidence in store.evidence if evidence.ocr_applied),
             "Review image-read text against the source document before relying on it.",
         ),
         _issue(
-            "Low-confidence OCR",
+            "low_image_text",
+            ReviewIssueSeverity.WARNING,
+            "Low-confidence image-based text reading",
             sum(
                 1
                 for evidence in store.evidence
@@ -547,6 +707,15 @@ def _issue_summaries(
             "Treat low-confidence image-read text as needing source review.",
         ),
         _issue(
+            "active_conflicts",
+            ReviewIssueSeverity.WARNING,
+            "Active conflicting claims",
+            sum(1 for conflict in _conflict_summaries(store) if conflict.status == "active"),
+            "Resolve conflicting claims before relying on scoring or model review.",
+        ),
+        _issue(
+            "stale_evidence",
+            ReviewIssueSeverity.WARNING,
             "Stale source freshness",
             sum(
                 1
@@ -556,6 +725,8 @@ def _issue_summaries(
             "Find newer evidence or confirm that the old source is still accurate.",
         ),
         _issue(
+            "unknown_freshness",
+            ReviewIssueSeverity.WARNING,
             "Unknown source freshness",
             sum(
                 1
@@ -565,16 +736,29 @@ def _issue_summaries(
             "Confirm when the source was created or retrieved.",
         ),
         _issue(
+            "missing_spans",
+            ReviewIssueSeverity.WARNING,
             "Missing source spans",
             sum(1 for evidence in store.evidence if _missing_source_span(evidence)),
             "The evidence can be reviewed, but its exact source-text position is missing.",
         ),
         _issue(
+            "missing_location",
+            ReviewIssueSeverity.WARNING,
+            "Missing page or table location",
+            sum(1 for evidence in store.evidence if _missing_location(evidence)),
+            "Evidence should name a page or table when the source format supports it.",
+        ),
+        _issue(
+            "missing_citations",
+            ReviewIssueSeverity.WARNING,
             "Missing claim citations",
             sum(1 for claim in store.claims if not claim.citations),
             "Claims without citations should not be relied on until source evidence is linked.",
         ),
         _issue(
+            "invalid_citations",
+            ReviewIssueSeverity.WARNING,
             "Invalid claim citations",
             sum(
                 1
@@ -584,6 +768,8 @@ def _issue_summaries(
             "Citation spans no longer match the stored evidence text.",
         ),
         _issue(
+            "low_claim_conf",
+            ReviewIssueSeverity.WARNING,
             "Low-confidence claims",
             sum(
                 1
@@ -593,6 +779,8 @@ def _issue_summaries(
             "Review these claims before scoring or model review.",
         ),
         _issue(
+            "external_conf",
+            ReviewIssueSeverity.WARNING,
             "External evidence missing confidence notes",
             sum(
                 1
@@ -602,8 +790,48 @@ def _issue_summaries(
             ),
             "External research evidence should include an operator confidence note.",
         ),
+        _issue(
+            "unsafe_uncited",
+            ReviewIssueSeverity.WARNING,
+            "Unsafe source-document instructions in uncited evidence",
+            unsafe_uncited_count,
+            "This evidence is not currently cited by claims or recommendations, but it "
+            "contains text that looks like source-document instructions. Review before "
+            "using it.",
+        ),
     ]
     return [issue for issue in issues if issue.count > 0]
+
+
+def _metric_counts(values: Iterable[str]) -> list[EvidenceHealthMetric]:
+    counts = Counter(value for value in values if value)
+    return [
+        EvidenceHealthMetric(label=label, count=count)
+        for label, count in sorted(counts.items(), key=lambda item: item[0])
+    ]
+
+
+def _source_lineage_metrics(
+    evidence_records: Sequence[EvidenceRecord],
+) -> list[EvidenceHealthMetric]:
+    counts: Counter[str] = Counter()
+    for evidence in evidence_records:
+        has_issue = False
+        if _external_reference_missing(evidence):
+            counts["missing external URL or data service source"] += 1
+            has_issue = True
+        if _missing_source_span(evidence):
+            counts["missing source span"] += 1
+            has_issue = True
+        if _missing_location(evidence):
+            counts["missing page or table location"] += 1
+            has_issue = True
+        if not has_issue:
+            counts["complete source lineage"] += 1
+    return [
+        EvidenceHealthMetric(label=label, count=count)
+        for label, count in sorted(counts.items(), key=lambda item: item[0])
+    ]
 
 
 def _source_reference_for_records(records: list[EvidenceRecord]) -> str | None:
@@ -637,8 +865,50 @@ def _document_needs_image_text_review(document: IngestedDocument) -> bool:
     )
 
 
-def _issue(issue: str, count: int, guidance: str) -> ReviewIssueSummary:
-    return ReviewIssueSummary(issue=issue, count=count, guidance=guidance)
+def _issue(
+    code: str,
+    severity: ReviewIssueSeverity,
+    issue: str,
+    count: int,
+    guidance: str,
+) -> ReviewIssueSummary:
+    return ReviewIssueSummary(
+        code=code,
+        severity=severity,
+        issue=issue,
+        count=count,
+        guidance=guidance,
+    )
+
+
+def _claim_citation_status_counts(
+    store: EvidenceStore,
+    evidence_by_id: dict[str, EvidenceRecord],
+) -> Counter[VerificationStatus]:
+    counts: Counter[VerificationStatus] = Counter()
+    for claim in store.claims:
+        for citation in claim.citations:
+            counts[_citation_review_status(citation, evidence_by_id)] += 1
+    return counts
+
+
+def _claim_cited_evidence_ids(store: EvidenceStore) -> set[str]:
+    return {
+        citation.evidence_id
+        for claim in store.claims
+        for citation in claim.citations
+    }
+
+
+def _citation_review_status(
+    citation: EvidenceCitation,
+    evidence_by_id: dict[str, EvidenceRecord],
+) -> VerificationStatus:
+    if citation.evidence_id not in evidence_by_id:
+        return VerificationStatus.EVIDENCE_NOT_FOUND
+    if citation.verification_status != VerificationStatus.VERIFIED:
+        return citation.verification_status
+    return verify_citation(citation, evidence_by_id)
 
 
 def _claim_citations_are_valid(
@@ -659,10 +929,57 @@ def _citation_is_valid(
     return verify_citation(citation, evidence_by_id) == VerificationStatus.VERIFIED
 
 
+def _external_reference_missing(evidence: EvidenceRecord) -> bool:
+    return (
+        evidence.source_kind != SourceKind.LOCAL_FILE
+        and _source_reference_for_evidence(evidence) is None
+    )
+
+
 def _missing_source_span(evidence: EvidenceRecord) -> bool:
     start = evidence.source_span_start
     end = evidence.source_span_end
     return start is None or end is None or start < 0 or end <= start
+
+
+def _missing_location(evidence: EvidenceRecord) -> bool:
+    if not supports_page_or_table_location(evidence):
+        return False
+    return evidence.page_number is None and evidence.table_index is None
+
+
+def supports_page_or_table_location(evidence: EvidenceRecord) -> bool:
+    if evidence.source_kind != SourceKind.LOCAL_FILE:
+        return False
+    if evidence.evidence_kind == EvidenceKind.TABLE_TEXT:
+        return True
+    return evidence.file_type in PAGE_LOCATION_FILE_TYPES
+
+
+def _confidence_bucket(claim: ClaimRecord) -> str:
+    confidence = claim.quality.confidence
+    if confidence >= HIGH_CLAIM_CONFIDENCE_THRESHOLD:
+        return "high confidence"
+    if confidence >= LOW_CLAIM_CONFIDENCE_THRESHOLD:
+        return "medium confidence"
+    return "low confidence"
+
+
+def _blank_as_not_recorded(value: str) -> str:
+    normalized = " ".join(value.split())
+    return normalized or "not recorded"
+
+
+def _source_kind_label(source_kind: SourceKind) -> str:
+    return source_kind.value.replace("_", " ")
+
+
+def _source_freshness_label(freshness: SourceFreshness) -> str:
+    return freshness.value.replace("_", " ")
+
+
+def _verification_status_label(status: VerificationStatus) -> str:
+    return status.value.replace("_", " ")
 
 
 def _absolute_path(path: Path) -> Path:
