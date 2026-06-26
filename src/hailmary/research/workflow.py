@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, Field
 
@@ -693,7 +693,24 @@ def _clean_workflow_website_url(url: str | None) -> str | None:
         )
     if any(character.isspace() for character in cleaned):
         raise ResearchWorkflowError("The website URL cannot contain spaces.")
-    if ";" in parsed.path or parsed.params or parsed.query or parsed.fragment:
+    try:
+        decoded_path = parsed.path
+        for _ in range(3):
+            next_decoded_path = unquote(decoded_path, errors="strict")
+            if next_decoded_path == decoded_path:
+                break
+            decoded_path = next_decoded_path
+            if any(delimiter in decoded_path for delimiter in ("?", "#", ";")):
+                break
+    except UnicodeDecodeError as exc:
+        raise ResearchWorkflowError("The website URL is not a valid URL.") from exc
+    if (
+        ";" in parsed.path
+        or any(delimiter in decoded_path for delimiter in ("?", "#", ";"))
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ResearchWorkflowError(
             "The website URL cannot include query strings, fragments, or extra "
             "parameter text. Use the base public page URL."
