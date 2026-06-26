@@ -88,7 +88,7 @@ portfolio_app = typer.Typer(
     help="Track recorded investments and available capital for new checks.",
     no_args_is_help=True,
 )
-app.add_typer(portfolio_app, name="portfolio")
+app.add_typer(portfolio_app, name="portfolio", hidden=True)
 console = Console(highlight=False)
 DEFAULT_REVIEW_QUOTE_LIMIT = 240
 MAX_REVIEW_QUOTE_LIMIT = 500
@@ -287,7 +287,7 @@ def _has_ocr_warning(notes: str | None) -> bool:
     )
 
 
-@portfolio_app.command("status")
+@portfolio_app.command("status", hidden=True)
 def portfolio_status_command(
     data_dir: Annotated[
         Path | None,
@@ -334,7 +334,7 @@ def portfolio_status_command(
     _print_panel("Portfolio status", renderables, border_style="green")
 
 
-@portfolio_app.command("add-investment")
+@portfolio_app.command("add-investment", hidden=True)
 def portfolio_add_investment_command(
     company: Annotated[
         str,
@@ -402,7 +402,7 @@ def portfolio_add_investment_command(
     )
 
 
-@portfolio_app.command("plan")
+@portfolio_app.command("plan", hidden=True)
 def portfolio_plan_command(
     data_dir: Annotated[
         Path | None,
@@ -488,7 +488,7 @@ def _parse_portfolio_date(raw_value: str) -> date:
         ) from exc
 
 
-@app.command("init")
+@app.command("init", hidden=True)
 def init(
     data_dir: Annotated[
         Path | None,
@@ -525,7 +525,7 @@ def init(
     _print_panel("Init complete", [table], border_style="green")
 
 
-@app.command("ingest-folder")
+@app.command("ingest-folder", hidden=True)
 def ingest_folder(
     folder: Annotated[
         Path,
@@ -1077,7 +1077,7 @@ def _bounded_excerpt(text: str, limit: int) -> str:
     return f"{collapsed[: limit - 3].rstrip()}..."
 
 
-@app.command("score-deals")
+@app.command("score-deals", hidden=True)
 def score_deals(
     data_dir: Annotated[
         Path | None,
@@ -1446,7 +1446,7 @@ def evaluate_deal(
     _print_panel("Deal evaluation complete", renderables, border_style="green")
 
 
-@app.command("prepare-agent-packets")
+@app.command("prepare-agent-packets", hidden=True)
 def prepare_agent_packets_command(
     data_dir: Annotated[
         Path | None,
@@ -1477,7 +1477,7 @@ def prepare_agent_packets_command(
     )
 
 
-@app.command("validate-agent-output")
+@app.command("validate-agent-output", hidden=True)
 def validate_agent_output_command(
     output_path: Annotated[
         Path,
@@ -1521,7 +1521,7 @@ def validate_agent_output_command(
     )
 
 
-@app.command("run-evals")
+@app.command("run-evals", hidden=True)
 def run_evals_command(
     case: Annotated[
         list[str] | None,
@@ -1583,7 +1583,7 @@ def run_evals_command(
         raise typer.Exit(1) from None
 
 
-@app.command("list-research-providers")
+@app.command("list-research-providers", hidden=True)
 def list_research_providers_command(
     include_paid: Annotated[
         bool,
@@ -1637,7 +1637,7 @@ def list_research_providers_command(
     _print_panel("Research providers", renderables, border_style="cyan")
 
 
-@app.command("research-workflow")
+@app.command("research-workflow", hidden=True)
 def research_workflow_command(
     company: Annotated[
         list[str] | None,
@@ -1922,7 +1922,7 @@ def _research_workflow_import_lines(preview: ResearchWorkflowImportPreview) -> l
     return lines
 
 
-@app.command("prepare-research-plan")
+@app.command("prepare-research-plan", hidden=True)
 def prepare_research_plan_command(
     company: Annotated[
         list[str] | None,
@@ -2013,7 +2013,7 @@ def prepare_research_plan_command(
     _print_panel("Research plan prepared", plan_lines, border_style="green")
 
 
-@app.command("collect-web-research")
+@app.command("collect-web-research", hidden=True)
 def collect_web_research_command(
     research_plan: Annotated[
         Path | None,
@@ -2117,7 +2117,7 @@ def collect_web_research_command(
         raise typer.Exit(1)
 
 
-@app.command("prepare-research-results-template")
+@app.command("prepare-research-results-template", hidden=True)
 def prepare_research_results_template_command(
     research_plan: Annotated[
         Path | None,
@@ -2171,7 +2171,7 @@ def prepare_research_results_template_command(
     )
 
 
-@app.command("prepare-public-research-results")
+@app.command("prepare-public-research-results", hidden=True)
 def prepare_public_research_results_command(
     company: Annotated[
         list[str] | None,
@@ -2335,7 +2335,7 @@ def prepare_public_research_results_command(
     _print_section("Public research results prepared", result_lines, style="green")
 
 
-@app.command("collect-sec-form-d-filings")
+@app.command("collect-sec-form-d-filings", hidden=True)
 def collect_sec_form_d_filings_command(
     company: Annotated[
         list[str] | None,
@@ -2458,7 +2458,7 @@ def collect_sec_form_d_filings_command(
     _print_section("SEC Form D results collected", lines, style="green")
 
 
-@app.command("collect-github-repositories")
+@app.command("collect-github-repositories", hidden=True)
 def collect_github_repositories_command(
     company: Annotated[
         list[str] | None,
@@ -2583,7 +2583,7 @@ def collect_github_repositories_command(
     _print_section("GitHub repository results collected", lines, style="green")
 
 
-@app.command("collect-usaspending-awards")
+@app.command("collect-usaspending-awards", hidden=True)
 def collect_usaspending_awards_command(
     company: Annotated[
         list[str] | None,
@@ -2702,7 +2702,7 @@ def collect_usaspending_awards_command(
     _print_section("USAspending results collected", lines, style="green")
 
 
-@app.command("collect-sbir-awards")
+@app.command("collect-sbir-awards", hidden=True)
 def collect_sbir_awards_command(
     company: Annotated[
         list[str] | None,
@@ -2821,7 +2821,7 @@ def collect_sbir_awards_command(
     _print_section("SBIR/STTR results collected", lines, style="green")
 
 
-@app.command("prepare-meridian-workflow")
+@app.command("prepare-meridian-workflow", hidden=True)
 def prepare_meridian_workflow_command(
     company: Annotated[
         str,
@@ -2888,7 +2888,7 @@ def prepare_meridian_workflow_command(
     )
 
 
-@app.command("import-research-results")
+@app.command("import-research-results", hidden=True)
 def import_research_results_command(
     results_file: Annotated[
         Path,

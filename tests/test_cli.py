@@ -71,6 +71,37 @@ def test_bin_wrapper_runs_without_uv_run() -> None:
     assert "PYTHONPATH" in wrapper_text
 
 
+def test_top_level_help_shows_only_operator_commands() -> None:
+    result = runner.invoke(app, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "evaluate-deal" in result.output
+    assert "review-evidence" in result.output
+    hidden_commands = [
+        "init",
+        "ingest-folder",
+        "score-deals",
+        "prepare-agent-packets",
+        "validate-agent-output",
+        "run-evals",
+        "list-research-providers",
+        "research-workflow",
+        "prepare-research-plan",
+        "collect-web-research",
+        "prepare-research-results-template",
+        "prepare-public-research-results",
+        "collect-sec-form-d-filings",
+        "collect-github-repositories",
+        "collect-usaspending-awards",
+        "collect-sbir-awards",
+        "prepare-meridian-workflow",
+        "import-research-results",
+        "portfolio",
+    ]
+    for command in hidden_commands:
+        assert command not in result.output
+
+
 def test_init_creates_local_state(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "local-data"
@@ -710,7 +741,10 @@ def test_review_evidence_no_local_data_initialized_has_plain_english_error(
     )
 
     assert result.exit_code != 0
-    assert "No local data initialized" in result.output
+    normalized_output = " ".join(result.output.split())
+    assert "No local generated-data folder was found" in normalized_output
+    assert "hailmary" in normalized_output
+    assert "evaluate-deal" in normalized_output
     assert "Traceback" not in result.output
 
 
@@ -723,7 +757,10 @@ def test_review_evidence_missing_ingestion_summary_has_plain_english_error(
     result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
 
     assert result.exit_code != 0
-    assert "No ingestion summary found" in result.output
+    normalized_output = " ".join(result.output.split())
+    assert "No generated evidence was found" in normalized_output
+    assert "hailmary" in normalized_output
+    assert "evaluate-deal" in normalized_output
     assert "Traceback" not in result.output
 
 
@@ -768,7 +805,10 @@ def test_review_evidence_malformed_evidence_store_has_plain_english_error(
     result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
 
     assert result.exit_code != 0
-    assert "evidence store for BrokenCo could not be read" in result.output
+    normalized_output = " ".join(result.output.split())
+    assert "evidence store for BrokenCo could not be read" in normalized_output
+    assert "hailmary" in normalized_output
+    assert "evaluate-deal" in normalized_output
     assert "Traceback" not in result.output
 
 

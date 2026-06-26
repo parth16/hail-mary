@@ -107,8 +107,8 @@ def review_evidence(
     summary_path = data_dir / "processed" / "ingestion_summary.json"
     if not summary_path.exists():
         raise EvidenceReviewError(
-            "No ingestion summary found. Run `hailmary ingest-folder` before reviewing "
-            "evidence."
+            "No generated evidence was found. Run `hailmary evaluate-deal <company-folder>` "
+            "before reviewing evidence."
         )
 
     summary = _load_ingestion_summary(summary_path)
@@ -190,13 +190,13 @@ def _ensure_local_data(data_dir: Path) -> None:
             )
     if not data_dir.exists():
         raise EvidenceReviewError(
-            "No local data initialized. Run `hailmary init` and `hailmary ingest-folder` "
-            "before reviewing evidence."
+            "No local generated-data folder was found. Run "
+            "`hailmary evaluate-deal <company-folder>` before reviewing evidence."
         )
     if not data_dir.is_dir():
         raise EvidenceReviewError(
             f"Hail Mary local data at {data_dir} is not a folder. Choose the data "
-            "folder created by `hailmary init`."
+            "folder created by `hailmary evaluate-deal`."
         )
 
 
@@ -205,7 +205,7 @@ def _load_ingestion_summary(summary_path: Path) -> IngestionSummary:
         raw_summary = summary_path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise EvidenceReviewError(
-            "The ingestion summary is not plain text. Run `hailmary ingest-folder` again "
+            "The ingestion summary is not plain text. Run `hailmary evaluate-deal` again "
             "before reviewing evidence."
         ) from exc
     except OSError as exc:
@@ -216,7 +216,7 @@ def _load_ingestion_summary(summary_path: Path) -> IngestionSummary:
         return IngestionSummary.model_validate_json(raw_summary)
     except ValidationError as exc:
         raise EvidenceReviewError(
-            "The ingestion summary could not be read. Run `hailmary ingest-folder` again "
+            "The ingestion summary could not be read. Run `hailmary evaluate-deal` again "
             "before reviewing evidence."
         ) from exc
 
@@ -230,7 +230,7 @@ def _select_deals(
 ) -> list[IngestedDeal]:
     if not deals:
         raise EvidenceReviewError(
-            "The latest ingestion summary has no deals. Run `hailmary ingest-folder` "
+            "The latest ingestion summary has no deals. Run `hailmary evaluate-deal` "
             "with deal documents before reviewing evidence."
         )
     if all_deals:
@@ -273,7 +273,7 @@ def _evidence_store_path_for_deal(
     if deal.evidence_store_path is None:
         raise EvidenceReviewError(
             f"No evidence store was found for {deal.company_name}. Run "
-            "`hailmary ingest-folder` again before reviewing evidence."
+            "`hailmary evaluate-deal` again before reviewing evidence."
         )
     store_path = _resolve_saved_path(
         deal.evidence_store_path,
@@ -283,7 +283,7 @@ def _evidence_store_path_for_deal(
     if not store_path.exists():
         raise EvidenceReviewError(
             f"The evidence store for {deal.company_name} is missing at {store_path}. "
-            "Run `hailmary ingest-folder` again before reviewing evidence."
+            "Run `hailmary evaluate-deal` again before reviewing evidence."
         )
     return store_path
 
@@ -294,7 +294,7 @@ def _load_evidence_store(path: Path, *, company_name: str) -> EvidenceStore:
     except UnicodeDecodeError as exc:
         raise EvidenceReviewError(
             f"The evidence store for {company_name} is not plain text. Run "
-            "`hailmary ingest-folder` again before reviewing evidence."
+            "`hailmary evaluate-deal` again before reviewing evidence."
         ) from exc
     except OSError as exc:
         raise EvidenceReviewError(
@@ -305,7 +305,7 @@ def _load_evidence_store(path: Path, *, company_name: str) -> EvidenceStore:
     except ValidationError as exc:
         raise EvidenceReviewError(
             f"The evidence store for {company_name} could not be read. Run "
-            "`hailmary ingest-folder` again before reviewing evidence."
+            "`hailmary evaluate-deal` again before reviewing evidence."
         ) from exc
 
 
