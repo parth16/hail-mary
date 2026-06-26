@@ -254,6 +254,108 @@ def test_evaluate_deal_local_only_succeeds_without_model_env(
     assert "No specialist output passed validation" not in memo_text
 
 
+def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="ResearchCo",
+        body="Valuation cap $8M. Round size $1M. Lead investor committed.",
+    )
+    research_path = tmp_path / "research-results.json"
+    research_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "ResearchCo",
+                        "provider_id": "company_website",
+                        "provider_name": "Company website",
+                        "title": "ResearchCo traction page",
+                        "text": (
+                            "ResearchCo public site reports ARR revenue growth, "
+                            "paid customers, weekly usage, and retention."
+                        ),
+                        "retrieved_at": "2026-01-01T12:00:00Z",
+                        "source_url": "https://example.com/researchco/traction",
+                        "confidence": "high: exact synthetic company match",
+                        "licensing_notes": "Synthetic public page fixture.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = RecordingReviewClient()
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+        research_results_files=[research_path],
+    )
+
+    assert result.research_run is not None
+    assert result.research_imported_count == 1
+    assert result.evidence_count == 2
+    assert result.deterministic_score.score_factors
+    serialized_payloads = "\n".join(client.request_payloads)
+    assert "ResearchCo public site reports ARR revenue growth" in serialized_payloads
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "## External Research" in memo_text
+    assert "Imported 1 external research evidence record before scoring." in memo_text
+
+
+def test_evaluate_deal_blocks_bad_supplied_research_results_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="BadResearchCo")
+    research_path = tmp_path / "bad-research-results.json"
+    research_path.write_text('{"results": [{}]}', encoding="utf-8")
+
+    with pytest.raises(
+        EvaluationError,
+        match="research results file passed to evaluate-deal could not be imported",
+    ):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+            max_concurrency=1,
+            research_results_files=[research_path],
+        )
+
+    assert not list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
+
+
+def test_evaluate_deal_blocks_bad_provider_results_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="BadPublicSourceCo")
+    sec_results_path = tmp_path / "bad-sec-results.json"
+    sec_results_path.write_text("[{}]", encoding="utf-8")
+
+    with pytest.raises(
+        EvaluationError,
+        match="local public-source results file passed to evaluate-deal",
+    ):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+            max_concurrency=1,
+            sec_form_d_results_path=sec_results_path,
+        )
+
+    assert not list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
+
+
 def test_evaluate_deal_local_only_filters_instruction_citations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

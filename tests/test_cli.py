@@ -293,6 +293,66 @@ def test_evaluate_deal_local_only_cli_prints_safe_run_summary(
     assert "Valuation cap $8M" not in result.output
 
 
+def test_evaluate_deal_cli_imports_research_results_before_final_decision(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "CliResearchCo"
+    source.mkdir()
+    (source / "memo.txt").write_text(
+        "Valuation cap $8M. Round size $1M. Lead investor committed.",
+        encoding="utf-8",
+    )
+    research_results = tmp_path / "research-results.json"
+    research_results.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "CliResearchCo",
+                        "provider_id": "company_website",
+                        "provider_name": "Company website",
+                        "title": "CliResearchCo traction page",
+                        "text": (
+                            "CliResearchCo public site reports ARR revenue growth, "
+                            "paid customers, and strong retention."
+                        ),
+                        "retrieved_at": "2026-01-01T12:00:00Z",
+                        "source_url": "https://example.com/cliresearchco/traction",
+                        "confidence": "high: exact synthetic company match",
+                        "licensing_notes": "Synthetic public page fixture.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-deal",
+            str(source),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--results-file",
+            str(research_results),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "external research workflow" in normalized_output
+    assert "External research imported 1" in normalized_output
+    assert "External research planned" in normalized_output
+    assert "CliResearchCo public site reports" not in result.output
+    memo_paths = list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
+    assert len(memo_paths) == 1
+    memo_text = memo_paths[0].read_text(encoding="utf-8")
+    assert "## External Research" in memo_text
+    assert "Imported 1 external research evidence record before scoring." in memo_text
+
+
 def test_ingest_folder_unreadable_path_has_plain_english_warning(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
