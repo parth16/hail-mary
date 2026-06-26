@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import zipfile
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
 from docx import Document
 
-from hailmary.agents.packets import build_agent_input_packet
+from hailmary.agents.packets import DEFAULT_AGENT_ROLES, build_agent_input_packet
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig
-from hailmary.evaluation import render_final_evaluation_memo
+from hailmary.evaluation import (
+    evaluate_deal_folder,
+    openai_review_messages,
+    render_final_evaluation_memo,
+)
 from hailmary.ingest.extractors import extract_document
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.ingest.ocr import LocalOcrResult
@@ -33,12 +39,15 @@ from hailmary.research import (
     run_research_workflow,
 )
 from hailmary.schemas.agents import (
+    AgentEvidenceItem,
     AgentEvidenceReference,
+    AgentFinding,
     AgentInputPacket,
     AgentRecommendationRationale,
     AgentReviewOutput,
     AgentRole,
     AgentSummaryPoint,
+    AgentValidationIssue,
 )
 from hailmary.schemas.documents import DocumentType, FileType, SourceKind
 from hailmary.schemas.evidence import (
@@ -2585,6 +2594,343 @@ def run_memo_snapshot_fixture() -> None:
     )
 
 
+def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
+    class FixtureReviewClient:
+        def __init__(self) -> None:
+            self.request_payloads: list[str] = []
+            self.request_payloads_by_role: dict[AgentRole, list[str]] = {}
+            self.committee_contexts_by_role: dict[AgentRole, list[str]] = {}
+            self.roles: list[AgentRole] = []
+
+        def create_review(
+            self,
+            packet: AgentInputPacket,
+            *,
+            repair_issues: Sequence[AgentValidationIssue] = (),
+            committee_context: str | None = None,
+        ) -> str:
+            self.roles.append(packet.agent_role)
+            payload = json.dumps(
+                openai_review_messages(
+                    packet,
+                    repair_issues=repair_issues,
+                    committee_context=committee_context,
+                ),
+                sort_keys=True,
+            )
+            self.request_payloads.append(payload)
+            self.request_payloads_by_role.setdefault(packet.agent_role, []).append(payload)
+            self.committee_contexts_by_role.setdefault(packet.agent_role, []).append(
+                committee_context or ""
+            )
+            return _golden_agent_output(packet).model_dump_json()
+
+    safe_work_dir = work_dir.resolve(strict=False)
+    root = safe_work_dir / "pitch-decks"
+    company = root / "Synthetic GoldenCo"
+    company.mkdir(parents=True)
+    private_tail_marker = "PRIVATE_FULL_TEXT_MARKER_AT_END"
+    (company / "memo.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M. "
+        "This memo intentionally leaves traction and funding evidence to the "
+        "supplied public research fixture. "
+        + ("filler " * 500)
+        + private_tail_marker,
+        encoding="utf-8",
+    )
+
+    results_path = safe_work_dir / "research-results.json"
+    results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Synthetic GoldenCo",
+                        "provider_id": "company_website",
+                        "provider_name": "Company website",
+                        "title": "Synthetic GoldenCo traction page",
+                        "text": (
+                            "Synthetic GoldenCo public site reports paid customer "
+                            "growth, ARR revenue growth, retained pilots, active "
+                            "enterprise usage, and retention. Lead investor committed "
+                            "and seed round is active."
+                        ),
+                        "retrieved_at": "2025-12-31T12:00:00Z",
+                        "source_url": "https://example.com/synthetic-goldenco/traction",
+                        "confidence": "high: exact synthetic company match",
+                        "licensing_notes": "Synthetic public page fixture.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig(
+        data_dir=safe_work_dir / "data",
+        local_only=False,
+        mock_llm=False,
+    )
+    client = FixtureReviewClient()
+    original_env = {
+        name: os.environ.get(name)
+        for name in ("HAILMARY_LLM_PROVIDER", "HAILMARY_MODEL", "OPENAI_API_KEY")
+    }
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(safe_work_dir)
+        os.environ["HAILMARY_LLM_PROVIDER"] = "openai"
+        os.environ["HAILMARY_MODEL"] = "gpt-eval-fixture"
+        os.environ["OPENAI_API_KEY"] = "synthetic-eval-key"
+        result = evaluate_deal_folder(
+            company,
+            config=config,
+            model_client=client,
+            max_concurrency=1,
+            research_results_files=[results_path],
+            created_at=BUILT_AT,
+        )
+    finally:
+        os.chdir(original_cwd)
+        for name, value in original_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    _expect_equal(
+        result.evaluation_mode,
+        "model-backed",
+        "Expected the golden workflow to exercise model-backed evaluate-deal mode.",
+    )
+    _expect_equal(
+        result.research_imported_count,
+        1,
+        "Expected evaluate-deal to import supplied research before scoring.",
+    )
+    _expect_equal(
+        result.deterministic_score.recommendation,
+        Recommendation.INVEST,
+        "Expected the strong synthetic deal to clear rule-based scoring.",
+    )
+    _expect_equal(
+        result.final_recommendation.recommendation,
+        Recommendation.INVEST,
+        "Expected the strong synthetic deal to keep an INVEST final recommendation.",
+    )
+    _expect(
+        result.final_recommendation.check_size in {1_000, 2_500, 5_000, 7_500, 10_000},
+        "Expected evaluate-deal to return an allowed nonzero check size.",
+        actual=str(result.final_recommendation.check_size),
+    )
+    evidence_store_path = (
+        config.data_dir / "processed" / "deals" / result.deal_id / "evidence_store.json"
+    )
+    store = EvidenceStore.model_validate_json(evidence_store_path.read_text(encoding="utf-8"))
+    research_evidence_ids = {
+        evidence.id
+        for evidence in store.evidence
+        if evidence.source_url == "https://example.com/synthetic-goldenco/traction"
+    }
+    _expect(
+        bool(research_evidence_ids),
+        "Expected supplied research to be imported into the final evidence store.",
+    )
+    score_evidence_ids = {
+        evidence_id
+        for factor in result.deterministic_score.score_factors
+        for evidence_id in factor.evidence_ids
+    }
+    _expect(
+        bool(research_evidence_ids & score_evidence_ids),
+        "Expected rule-based scoring to cite the imported research evidence.",
+        research_evidence_ids=", ".join(sorted(research_evidence_ids)),
+        score_evidence_ids=", ".join(sorted(score_evidence_ids)),
+    )
+    final_evidence_ids = {
+        reference.evidence_id for reference in result.final_recommendation.evidence
+    }
+    _expect(
+        bool(research_evidence_ids & final_evidence_ids),
+        "Expected the final recommendation to cite imported research evidence.",
+        research_evidence_ids=", ".join(sorted(research_evidence_ids)),
+        final_evidence_ids=", ".join(sorted(final_evidence_ids)),
+    )
+    _expect(
+        AgentRole.FINAL_DECISION in client.roles,
+        "Expected evaluate-deal to run the final model-review role.",
+    )
+    expected_specialist_roles = {
+        role for role in DEFAULT_AGENT_ROLES if role != AgentRole.FINAL_DECISION
+    }
+    observed_roles = set(client.roles)
+    missing_specialist_roles = sorted(
+        role.value for role in expected_specialist_roles - observed_roles
+    )
+    _expect(
+        not missing_specialist_roles,
+        "Expected evaluate-deal to run every specialist model-review role.",
+        missing_roles=", ".join(missing_specialist_roles),
+    )
+    packet_paths = sorted((config.data_dir / "agent-packets").glob("*.json"))
+    parsed_packets = [
+        AgentInputPacket.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in packet_paths
+    ]
+    packet_roles = {packet.agent_role for packet in parsed_packets}
+    missing_packet_roles = sorted(role.value for role in set(DEFAULT_AGENT_ROLES) - packet_roles)
+    _expect(
+        not missing_packet_roles,
+        "Expected evaluate-deal to persist parseable packet artifacts for every role.",
+        missing_roles=", ".join(missing_packet_roles),
+    )
+    output_paths = sorted(
+        path
+        for path in result.agent_output_dir.glob("*.json")
+        if "-attempt-" not in path.name
+    )
+    parsed_outputs = [
+        AgentReviewOutput.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in output_paths
+    ]
+    output_roles = {output.agent_role for output in parsed_outputs}
+    missing_output_roles = sorted(role.value for role in set(DEFAULT_AGENT_ROLES) - output_roles)
+    _expect(
+        not missing_output_roles,
+        "Expected evaluate-deal to persist parseable model-output artifacts for every role.",
+        missing_roles=", ".join(missing_output_roles),
+    )
+    product_output = next(
+        (
+            output
+            for output in parsed_outputs
+            if output.agent_role == AgentRole.PRODUCT_CUSTOMER_TRACTION
+        ),
+        None,
+    )
+    _expect(
+        product_output is not None,
+        "Expected a parseable Product Customer Traction model-output artifact.",
+    )
+    if product_output is None:
+        raise EvalFixtureFailure("Expected product traction model output.")
+    product_output_evidence_ids = _agent_output_evidence_ids(product_output)
+    _expect(
+        bool(research_evidence_ids & product_output_evidence_ids),
+        "Expected Product Customer Traction output to cite imported research evidence.",
+        research_evidence_ids=", ".join(sorted(research_evidence_ids)),
+        product_output_evidence_ids=", ".join(sorted(product_output_evidence_ids)),
+    )
+    final_contexts = client.committee_contexts_by_role.get(AgentRole.FINAL_DECISION, [])
+    _expect(
+        bool(final_contexts) and "supported_specialist_findings" in final_contexts[-1],
+        "Expected the final model-review request to include specialist committee context.",
+    )
+    _expect(
+        bool(final_contexts) and "Source-linked synthetic review" in final_contexts[-1],
+        "Expected specialist findings to reach the final model-review context.",
+    )
+    final_payloads = client.request_payloads_by_role.get(AgentRole.FINAL_DECISION, [])
+    _expect(
+        bool(final_payloads) and "supported_specialist_findings" in final_payloads[-1],
+        "Expected final-decision model messages to include specialist committee context.",
+    )
+    _expect(
+        bool(final_payloads) and "Source-linked synthetic review" in final_payloads[-1],
+        "Expected specialist findings to reach final-decision model messages.",
+    )
+    _expect(
+        result.evidence_review is not None,
+        "Expected evaluate-deal to run the evidence health review.",
+    )
+    if result.evidence_review is None:
+        raise EvalFixtureFailure("Expected evaluate-deal to run the evidence health review.")
+    reviewed_evidence_ids = {
+        evidence.id for evidence in result.evidence_review.evidence_records
+    }
+    _expect(
+        research_evidence_ids <= reviewed_evidence_ids,
+        "Expected evidence health to include imported research cited by scoring or final review.",
+        research_evidence_ids=", ".join(sorted(research_evidence_ids)),
+        reviewed_evidence_ids=", ".join(sorted(reviewed_evidence_ids)),
+    )
+    missing_evidence_issue = next(
+        (
+            issue
+            for issue in result.evidence_review.issues
+            if issue.code == "missing_evidence"
+        ),
+        None,
+    )
+    _expect(
+        missing_evidence_issue is None or missing_evidence_issue.count == 0,
+        "Expected evidence health not to report missing cited score or final evidence.",
+    )
+
+    memo = result.final_memo_path.read_text(encoding="utf-8")
+    expected_sections = [
+        "# Hail Mary Final Evaluation: Synthetic GoldenCo",
+        "## Decision",
+        "## Rule-Based Decision And Guardrails",
+        "## Score Factors",
+        "## External Research",
+        "## Evidence Health",
+        "## Model Committee Findings",
+        "## Final Recommendation",
+        "## Evidence Cited",
+        "## Limitations",
+        "## Diligence Questions",
+    ]
+    missing_sections = [section for section in expected_sections if section not in memo]
+    _expect(
+        not missing_sections,
+        "Expected the final evaluate-deal memo to keep every operator-facing section.",
+        missing_sections=", ".join(missing_sections),
+    )
+    expected_fragments = [
+        "**Recommendation:**",
+        "**Suggested check:**",
+        "**Score:**",
+        "Imported 1 external research evidence record before scoring.",
+        (
+            "Evidence health means whether saved source records are complete and safe "
+            "enough to rely on."
+        ),
+        "Model recommendation before guardrails:",
+        "### Product Customer Traction",
+        "Source-linked synthetic review",
+        "This memo is a diligence aid, not legal, tax, financial, or investment advice.",
+    ]
+    missing_fragments = [fragment for fragment in expected_fragments if fragment not in memo]
+    _expect(
+        not missing_fragments,
+        "Expected the final evaluate-deal memo to include current run details.",
+        missing_fragments=", ".join(missing_fragments),
+    )
+    imported_research_id = sorted(research_evidence_ids)[0]
+    _expect(
+        imported_research_id in memo or imported_research_id.replace("_", "\\_") in memo,
+        "Expected the final memo to cite the imported research evidence ID.",
+        imported_research_id=imported_research_id,
+    )
+
+    serialized_payloads = "\n".join(client.request_payloads)
+    _expect(
+        "Synthetic GoldenCo public site reports paid customer growth" in serialized_payloads,
+        "Expected imported research evidence to reach model-review packets.",
+    )
+    leaked_private_markers = [
+        marker
+        for marker in (private_tail_marker, str(company / "memo.txt"), "input_file")
+        if marker in serialized_payloads or marker in memo
+    ]
+    _expect(
+        not leaked_private_markers,
+        "Expected evaluate-deal outputs to avoid private long-tail text and local paths.",
+        leaked_private_markers=", ".join(leaked_private_markers),
+    )
+
+
 def run_memo_v2_score_evidence_fixture() -> None:
     store = _strong_store()
     scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
@@ -3092,3 +3438,77 @@ def _store(
         claims=claims,
         conflicts=conflicts or [],
     )
+
+
+def _golden_agent_output(packet: AgentInputPacket) -> AgentReviewOutput:
+    evidence = _golden_reference_evidence(packet)
+    quote = evidence.text.split(".", 1)[0].strip() or evidence.text[:120].strip()
+    reference = AgentEvidenceReference(evidence_id=evidence.id, quote=quote)
+    recommendation = None
+    if packet.agent_role == AgentRole.FINAL_DECISION:
+        if packet.score.recommendation == Recommendation.INVEST:
+            recommendation = AgentRecommendationRationale(
+                recommendation=Recommendation.INVEST,
+                check_size=packet.score.check_size,
+                reason=(
+                    "The synthetic packet has source-linked evidence for terms, "
+                    "traction, and funding."
+                ),
+                evidence=[reference],
+            )
+        else:
+            recommendation = AgentRecommendationRationale(
+                recommendation=Recommendation.PASS,
+                check_size=0,
+                reason="The rule-based score or guardrails require a pass.",
+                evidence=[reference],
+            )
+    return AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary=[
+            AgentSummaryPoint(
+                summary=f"{packet.agent_role} reviewed source-linked synthetic evidence.",
+                evidence=[reference],
+            )
+        ],
+        findings=[
+            AgentFinding(
+                title="Source-linked synthetic review",
+                finding="The review cited only allowed evidence from the packet.",
+                confidence=packet.score.confidence,
+                materiality="medium",
+                evidence=[reference],
+            )
+        ],
+        limitations=["Synthetic eval fixture output."],
+        recommendation=recommendation,
+    )
+
+
+def _golden_reference_evidence(packet: AgentInputPacket) -> AgentEvidenceItem:
+    if packet.agent_role in {
+        AgentRole.FINAL_DECISION,
+        AgentRole.PRODUCT_CUSTOMER_TRACTION,
+        AgentRole.FINANCING_NEXT_ROUND_RISK,
+    }:
+        for evidence in packet.evidence:
+            if "Synthetic GoldenCo public site reports" in evidence.text:
+                return evidence
+    return packet.evidence[0]
+
+
+def _agent_output_evidence_ids(output: AgentReviewOutput) -> set[str]:
+    evidence_ids: set[str] = set()
+    for summary in output.summary:
+        evidence_ids.update(reference.evidence_id for reference in summary.evidence)
+    for finding in output.findings:
+        evidence_ids.update(reference.evidence_id for reference in finding.evidence)
+    for question in output.diligence_questions:
+        evidence_ids.update(reference.evidence_id for reference in question.evidence)
+    if output.recommendation is not None:
+        evidence_ids.update(
+            reference.evidence_id for reference in output.recommendation.evidence
+        )
+    return evidence_ids
