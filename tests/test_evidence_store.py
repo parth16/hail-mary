@@ -22,6 +22,7 @@ from hailmary.schemas.evidence import (
     EvidenceCitation,
     EvidenceKind,
     EvidenceRecord,
+    EvidenceStore,
     SourceFreshness,
     VerificationStatus,
 )
@@ -61,6 +62,30 @@ def test_ingest_folder_writes_evidence_store_with_verified_deal_terms(
             == citation["quote"]
         )
         assert citation["quote"] in evidence["text"]
+
+
+def test_evidence_store_v2_default_preserves_v1_store_version() -> None:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    new_store = EvidenceStore(
+        deal_id="deal_test",
+        company_name="VersionCo",
+        created_at=created_at,
+    )
+    old_store = EvidenceStore.model_validate(
+        {
+            "version": "1",
+            "deal_id": "deal_test",
+            "company_name": "VersionCo",
+            "created_at": created_at.isoformat(),
+            "evidence": [],
+            "claims": [],
+            "conflicts": [],
+        }
+    )
+
+    assert new_store.version == "2"
+    assert old_store.version == "1"
+    assert old_store.evidence_count == 0
 
 
 def test_deal_terms_parse_table_separators_and_full_money_suffixes(

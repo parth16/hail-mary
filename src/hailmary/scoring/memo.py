@@ -144,6 +144,11 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         "**Deadline:** unknown",
         f"**Round / Instrument:** {round_summary} / unknown",
         f"**Valuation / Cap:** {valuation_summary}",
+        f"**Stage:** {_memo_metadata_value(str(scored_deal.company_stage))}",
+        f"**Product-market fit:** {_memo_metadata_value(str(scored_deal.pmf_level))}",
+        f"**Fundability risk:** {_memo_metadata_value(str(scored_deal.fundability_risk))}",
+        f"**Valuation risk:** {_memo_metadata_value(str(scored_deal.valuation_risk))}",
+        f"**Net return math:** {_memo_metadata_value(_net_return_summary(scored_deal))}",
         "",
         "## Kill Gates",
     ]
@@ -152,14 +157,19 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         lines.append(
             f"- {status}: {_memo_metadata_value(gate.name)}. "
             f"{_memo_metadata_value(gate.reason)}"
+            f"{_support_text(gate.support_status)}"
+            f"{_evidence_reference_text(gate.evidence_ids)}"
         )
 
     lines.extend(["", "## Score Factors"])
     for factor in scored_deal.score_factors:
         evidence_text = _evidence_reference_text(factor.evidence_ids)
+        missing_text = _missing_input_text(factor.missing_inputs)
         lines.append(
             f"- {_memo_metadata_value(factor.name)}: {factor.score}/{factor.max_score}. "
-            f"{_memo_metadata_value(factor.explanation)}{evidence_text}"
+            f"{_memo_metadata_value(factor.explanation)}"
+            f"{_support_text(factor.support_status)}"
+            f"{missing_text}{evidence_text}"
         )
 
     lines.extend(["", "## Verified Deal Terms"])
@@ -181,6 +191,8 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         lines.append(
             f"{question.priority}. {_memo_metadata_value(question.question)} "
             f"Reason: {_memo_metadata_value(question.reason)}"
+            f"{_support_text(question.support_status)}"
+            f"{_evidence_reference_text(question.evidence_ids)}"
         )
 
     lines.extend(["", "## Evidence Used"])
@@ -396,17 +408,19 @@ def _portfolio_key_risk_lines(deal: ScoredDeal) -> list[str]:
         risks.append(
             "NEEDS_DILIGENCE: "
             f"{_memo_metadata_value(gate.name)}. {_memo_metadata_value(gate.reason)}"
+            f"{_portfolio_evidence_text(gate.evidence_ids)}"
         )
 
     for factor in deal.score_factors:
         if factor.score >= factor.max_score:
             continue
         evidence_text = _portfolio_evidence_text(factor.evidence_ids)
-        label = "INFERRED" if factor.evidence_ids else "NEEDS_DILIGENCE"
+        label = _support_label(factor.support_status)
+        missing_text = _portfolio_missing_input_text(factor.missing_inputs)
         risks.append(
             f"{label}: {_memo_metadata_value(factor.name)} scored "
             f"{factor.score}/{factor.max_score}. "
-            f"{_memo_metadata_value(factor.explanation)}{evidence_text}"
+            f"{_memo_metadata_value(factor.explanation)}{missing_text}{evidence_text}"
         )
 
     for question in deal.diligence_questions:
@@ -661,6 +675,48 @@ def _evidence_reference_text(evidence_ids: list[str]) -> str:
         _memo_metadata_value(evidence_id) for evidence_id in evidence_ids
     )
     return f" Evidence: {formatted_ids}."
+
+
+def _support_text(status: object) -> str:
+    return f" Support: {_support_label(status)}."
+
+
+def _support_label(status: object) -> str:
+    return str(status).upper()
+
+
+def _missing_input_text(missing_inputs: list[str]) -> str:
+    if not missing_inputs:
+        return ""
+    return f" Missing inputs: {', '.join(missing_inputs)}."
+
+
+def _portfolio_missing_input_text(missing_inputs: list[str]) -> str:
+    if not missing_inputs:
+        return ""
+    return f" Missing inputs: {_memo_metadata_value(', '.join(missing_inputs))}."
+
+
+def _net_return_summary(scored_deal: ScoredDeal) -> str:
+    net_return = scored_deal.net_return
+    if net_return.net_return_multiple is not None:
+        return f"{net_return.net_return_multiple:g}x estimated net return"
+    if net_return.entry_valuation is not None:
+        return (
+            f"{_format_check_size_like_money(net_return.entry_valuation)} entry valuation; "
+            f"missing {', '.join(net_return.missing_inputs) or 'return assumptions'}"
+        )
+    return "missing verified valuation inputs"
+
+
+def _format_check_size_like_money(value: int) -> str:
+    if value >= 1_000_000_000 and value % 1_000_000_000 == 0:
+        return f"${value // 1_000_000_000}B"
+    if value >= 1_000_000 and value % 1_000_000 == 0:
+        return f"${value // 1_000_000}M"
+    if value >= 1_000 and value % 1_000 == 0:
+        return f"${value // 1_000}K"
+    return f"${value:,}"
 
 
 def _format_check_size(check_size: int) -> str:

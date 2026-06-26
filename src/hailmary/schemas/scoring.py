@@ -33,10 +33,47 @@ class ConfidenceLevel(StrEnum):
     HIGH = "high"
 
 
+class CompanyStage(StrEnum):
+    UNKNOWN = "unknown"
+    PRE_SEED = "pre_seed"
+    SEED = "seed"
+    SERIES_A = "series_a"
+    SERIES_B_PLUS = "series_b_plus"
+    HARD_TECH_DEFENSE = "hard_tech_defense"
+
+
+class ValuationRisk(StrEnum):
+    UNKNOWN = "unknown"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ScoreSupportStatus(StrEnum):
+    VERIFIED = "verified"
+    INFERRED = "inferred"
+    NEEDS_DILIGENCE = "needs_diligence"
+    UNVERIFIED = "unverified"
+
+
+class NetReturnEstimate(BaseModel):
+    entry_valuation: int | None = None
+    estimated_dilution_percent: float | None = None
+    estimated_fees_and_carry_percent: float | None = None
+    gross_exit_value: int | None = None
+    net_return_multiple: float | None = None
+    missing_inputs: list[str] = Field(default_factory=list)
+    explanation: str = "Net return math needs more verified inputs."
+    evidence_ids: list[str] = Field(default_factory=list)
+    support_status: ScoreSupportStatus = ScoreSupportStatus.NEEDS_DILIGENCE
+
+
 class KillGate(BaseModel):
     name: str
     triggered: bool
     reason: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    support_status: ScoreSupportStatus = ScoreSupportStatus.NEEDS_DILIGENCE
 
 
 class ScoreFactor(BaseModel):
@@ -45,6 +82,8 @@ class ScoreFactor(BaseModel):
     max_score: int
     explanation: str
     evidence_ids: list[str] = Field(default_factory=list)
+    support_status: ScoreSupportStatus = ScoreSupportStatus.INFERRED
+    missing_inputs: list[str] = Field(default_factory=list)
 
 
 class DiligenceQuestion(BaseModel):
@@ -52,6 +91,7 @@ class DiligenceQuestion(BaseModel):
     question: str
     reason: str
     evidence_ids: list[str] = Field(default_factory=list)
+    support_status: ScoreSupportStatus = ScoreSupportStatus.NEEDS_DILIGENCE
 
 
 class ScoredDeal(BaseModel):
@@ -65,6 +105,9 @@ class ScoredDeal(BaseModel):
     one_line_reason: str
     pmf_level: PMFLevel = PMFLevel.UNKNOWN
     fundability_risk: FundabilityRisk = FundabilityRisk.UNKNOWN
+    company_stage: CompanyStage = CompanyStage.UNKNOWN
+    valuation_risk: ValuationRisk = ValuationRisk.UNKNOWN
+    net_return: NetReturnEstimate = Field(default_factory=NetReturnEstimate)
     kill_gates: list[KillGate] = Field(default_factory=list)
     score_factors: list[ScoreFactor] = Field(default_factory=list)
     diligence_questions: list[DiligenceQuestion] = Field(default_factory=list)

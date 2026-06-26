@@ -48,7 +48,13 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoreFactor
+from hailmary.schemas.scoring import (
+    ConfidenceLevel,
+    NetReturnEstimate,
+    Recommendation,
+    ScoreFactor,
+    ScoreSupportStatus,
+)
 from hailmary.scoring.scorer import score_evidence_store
 
 runner = CliRunner()
@@ -144,6 +150,25 @@ def test_build_agent_input_packet_carries_v2_context_without_provider_metadata()
     assert "SEC EDGAR Form D search" not in packet_json
     assert "https://example.com/private-source" not in packet_json
     assert "Use SEC EDGAR public filings" not in packet_json
+
+
+def test_build_agent_input_packet_preserves_score_factor_support_metadata() -> None:
+    store = _store(evidence=[], claims=[])
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.GROUNDING_AUDITOR,
+    )
+
+    authority_factor = next(
+        factor
+        for factor in packet.score_factors
+        if factor.name == "Evidence authority and freshness"
+    )
+    assert authority_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert authority_factor.missing_inputs == ["source-linked evidence"]
 
 
 def test_build_agent_input_packet_omits_partial_conflicts_when_capped() -> None:
@@ -308,6 +333,109 @@ def test_build_agent_input_packet_caps_cited_evidence_records() -> None:
 
     assert len(packet.evidence) == 50
     assert packet.allowed_evidence_ids == [f"ev_{index}" for index in range(50)]
+
+
+def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_records() -> None:
+    evidence = [
+        _evidence("ev_return_0", "Valuation cap $8M."),
+        _evidence("ev_return_1", "Estimated dilution 20%. SPV expenses 5%. Exit value $1B."),
+    ]
+    store = _store(evidence=evidence, claims=[])
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored_deal = scored_deal.model_copy(
+        update={
+            "net_return": NetReturnEstimate(
+                entry_valuation=8_000_000,
+                estimated_dilution_percent=20,
+                estimated_fees_and_carry_percent=5,
+                gross_exit_value=1_000_000_000,
+                net_return_multiple=95,
+                support_status=ScoreSupportStatus.VERIFIED,
+                evidence_ids=["ev_return_0", "ev_return_1"],
+            ),
+            "score_factors": [
+                ScoreFactor(
+                    name="Valuation and net return",
+                    score=20,
+                    max_score=20,
+                    explanation=(
+                        "Valuation risk is low. Estimated return is 95x using "
+                        "the hidden $1B exit value."
+                    ),
+                    evidence_ids=["ev_return_0", "ev_return_1"],
+                    support_status=ScoreSupportStatus.VERIFIED,
+                )
+            ],
+        }
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.RETURN_MATH,
+        max_evidence_records=1,
+    )
+
+    assert packet.allowed_evidence_ids == ["ev_return_0"]
+    assert packet.score.net_return.evidence_ids == ["ev_return_0"]
+    assert packet.score.net_return.entry_valuation is None
+    assert packet.score.net_return.estimated_dilution_percent is None
+    assert packet.score.net_return.estimated_fees_and_carry_percent is None
+    assert packet.score.net_return.gross_exit_value is None
+    assert packet.score.net_return.net_return_multiple is None
+    assert packet.score.net_return.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert "packet evidence for return math" in packet.score.net_return.missing_inputs
+    valuation_factor = packet.score_factors[0]
+    assert valuation_factor.name == "Valuation and net return"
+    assert valuation_factor.score == 0
+    assert valuation_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert valuation_factor.missing_inputs == ["packet evidence for return math"]
+    assert "95x" not in valuation_factor.explanation
+    assert "$1B" not in valuation_factor.explanation
+
+
+def test_build_agent_input_packet_clears_return_math_when_support_text_is_truncated() -> None:
+    evidence_text = (
+        "Valuation cap $8M. "
+        + ("context " * 40)
+        + "Estimated dilution 20%. SPV expenses 5%. Exit value $1B."
+    )
+    evidence = [_evidence("ev_terms", evidence_text)]
+    claims = [_claim("valuation cap", "$8M", "ev_terms")]
+    store = _store(evidence=evidence, claims=claims)
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored_deal = scored_deal.model_copy(
+        update={
+            "net_return": NetReturnEstimate(
+                entry_valuation=8_000_000,
+                estimated_dilution_percent=20,
+                estimated_fees_and_carry_percent=5,
+                gross_exit_value=1_000_000_000,
+                net_return_multiple=95,
+                support_status=ScoreSupportStatus.VERIFIED,
+                evidence_ids=["ev_terms"],
+            )
+        }
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.RETURN_MATH,
+        max_evidence_records=1,
+        max_evidence_chars=30,
+    )
+
+    assert packet.allowed_evidence_ids == ["ev_terms"]
+    assert packet.evidence[0].truncated is True
+    assert "$8M" in packet.evidence[0].text
+    assert "Estimated dilution" not in packet.evidence[0].text
+    assert packet.score.net_return.entry_valuation == 8_000_000
+    assert packet.score.net_return.estimated_dilution_percent is None
+    assert packet.score.net_return.estimated_fees_and_carry_percent is None
+    assert packet.score.net_return.gross_exit_value is None
+    assert packet.score.net_return.net_return_multiple is None
+    assert packet.score.net_return.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
 
 
 def test_build_agent_input_packet_does_not_prioritize_invalid_conflict_evidence() -> None:

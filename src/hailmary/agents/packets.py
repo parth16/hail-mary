@@ -23,7 +23,12 @@ from hailmary.schemas.agents import (
 )
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
-from hailmary.schemas.scoring import ScoredDeal
+from hailmary.schemas.scoring import (
+    NetReturnEstimate,
+    ScoredDeal,
+    ScoreFactor,
+    ScoreSupportStatus,
+)
 from hailmary.scoring.portfolio import portfolio_rank_key, portfolio_scenario
 from hailmary.scoring.scorer import (
     score_evidence_store,
@@ -275,6 +280,20 @@ def build_agent_input_packet(
         for claim in verified_claims
         if any(citation.evidence_id in allowed_evidence_ids for citation in claim.citations)
     ]
+    evidence_items = [
+        _evidence_item(
+            evidence,
+            max_evidence_chars=max_evidence_chars,
+            preferred_quotes=quotes_by_evidence_id.get(evidence.id, []),
+        )
+        for evidence in selected_evidence
+    ]
+    packet_net_return = _packet_net_return_estimate(
+        scored_deal.net_return,
+        allowed_evidence_ids,
+        selected_claims,
+        evidence_items,
+    )
 
     return AgentInputPacket(
         created_at=created_at or datetime.now(UTC),
@@ -294,9 +313,13 @@ def build_agent_input_packet(
             one_line_reason=scored_deal.one_line_reason,
             pmf_level=scored_deal.pmf_level,
             fundability_risk=scored_deal.fundability_risk,
+            company_stage=scored_deal.company_stage,
+            valuation_risk=scored_deal.valuation_risk,
+            net_return=packet_net_return,
         ),
         score_factors=_score_factor_items(
             scored_deal,
+            packet_net_return=packet_net_return,
             allowed_evidence_ids=allowed_evidence_ids,
         ),
         triggered_kill_gates=_triggered_kill_gate_items(scored_deal),
@@ -306,14 +329,7 @@ def build_agent_input_packet(
             selected_evidence,
             max_evidence_chars=max_evidence_chars,
         ),
-        evidence=[
-            _evidence_item(
-                evidence,
-                max_evidence_chars=max_evidence_chars,
-                preferred_quotes=quotes_by_evidence_id.get(evidence.id, []),
-            )
-            for evidence in selected_evidence
-        ],
+        evidence=evidence_items,
         verified_claims=selected_claims,
         diligence_questions=[
             question.question for question in scored_deal.diligence_questions
@@ -321,24 +337,134 @@ def build_agent_input_packet(
     )
 
 
+def _packet_net_return_estimate(
+    net_return: NetReturnEstimate,
+    allowed_evidence_ids: set[str],
+    selected_claims: list[AgentClaimItem],
+    evidence_items: list[AgentEvidenceItem],
+) -> NetReturnEstimate:
+    filtered_evidence_ids = [
+        evidence_id
+        for evidence_id in net_return.evidence_ids
+        if evidence_id in allowed_evidence_ids
+    ]
+    evidence_item_by_id = {evidence.id: evidence for evidence in evidence_items}
+    hidden_by_truncation = any(
+        evidence_item_by_id[evidence_id].truncated
+        for evidence_id in filtered_evidence_ids
+        if evidence_id in evidence_item_by_id
+    )
+    if len(filtered_evidence_ids) == len(net_return.evidence_ids) and not hidden_by_truncation:
+        return net_return.model_copy(update={"evidence_ids": filtered_evidence_ids})
+    missing_inputs = list(
+        dict.fromkeys([*net_return.missing_inputs, "packet evidence for return math"])
+    )
+    selected_claim_labels = {claim.label for claim in selected_claims}
+    entry_valuation = (
+        net_return.entry_valuation
+        if _has_packet_entry_valuation_support(selected_claim_labels)
+        else None
+    )
+    return net_return.model_copy(
+        update={
+            "entry_valuation": entry_valuation,
+            "estimated_dilution_percent": None,
+            "estimated_fees_and_carry_percent": None,
+            "gross_exit_value": None,
+            "net_return_multiple": None,
+            "missing_inputs": missing_inputs,
+            "explanation": (
+                "Net return math is omitted from this packet because supporting "
+                "evidence records were not included in the capped packet."
+            ),
+            "evidence_ids": filtered_evidence_ids,
+            "support_status": ScoreSupportStatus.NEEDS_DILIGENCE,
+        }
+    )
+
+
+def _has_packet_entry_valuation_support(selected_claim_labels: set[str]) -> bool:
+    if selected_claim_labels.intersection({"post-money valuation", "valuation cap"}):
+        return True
+    return {
+        "pre-money valuation",
+        "round size",
+    }.issubset(selected_claim_labels)
+
+
 def _score_factor_items(
     scored_deal: ScoredDeal,
     *,
+    packet_net_return: NetReturnEstimate,
     allowed_evidence_ids: set[str],
 ) -> list[AgentScoreFactorItem]:
     return [
-        AgentScoreFactorItem(
-            name=factor.name,
-            score=factor.score,
-            max_score=factor.max_score,
-            explanation=factor.explanation,
-            evidence_ids=_allowed_ids(
-                factor.evidence_ids,
-                allowed_evidence_ids=allowed_evidence_ids,
-            ),
+        _score_factor_item(
+            factor,
+            scored_deal=scored_deal,
+            packet_net_return=packet_net_return,
+            allowed_evidence_ids=allowed_evidence_ids,
         )
         for factor in scored_deal.score_factors
     ]
+
+
+def _score_factor_item(
+    factor: ScoreFactor,
+    *,
+    scored_deal: ScoredDeal,
+    packet_net_return: NetReturnEstimate,
+    allowed_evidence_ids: set[str],
+) -> AgentScoreFactorItem:
+    if getattr(factor, "name", "") == "Valuation and net return":
+        return AgentScoreFactorItem(
+            name=factor.name,
+            score=_packet_valuation_factor_score(scored_deal, packet_net_return),
+            max_score=factor.max_score,
+            explanation=(
+                f"Valuation risk is {scored_deal.valuation_risk}. "
+                f"{packet_net_return.explanation}"
+            ),
+            evidence_ids=_allowed_ids(
+                packet_net_return.evidence_ids,
+                allowed_evidence_ids=allowed_evidence_ids,
+            ),
+            support_status=packet_net_return.support_status,
+            missing_inputs=packet_net_return.missing_inputs,
+        )
+    return AgentScoreFactorItem(
+        name=factor.name,
+        score=factor.score,
+        max_score=factor.max_score,
+        explanation=factor.explanation,
+        evidence_ids=_allowed_ids(
+            factor.evidence_ids,
+            allowed_evidence_ids=allowed_evidence_ids,
+        ),
+        support_status=factor.support_status,
+        missing_inputs=factor.missing_inputs,
+    )
+
+
+def _packet_valuation_factor_score(
+    scored_deal: ScoredDeal,
+    packet_net_return: NetReturnEstimate,
+) -> int:
+    score_by_risk = {
+        "unknown": 0,
+        "high": 4,
+        "medium": 9,
+        "low": 13,
+    }
+    score = score_by_risk[str(scored_deal.valuation_risk)]
+    if packet_net_return.net_return_multiple is not None:
+        if packet_net_return.net_return_multiple >= 10:
+            score += 7
+        elif packet_net_return.net_return_multiple >= 5:
+            score += 4
+        elif packet_net_return.net_return_multiple >= 2:
+            score += 2
+    return min(20, score)
 
 
 def _triggered_kill_gate_items(scored_deal: ScoredDeal) -> list[AgentKillGateItem]:

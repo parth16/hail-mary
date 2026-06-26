@@ -14,14 +14,18 @@ from hailmary.schemas.evidence import (
     VerificationStatus,
 )
 from hailmary.schemas.scoring import (
+    CompanyStage,
     ConfidenceLevel,
     DiligenceQuestion,
     FundabilityRisk,
     KillGate,
+    NetReturnEstimate,
     PMFLevel,
     Recommendation,
     ScoredDeal,
     ScoreFactor,
+    ScoreSupportStatus,
+    ValuationRisk,
 )
 
 TRACTION_KEYWORDS = (
@@ -38,6 +42,110 @@ EARLY_PMF_KEYWORDS = ("pilot", "beta", "loi", "waitlist", "design partner")
 FUNDABILITY_KEYWORDS = ("lead investor", "institutional", "series a", "seed", "follow-on")
 INVEST_MINIMUM_SCORE = 75
 HARD_MAX_CHECK = max(CHECK_SIZE_TIERS)
+SCORING_MONEY_PATTERN = (
+    r"\$\s?\d+(?:,\d{3})*(?:\.\d+)?"
+    r"(?:\s?(?:thousand|million|billion|k|m|b))?"
+)
+STAGE_KEYWORDS: tuple[tuple[CompanyStage, tuple[str, ...]], ...] = (
+    (CompanyStage.HARD_TECH_DEFENSE, ("hard tech", "hard-tech", "defense", "aerospace")),
+    (CompanyStage.SERIES_B_PLUS, ("series b", "series c", "growth stage")),
+    (CompanyStage.SERIES_A, ("series a",)),
+    (CompanyStage.PRE_SEED, ("pre-seed", "pre seed", "preseed")),
+    (CompanyStage.SEED, ("seed",)),
+)
+STAGE_NEGATED_SIGNAL = (
+    r"(?:pre[-\s]?seed|seed|series\s+a|series\s+b|series\s+c|growth\s+stage|"
+    r"hard[-\s]?tech|defense|aerospace)"
+)
+STAGE_NEGATED_PATTERNS = (
+    re.compile(
+        rf"\bnon[-\s]?{STAGE_NEGATED_SIGNAL}"
+        rf"(?:\s*(?:,|or|and)\s*(?:non[-\s]?|a\s+|an\s+)?"
+        rf"{STAGE_NEGATED_SIGNAL})*\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bnot\s+(?:yet\s+)?(?:ready\s+for\s+|at\s+|a\s+|an\s+)?"
+        rf"{STAGE_NEGATED_SIGNAL}"
+        rf"(?:\s*(?:,|or|and)\s*(?:a\s+|an\s+)?{STAGE_NEGATED_SIGNAL})*\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:before|prior\s+to|ahead\s+of)\s+(?:the\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:next|future|upcoming|planned|target)\s+(?:round\s+)?"
+        rf"(?:is\s+|as\s+)?(?:a\s+|an\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:plans?|planned|planning|targets?|targeting|intends?|expects?)\s+"
+        rf"(?:to\s+)?(?:raise|pursue|seek|close)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:will|would|could|may)\s+(?:raise|pursue|seek|close)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:plans?|planned|planning|targets?|targeting|intends?|expects?)\s+"
+        rf"(?:for|toward|towards)\s+(?:a\s+|an\s+|the\s+)?{STAGE_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{STAGE_NEGATED_SIGNAL}\s+"
+        rf"(?:investors?|funds?|backers?)\b(?:\s+\w+){{0,4}}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:no|without)\s+(?:current\s+|active\s+|committed\s+|"
+        rf"verified\s+|confirmed\s+)?{STAGE_NEGATED_SIGNAL}\s+"
+        rf"(?:funding|financing|round|raise)\b",
+        re.IGNORECASE,
+    ),
+)
+RETURN_INPUT_PATTERNS = {
+    "dilution": re.compile(
+        r"\b(?:estimated\s+)?dilution\b\s*(?:is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
+        re.IGNORECASE,
+    ),
+    "fees": re.compile(
+        r"\b(?:fund|platform|spv|investment|investor|wrapper)\s+"
+        r"(?:management\s+)?"
+        r"(?:fees?|expenses?)\b\s*(?:are|is|of|at|:)?\s*"
+        r"(?P<value>\d+(?:\.\d+)?)\s?%",
+        re.IGNORECASE,
+    ),
+    "carry": re.compile(
+        r"\bcarry\b\s*(?:is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
+        re.IGNORECASE,
+    ),
+    "combined_fees_and_carry": re.compile(
+        r"\b(?:total\s+)?(?:fees?\s+(?:and|&|/)\s+carry|carry\s+(?:and|&|/)\s+fees?)\b"
+        r"\s*(?:are|is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
+        re.IGNORECASE,
+    ),
+    "gross_exit_value": re.compile(
+        rf"\b(?:gross\s+)?(?:exit value|exit)\b\s*(?:is|of|at|:)?\s*"
+        rf"(?P<value>{SCORING_MONEY_PATTERN})",
+        re.IGNORECASE,
+    ),
+}
+NEGATED_GROSS_EXIT_PATTERNS = (
+    re.compile(
+        r"\b(?:no|without)\s+(?:gross\s+)?(?:exit value|exit)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:gross\s+)?(?:exit value|exit)\b(?:\s+\S+){0,4}\s+"
+        r"(?:is|are|was|were|has been|have been)\s+not\s+"
+        r"(?:provided|available|disclosed|included)\b",
+        re.IGNORECASE,
+    ),
+)
 TRACTION_NEGATED_SIGNAL = (
     r"(?:customers?|revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)"
 )
@@ -74,6 +182,12 @@ NEGATED_TRACTION_PATTERNS = (
     re.compile(
         r"\bnot\s+(?:yet\s+)?(?:showing\s+)?"
         r"(?:usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:has|have|does|do|did)\s+not\s+have\s+"
+        rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)",
         re.IGNORECASE,
     ),
 )
@@ -137,7 +251,14 @@ def score_evidence_store(
     available_capital = config.capital_budget if capital_remaining is None else capital_remaining
     platform_minimum_check = _platform_minimum_check(verified_claims)
     pmf_level = _pmf_level(store.evidence)
+    company_stage = _company_stage(store.evidence)
     fundability_risk = _fundability_risk(store, verified_claims)
+    net_return = _net_return_estimate(store, verified_claims)
+    valuation_risk = _valuation_risk(
+        net_return.entry_valuation,
+        company_stage=company_stage,
+        pmf_level=pmf_level,
+    )
     confidence = _confidence_level(store, verified_claims, valid_conflicts)
     kill_gates = _kill_gates(
         store,
@@ -146,13 +267,23 @@ def score_evidence_store(
         config=config,
         platform_minimum_check=platform_minimum_check,
         capital_remaining=available_capital,
+        valuation_risk=valuation_risk,
+        valuation_evidence_ids=_valuation_gate_evidence_ids(
+            store,
+            verified_claims,
+            company_stage,
+            pmf_level,
+        ),
     )
     score_factors = _score_factors(
         store,
         verified_claims,
         valid_conflicts,
+        company_stage,
         pmf_level,
         fundability_risk,
+        valuation_risk,
+        net_return,
     )
     total_score = sum(factor.score for factor in score_factors)
     has_kill_gate = any(gate.triggered for gate in kill_gates)
@@ -197,13 +328,19 @@ def score_evidence_store(
         ),
         pmf_level=pmf_level,
         fundability_risk=fundability_risk,
+        company_stage=company_stage,
+        valuation_risk=valuation_risk,
+        net_return=net_return,
         kill_gates=kill_gates,
         score_factors=score_factors,
         diligence_questions=_diligence_questions(
             store,
             verified_claims,
+            company_stage=company_stage,
             pmf_level=pmf_level,
             fundability_risk=fundability_risk,
+            valuation_risk=valuation_risk,
+            net_return=net_return,
             valid_conflicts=valid_conflicts,
         ),
         capital_remaining_before=available_capital,
@@ -293,6 +430,8 @@ def _kill_gates(
     config: AppConfig,
     platform_minimum_check: int | None,
     capital_remaining: int,
+    valuation_risk: ValuationRisk,
+    valuation_evidence_ids: list[str],
 ) -> list[KillGate]:
     minimum_above_maximum = (
         platform_minimum_check is not None
@@ -308,7 +447,13 @@ def _kill_gates(
             capital_remaining=capital_remaining,
         )
     )
-    missing_key_terms = has_scorable_deal and not _has_pricing_term(verified_claims)
+    has_verified_claims = bool(verified_claims)
+    has_pricing_term = _has_readable_pricing_term(verified_claims)
+    missing_key_terms_reason = _missing_key_terms_reason(verified_claims)
+    missing_key_terms_evidence_ids = _missing_key_terms_evidence_ids(verified_claims)
+    missing_key_terms = has_scorable_deal and not has_pricing_term
+    valuation_too_high = has_scorable_deal and valuation_risk == ValuationRisk.HIGH
+    conflict_evidence_ids = _conflict_evidence_ids(store, valid_conflicts)
     return [
         KillGate(
             name="No usable source-linked evidence",
@@ -317,6 +462,11 @@ def _kill_gates(
                 "No usable extracted text was available."
                 if not store.evidence
                 else "At least one source-linked evidence record is available."
+            ),
+            support_status=(
+                ScoreSupportStatus.NEEDS_DILIGENCE
+                if not store.evidence
+                else ScoreSupportStatus.INFERRED
             ),
         ),
         KillGate(
@@ -327,6 +477,12 @@ def _kill_gates(
                 if valid_conflicts
                 else "No conflicting deal-term claims were detected."
             ),
+            evidence_ids=conflict_evidence_ids,
+            support_status=(
+                ScoreSupportStatus.VERIFIED
+                if valid_conflicts
+                else ScoreSupportStatus.INFERRED
+            ),
         ),
         KillGate(
             name="No verified deal terms",
@@ -334,16 +490,50 @@ def _kill_gates(
             reason=(
                 "Evidence exists, but no deal-term claim was verified."
                 if store.evidence and not verified_claims
-                else "At least one deal-term claim has a verified citation."
+                else (
+                    "At least one deal-term claim has a verified citation."
+                    if has_verified_claims
+                    else "No evidence was available to verify deal terms."
+                )
+            ),
+            support_status=(
+                ScoreSupportStatus.VERIFIED
+                if has_verified_claims
+                else ScoreSupportStatus.NEEDS_DILIGENCE
             ),
         ),
         KillGate(
             name="Missing key investment terms",
             triggered=missing_key_terms,
             reason=(
-                "No verified valuation or valuation-cap term was found."
-                if missing_key_terms
+                missing_key_terms_reason
+                if not has_pricing_term
                 else "A verified valuation or valuation-cap term is available."
+            ),
+            evidence_ids=(
+                _pricing_evidence_ids(verified_claims)
+                if has_pricing_term
+                else missing_key_terms_evidence_ids
+            ),
+            support_status=(
+                ScoreSupportStatus.VERIFIED
+                if has_pricing_term
+                else ScoreSupportStatus.NEEDS_DILIGENCE
+            ),
+        ),
+        KillGate(
+            name="Valuation far ahead of evidence",
+            triggered=valuation_too_high,
+            reason=(
+                "The verified valuation is far ahead of the current stage and traction evidence."
+                if valuation_too_high
+                else "No verified valuation appears far ahead of the stage and traction evidence."
+            ),
+            evidence_ids=valuation_evidence_ids,
+            support_status=(
+                ScoreSupportStatus.VERIFIED
+                if valuation_too_high
+                else ScoreSupportStatus.INFERRED
             ),
         ),
         KillGate(
@@ -354,6 +544,17 @@ def _kill_gates(
                 if minimum_above_maximum
                 else "No verified platform minimum exceeds the configured maximum check size."
             ),
+            evidence_ids=[
+                evidence_id
+                for claim in verified_claims
+                if claim.label == "minimum investment"
+                for evidence_id in _claim_evidence_ids([claim])
+            ],
+            support_status=(
+                ScoreSupportStatus.VERIFIED
+                if minimum_above_maximum
+                else ScoreSupportStatus.INFERRED
+            ),
         ),
         KillGate(
             name="No available check size",
@@ -363,6 +564,11 @@ def _kill_gates(
                 if no_check_available
                 else "At least one configured check size fits the remaining capital."
             ),
+            support_status=(
+                ScoreSupportStatus.NEEDS_DILIGENCE
+                if no_check_available
+                else ScoreSupportStatus.INFERRED
+            ),
         ),
     ]
 
@@ -371,32 +577,84 @@ def _score_factors(
     store: EvidenceStore,
     verified_claims: list[ClaimRecord],
     valid_conflicts: list[ClaimConflict],
+    company_stage: CompanyStage,
     pmf_level: PMFLevel,
     fundability_risk: FundabilityRisk,
+    valuation_risk: ValuationRisk,
+    net_return: NetReturnEstimate,
 ) -> list[ScoreFactor]:
     return [
-        _evidence_coverage_factor(store),
+        _evidence_authority_factor(store),
         _deal_terms_factor(verified_claims, valid_conflicts),
-        _pmf_factor(store, pmf_level),
-        _fundability_factor(store, fundability_risk),
-        _evidence_quality_factor(store, valid_conflicts),
+        _stage_pmf_factor(store, company_stage, pmf_level),
+        _fundability_factor(store, verified_claims, pmf_level, fundability_risk),
+        _valuation_net_return_factor(
+            store,
+            company_stage,
+            pmf_level,
+            valuation_risk,
+            net_return,
+        ),
+        _missing_data_factor(
+            store,
+            verified_claims,
+            valid_conflicts,
+            pmf_level=pmf_level,
+            fundability_risk=fundability_risk,
+            net_return=net_return,
+        ),
     ]
 
 
-def _evidence_coverage_factor(store: EvidenceStore) -> ScoreFactor:
-    score = min(20, len(store.evidence) * 4)
+def _evidence_authority_factor(store: EvidenceStore) -> ScoreFactor:
+    if not store.evidence:
+        return ScoreFactor(
+            name="Evidence authority and freshness",
+            score=0,
+            max_score=15,
+            explanation="Hail Mary found no usable source-linked evidence.",
+            support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+            missing_inputs=["source-linked evidence"],
+        )
+    stale_count = sum(
+        1 for evidence in store.evidence if evidence.source_freshness == SourceFreshness.STALE
+    )
+    unknown_count = sum(
+        1 for evidence in store.evidence if evidence.source_freshness == SourceFreshness.UNKNOWN
+    )
+    score = min(12, len(store.evidence) * 4) + 3
+    score -= min(6, stale_count * 3)
+    score -= min(3, unknown_count)
+    score = max(0, min(15, score))
     explanation = (
-        f"Hail Mary found {len(store.evidence)} source-linked evidence records."
-        if store.evidence
-        else "Hail Mary found no usable source-linked evidence."
+        f"Hail Mary found {len(store.evidence)} source-linked evidence records; "
+        f"{stale_count} are stale and {unknown_count} have unknown freshness."
     )
     return ScoreFactor(
-        name="Evidence coverage",
+        name="Evidence authority and freshness",
         score=score,
-        max_score=20,
+        max_score=15,
         explanation=explanation,
-        evidence_ids=[evidence.id for evidence in store.evidence[:5]],
+        evidence_ids=_evidence_authority_evidence_ids(store.evidence),
+        support_status=(
+            ScoreSupportStatus.NEEDS_DILIGENCE
+            if unknown_count
+            else ScoreSupportStatus.VERIFIED
+        ),
+        missing_inputs=(
+            ["current source dates"] if unknown_count else []
+        ),
     )
+
+
+def _evidence_authority_evidence_ids(evidence: list[EvidenceRecord]) -> list[str]:
+    freshness_impacted = [
+        record
+        for record in evidence
+        if record.source_freshness in {SourceFreshness.STALE, SourceFreshness.UNKNOWN}
+    ]
+    ordered = [*freshness_impacted, *evidence]
+    return _dedupe_evidence_ids(ordered)
 
 
 def _deal_terms_factor(
@@ -404,95 +662,563 @@ def _deal_terms_factor(
     valid_conflicts: list[ClaimConflict],
 ) -> ScoreFactor:
     unique_labels = sorted({claim.label for claim in verified_claims})
-    score = min(25, len(unique_labels) * 7)
+    score = min(12, len(unique_labels) * 4)
+    has_readable_pricing = _has_readable_pricing_term(verified_claims)
+    if has_readable_pricing:
+        score += 3
+    if any(claim.label == "round size" for claim in verified_claims):
+        score += 2
+    if any(claim.label == "discount" for claim in verified_claims):
+        score += 1
+    if any(claim.label == "minimum investment" for claim in verified_claims):
+        score += 1
+    score = min(20, score)
     if valid_conflicts:
-        score = min(score, 8)
+        score = min(score, 6)
+    missing_inputs = []
+    if not verified_claims:
+        missing_inputs.append("verified deal terms")
+    if verified_claims and not has_readable_pricing:
+        missing_inputs.append("verified valuation or valuation cap")
     return ScoreFactor(
-        name="Deal-term clarity",
+        name="Deal terms and platform access",
         score=score,
-        max_score=25,
+        max_score=20,
         explanation=(
             f"Verified deal-term labels: {', '.join(unique_labels)}."
             if unique_labels
             else "No verified deal-term labels were found."
         ),
         evidence_ids=_claim_evidence_ids(verified_claims),
+        support_status=(
+            ScoreSupportStatus.VERIFIED
+            if verified_claims and not valid_conflicts and not missing_inputs
+            else ScoreSupportStatus.NEEDS_DILIGENCE
+        ),
+        missing_inputs=missing_inputs,
     )
 
 
-def _pmf_factor(store: EvidenceStore, pmf_level: PMFLevel) -> ScoreFactor:
-    score_by_level = {
-        PMFLevel.UNKNOWN: 4,
-        PMFLevel.EARLY: 10,
-        PMFLevel.DEVELOPING: 18,
+def _stage_pmf_factor(
+    store: EvidenceStore,
+    company_stage: CompanyStage,
+    pmf_level: PMFLevel,
+) -> ScoreFactor:
+    score_by_stage_and_pmf = {
+        CompanyStage.UNKNOWN: {
+            PMFLevel.UNKNOWN: 3,
+            PMFLevel.EARLY: 8,
+            PMFLevel.DEVELOPING: 13,
+        },
+        CompanyStage.PRE_SEED: {
+            PMFLevel.UNKNOWN: 8,
+            PMFLevel.EARLY: 14,
+            PMFLevel.DEVELOPING: 17,
+        },
+        CompanyStage.SEED: {
+            PMFLevel.UNKNOWN: 5,
+            PMFLevel.EARLY: 12,
+            PMFLevel.DEVELOPING: 17,
+        },
+        CompanyStage.SERIES_A: {
+            PMFLevel.UNKNOWN: 3,
+            PMFLevel.EARLY: 8,
+            PMFLevel.DEVELOPING: 18,
+        },
+        CompanyStage.SERIES_B_PLUS: {
+            PMFLevel.UNKNOWN: 2,
+            PMFLevel.EARLY: 6,
+            PMFLevel.DEVELOPING: 16,
+        },
+        CompanyStage.HARD_TECH_DEFENSE: {
+            PMFLevel.UNKNOWN: 6,
+            PMFLevel.EARLY: 13,
+            PMFLevel.DEVELOPING: 18,
+        },
     }
-    if pmf_level == PMFLevel.DEVELOPING:
-        matched_evidence = _positive_traction_evidence(store.evidence)
-    elif pmf_level == PMFLevel.EARLY:
-        matched_evidence = _positive_early_pmf_evidence(store.evidence)
-    else:
-        matched_evidence = []
+    pmf_evidence = _pmf_evidence(store.evidence, pmf_level)
+    stage_evidence = _stage_evidence(store.evidence, company_stage)
+    evidence_ids = _stage_pmf_evidence_ids(stage_evidence, pmf_evidence)
+    missing_inputs = []
+    if company_stage == CompanyStage.UNKNOWN:
+        missing_inputs.append("explicit company stage")
+    if pmf_level == PMFLevel.UNKNOWN:
+        missing_inputs.append("customer, revenue, retention, usage, pilot, or design-partner proof")
     return ScoreFactor(
-        name="Product-market fit evidence",
-        score=score_by_level[pmf_level],
+        name="Stage and product-market fit",
+        score=score_by_stage_and_pmf[company_stage][pmf_level],
         max_score=20,
-        explanation=f"Product-market fit level is {pmf_level}.",
-        evidence_ids=[evidence.id for evidence in matched_evidence[:5]],
+        explanation=(
+            f"Company stage is {company_stage}; product-market fit level is {pmf_level}."
+        ),
+        evidence_ids=evidence_ids,
+        support_status=(
+            ScoreSupportStatus.VERIFIED
+            if evidence_ids and not missing_inputs
+            else ScoreSupportStatus.NEEDS_DILIGENCE
+        ),
+        missing_inputs=missing_inputs,
     )
 
 
 def _fundability_factor(
     store: EvidenceStore,
+    verified_claims: list[ClaimRecord],
+    pmf_level: PMFLevel,
     fundability_risk: FundabilityRisk,
 ) -> ScoreFactor:
     score_by_risk = {
-        FundabilityRisk.UNKNOWN: 5,
-        FundabilityRisk.HIGH: 6,
-        FundabilityRisk.MEDIUM: 13,
-        FundabilityRisk.LOW: 18,
+        FundabilityRisk.UNKNOWN: 3,
+        FundabilityRisk.HIGH: 5,
+        FundabilityRisk.MEDIUM: 10,
+        FundabilityRisk.LOW: 14,
     }
     matched_evidence = _positive_funding_evidence(store.evidence)
+    missing_inputs: list[str] = []
+    if not matched_evidence:
+        missing_inputs.append(
+            "lead investor, institutional investor, or follow-on financing evidence"
+        )
+    if not verified_claims:
+        missing_inputs.append("verified deal terms")
+    if pmf_level != PMFLevel.DEVELOPING:
+        missing_inputs.append("customer, revenue, retention, or usage evidence")
     return ScoreFactor(
-        name="Next-round fundability",
+        name="Fundability and next-round risk",
         score=score_by_risk[fundability_risk],
-        max_score=20,
+        max_score=15,
         explanation=f"Next-round fundability risk is {fundability_risk}.",
         evidence_ids=[evidence.id for evidence in matched_evidence[:5]],
+        support_status=(
+            ScoreSupportStatus.VERIFIED
+            if matched_evidence and not missing_inputs
+            else ScoreSupportStatus.NEEDS_DILIGENCE
+        ),
+        missing_inputs=missing_inputs,
     )
 
 
-def _evidence_quality_factor(
+def _valuation_net_return_factor(
     store: EvidenceStore,
-    valid_conflicts: list[ClaimConflict],
+    company_stage: CompanyStage,
+    pmf_level: PMFLevel,
+    valuation_risk: ValuationRisk,
+    net_return: NetReturnEstimate,
 ) -> ScoreFactor:
-    if not store.evidence:
-        score = 0
-        explanation = "No evidence quality could be assessed."
-    else:
-        stale_count = sum(
-            1 for evidence in store.evidence if evidence.source_freshness == SourceFreshness.STALE
-        )
-        unknown_count = sum(
-            1
-            for evidence in store.evidence
-            if evidence.source_freshness == SourceFreshness.UNKNOWN
-        )
-        score = 15
-        score -= min(8, stale_count * 3)
-        score -= min(4, unknown_count)
-        if valid_conflicts:
-            score = min(score, 6)
-        score = max(score, 0)
-        explanation = (
-            f"{stale_count} stale and {unknown_count} unknown-freshness evidence records."
-        )
+    score_by_risk = {
+        ValuationRisk.UNKNOWN: 0,
+        ValuationRisk.HIGH: 4,
+        ValuationRisk.MEDIUM: 9,
+        ValuationRisk.LOW: 13,
+    }
+    score = score_by_risk[valuation_risk]
+    if net_return.net_return_multiple is not None:
+        if net_return.net_return_multiple >= 10:
+            score += 7
+        elif net_return.net_return_multiple >= 5:
+            score += 4
+        elif net_return.net_return_multiple >= 2:
+            score += 2
+    score = min(20, score)
     return ScoreFactor(
-        name="Evidence quality",
+        name="Valuation and net return",
         score=score,
-        max_score=15,
-        explanation=explanation,
-        evidence_ids=[evidence.id for evidence in store.evidence[:5]],
+        max_score=20,
+        explanation=f"Valuation risk is {valuation_risk}. {net_return.explanation}",
+        evidence_ids=_valuation_factor_evidence_ids(
+            net_return,
+            store,
+            company_stage,
+            pmf_level,
+        ),
+        support_status=net_return.support_status,
+        missing_inputs=net_return.missing_inputs,
     )
+
+
+def _missing_data_factor(
+    store: EvidenceStore,
+    verified_claims: list[ClaimRecord],
+    valid_conflicts: list[ClaimConflict],
+    *,
+    pmf_level: PMFLevel,
+    fundability_risk: FundabilityRisk,
+    net_return: NetReturnEstimate,
+) -> ScoreFactor:
+    stale_count = sum(
+        1 for evidence in store.evidence if evidence.source_freshness == SourceFreshness.STALE
+    )
+    unknown_count = sum(
+        1 for evidence in store.evidence if evidence.source_freshness == SourceFreshness.UNKNOWN
+    )
+    missing_inputs: list[str] = []
+    score = 10
+    if not store.evidence:
+        score -= 10
+        missing_inputs.append("source-linked evidence")
+    if store.evidence and not verified_claims:
+        score -= 5
+        missing_inputs.append("verified deal terms")
+    if valid_conflicts:
+        score -= 7
+        missing_inputs.append("resolved conflicting deal terms")
+    if verified_claims and not _has_readable_pricing_term(verified_claims):
+        score -= 3
+        missing_inputs.append("verified valuation or valuation cap")
+    if pmf_level == PMFLevel.UNKNOWN:
+        score -= 2
+        missing_inputs.append("product-market fit evidence")
+    if fundability_risk in {FundabilityRisk.HIGH, FundabilityRisk.UNKNOWN}:
+        score -= 2
+        missing_inputs.append("next-round financing evidence")
+    if net_return.missing_inputs:
+        score -= min(2, len(net_return.missing_inputs))
+        missing_inputs.extend(net_return.missing_inputs)
+    score -= min(4, stale_count * 2)
+    score -= min(2, unknown_count)
+    score = max(0, score)
+    explanation = (
+        "Missing-data review found no blocking gap."
+        if not missing_inputs
+        else f"Missing or uncertain inputs: {', '.join(dict.fromkeys(missing_inputs))}."
+    )
+    return ScoreFactor(
+        name="Missing data, conflicts, and staleness",
+        score=score,
+        max_score=10,
+        explanation=explanation,
+        evidence_ids=[
+            evidence.id
+            for evidence in store.evidence
+            if evidence.source_freshness in {SourceFreshness.STALE, SourceFreshness.UNKNOWN}
+        ][:5],
+        support_status=(
+            ScoreSupportStatus.INFERRED
+            if not missing_inputs and not valid_conflicts
+            else ScoreSupportStatus.NEEDS_DILIGENCE
+        ),
+        missing_inputs=list(dict.fromkeys(missing_inputs)),
+    )
+
+
+def _company_stage(evidence: list[EvidenceRecord]) -> CompanyStage:
+    for stage, keywords in STAGE_KEYWORDS:
+        if any(
+            _contains_positive_keyword(
+                record.text,
+                keyword,
+                negated_patterns=STAGE_NEGATED_PATTERNS,
+            )
+            for record in evidence
+            for keyword in keywords
+        ):
+            return stage
+    return CompanyStage.UNKNOWN
+
+
+def _stage_evidence(
+    evidence: list[EvidenceRecord],
+    company_stage: CompanyStage,
+) -> list[EvidenceRecord]:
+    if company_stage == CompanyStage.UNKNOWN:
+        return []
+    keywords = next(
+        keywords
+        for stage, keywords in STAGE_KEYWORDS
+        if stage == company_stage
+    )
+    return [
+        record
+        for record in evidence
+        if any(
+            _contains_positive_keyword(
+                record.text,
+                keyword,
+                negated_patterns=STAGE_NEGATED_PATTERNS,
+            )
+            for keyword in keywords
+        )
+    ]
+
+
+def _valuation_risk(
+    entry_valuation: int | None,
+    *,
+    company_stage: CompanyStage,
+    pmf_level: PMFLevel,
+) -> ValuationRisk:
+    if entry_valuation is None:
+        return ValuationRisk.UNKNOWN
+    if _valuation_is_far_ahead(
+        entry_valuation,
+        company_stage=company_stage,
+        pmf_level=pmf_level,
+    ):
+        return ValuationRisk.HIGH
+    medium_thresholds = {
+        CompanyStage.PRE_SEED: 15_000_000,
+        CompanyStage.SEED: 35_000_000,
+        CompanyStage.SERIES_A: 100_000_000,
+        CompanyStage.SERIES_B_PLUS: 500_000_000,
+        CompanyStage.HARD_TECH_DEFENSE: 50_000_000,
+        CompanyStage.UNKNOWN: 25_000_000,
+    }
+    if (
+        entry_valuation >= medium_thresholds[company_stage]
+        or pmf_level == PMFLevel.UNKNOWN
+    ):
+        return ValuationRisk.MEDIUM
+    return ValuationRisk.LOW
+
+
+def _valuation_is_far_ahead(
+    entry_valuation: int,
+    *,
+    company_stage: CompanyStage,
+    pmf_level: PMFLevel,
+) -> bool:
+    if company_stage == CompanyStage.PRE_SEED:
+        return entry_valuation >= 45_000_000 or (
+            entry_valuation >= 25_000_000 and pmf_level != PMFLevel.DEVELOPING
+        )
+    if company_stage == CompanyStage.SEED:
+        return entry_valuation >= 120_000_000 or (
+            entry_valuation >= 75_000_000 and pmf_level != PMFLevel.DEVELOPING
+        )
+    if company_stage == CompanyStage.SERIES_A:
+        return entry_valuation >= 300_000_000 or (
+            entry_valuation >= 175_000_000 and pmf_level != PMFLevel.DEVELOPING
+        )
+    if company_stage == CompanyStage.SERIES_B_PLUS:
+        return entry_valuation >= 1_000_000_000 or (
+            entry_valuation >= 750_000_000 and pmf_level != PMFLevel.DEVELOPING
+        )
+    if company_stage == CompanyStage.HARD_TECH_DEFENSE:
+        return entry_valuation >= 500_000_000 or (
+            entry_valuation >= 150_000_000 and pmf_level == PMFLevel.UNKNOWN
+        )
+    if company_stage == CompanyStage.UNKNOWN:
+        return entry_valuation >= 50_000_000
+    return entry_valuation >= 50_000_000 and pmf_level != PMFLevel.DEVELOPING
+
+
+def _net_return_estimate(
+    store: EvidenceStore,
+    verified_claims: list[ClaimRecord],
+) -> NetReturnEstimate:
+    valuation_claim = _valuation_claim(verified_claims)
+    if valuation_claim is None:
+        return NetReturnEstimate(
+            missing_inputs=["verified entry valuation or valuation cap"],
+            explanation=(
+                "Net return math needs a verified valuation or valuation cap before "
+                "Hail Mary can model returns."
+            ),
+            support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+        )
+
+    valuation_value = _claim_money_value(valuation_claim)
+    evidence_ids = _claim_evidence_ids([valuation_claim])
+    if valuation_value is None:
+        return NetReturnEstimate(
+            missing_inputs=["machine-readable entry valuation"],
+            explanation=(
+                "A valuation claim is cited, but Hail Mary could not read it as a "
+                "whole-dollar value."
+            ),
+            evidence_ids=evidence_ids,
+            support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+        )
+    round_size_claim = _round_size_claim(verified_claims)
+    if valuation_claim.label == "pre-money valuation":
+        if round_size_claim is None or _claim_money_value(round_size_claim) is None:
+            return NetReturnEstimate(
+                missing_inputs=["verified round size for pre-money valuation"],
+                explanation=(
+                    "A pre-money valuation needs a verified round size before Hail Mary "
+                    "can model post-money entry value."
+                ),
+                evidence_ids=evidence_ids,
+                support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+            )
+        evidence_ids = list(
+            dict.fromkeys([*evidence_ids, *_claim_evidence_ids([round_size_claim])])
+        )
+    entry_valuation = _entry_valuation(verified_claims, valuation_claim)
+    if entry_valuation is None:
+        return NetReturnEstimate(
+            missing_inputs=["verified entry valuation or valuation cap"],
+            explanation=(
+                "Net return math needs a verified valuation or valuation cap before "
+                "Hail Mary can model returns."
+            ),
+            evidence_ids=evidence_ids,
+            support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+        )
+
+    return_inputs = _return_inputs(store.evidence)
+    evidence_ids = list(dict.fromkeys([*evidence_ids, *return_inputs.evidence_ids]))
+    missing_inputs: list[str] = []
+    if return_inputs.dilution_percent is None:
+        missing_inputs.append("dilution")
+    if return_inputs.fees_and_carry_percent is None:
+        missing_inputs.append("fees or carry")
+    if return_inputs.gross_exit_value is None:
+        missing_inputs.append("gross exit scenario")
+
+    net_multiple: float | None = None
+    if (
+        return_inputs.dilution_percent is not None
+        and return_inputs.fees_and_carry_percent is not None
+        and return_inputs.gross_exit_value is not None
+        and entry_valuation > 0
+    ):
+        ownership_after_dilution = max(0.0, 1 - (return_inputs.dilution_percent / 100))
+        proceeds_after_fees = max(0.0, 1 - (return_inputs.fees_and_carry_percent / 100))
+        net_multiple = round(
+            (return_inputs.gross_exit_value / entry_valuation)
+            * ownership_after_dilution
+            * proceeds_after_fees,
+            2,
+        )
+
+    if net_multiple is None:
+        explanation = (
+            f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
+            f"Missing {', '.join(missing_inputs)}, so Hail Mary did not invent a net return."
+        )
+        support_status = ScoreSupportStatus.NEEDS_DILIGENCE
+    else:
+        explanation = (
+            f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
+            f"Using cited dilution, fees or carry, and exit value, estimated net return "
+            f"is {net_multiple:g}x."
+        )
+        support_status = ScoreSupportStatus.VERIFIED
+
+    return NetReturnEstimate(
+        entry_valuation=entry_valuation,
+        estimated_dilution_percent=return_inputs.dilution_percent,
+        estimated_fees_and_carry_percent=return_inputs.fees_and_carry_percent,
+        gross_exit_value=return_inputs.gross_exit_value,
+        net_return_multiple=net_multiple,
+        missing_inputs=missing_inputs,
+        explanation=explanation,
+        evidence_ids=evidence_ids,
+        support_status=support_status,
+    )
+
+
+class _ReturnInputs:
+    def __init__(
+        self,
+        *,
+        dilution_percent: float | None,
+        fees_and_carry_percent: float | None,
+        gross_exit_value: int | None,
+        evidence_ids: list[str],
+    ) -> None:
+        self.dilution_percent = dilution_percent
+        self.fees_and_carry_percent = fees_and_carry_percent
+        self.gross_exit_value = gross_exit_value
+        self.evidence_ids = evidence_ids
+
+
+def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
+    dilution_percent: float | None = None
+    fees_percent: float | None = None
+    carry_percent: float | None = None
+    combined_fees_and_carry_percent: float | None = None
+    gross_exit_value: int | None = None
+    evidence_ids: list[str] = []
+    for record in evidence:
+        dilution_match = RETURN_INPUT_PATTERNS["dilution"].search(record.text)
+        if dilution_percent is None and dilution_match:
+            dilution_percent = _float_text(dilution_match.group("value"))
+            evidence_ids.append(record.id)
+        fees_match = RETURN_INPUT_PATTERNS["fees"].search(record.text)
+        if fees_percent is None and fees_match:
+            fees_percent = _float_text(fees_match.group("value"))
+            evidence_ids.append(record.id)
+        carry_match = RETURN_INPUT_PATTERNS["carry"].search(record.text)
+        if carry_percent is None and carry_match:
+            carry_percent = _float_text(carry_match.group("value"))
+            evidence_ids.append(record.id)
+        combined_match = RETURN_INPUT_PATTERNS["combined_fees_and_carry"].search(record.text)
+        if combined_fees_and_carry_percent is None and combined_match:
+            combined_fees_and_carry_percent = _float_text(combined_match.group("value"))
+            evidence_ids.append(record.id)
+        exit_match = RETURN_INPUT_PATTERNS["gross_exit_value"].search(record.text)
+        if (
+            gross_exit_value is None
+            and exit_match
+            and not _match_overlaps_pattern(
+                record.text,
+                exit_match,
+                NEGATED_GROSS_EXIT_PATTERNS,
+            )
+        ):
+            gross_exit_value = _money_text_to_dollars(exit_match.group("value"))
+            evidence_ids.append(record.id)
+    fees_and_carry: float | None
+    if combined_fees_and_carry_percent is not None:
+        fees_and_carry = combined_fees_and_carry_percent
+    elif fees_percent is not None and carry_percent is not None:
+        fees_and_carry = fees_percent + carry_percent
+    else:
+        fees_and_carry = None
+    return _ReturnInputs(
+        dilution_percent=dilution_percent,
+        fees_and_carry_percent=fees_and_carry,
+        gross_exit_value=gross_exit_value,
+        evidence_ids=list(dict.fromkeys(evidence_ids)),
+    )
+
+
+def _float_text(raw_value: str) -> float | None:
+    try:
+        return float(raw_value.strip())
+    except ValueError:
+        return None
+
+
+def _valuation_claim(verified_claims: list[ClaimRecord]) -> ClaimRecord | None:
+    fallback_claim: ClaimRecord | None = None
+    for label in ("post-money valuation", "valuation cap", "pre-money valuation"):
+        for claim in verified_claims:
+            if claim.label != label:
+                continue
+            if fallback_claim is None:
+                fallback_claim = claim
+            if _entry_valuation(verified_claims, claim) is not None:
+                return claim
+    return fallback_claim
+
+
+def _round_size_claim(verified_claims: list[ClaimRecord]) -> ClaimRecord | None:
+    for claim in verified_claims:
+        if claim.label == "round size":
+            return claim
+    return None
+
+
+def _entry_valuation(
+    verified_claims: list[ClaimRecord],
+    valuation_claim: ClaimRecord,
+) -> int | None:
+    valuation = _claim_money_value(valuation_claim)
+    if valuation is None or valuation <= 0:
+        return None
+    if valuation_claim.label != "pre-money valuation":
+        return valuation
+    round_size_claim = _round_size_claim(verified_claims)
+    if round_size_claim is None:
+        return None
+    round_size = _claim_money_value(round_size_claim)
+    if round_size is None:
+        return None
+    entry_valuation = valuation + round_size
+    return entry_valuation if entry_valuation > 0 else None
 
 
 def _pmf_level(evidence: list[EvidenceRecord]) -> PMFLevel:
@@ -501,6 +1227,17 @@ def _pmf_level(evidence: list[EvidenceRecord]) -> PMFLevel:
     if _positive_early_pmf_evidence(evidence):
         return PMFLevel.EARLY
     return PMFLevel.UNKNOWN
+
+
+def _pmf_evidence(
+    evidence: list[EvidenceRecord],
+    pmf_level: PMFLevel,
+) -> list[EvidenceRecord]:
+    if pmf_level == PMFLevel.DEVELOPING:
+        return _positive_traction_evidence(evidence)
+    if pmf_level == PMFLevel.EARLY:
+        return _positive_early_pmf_evidence(evidence)
+    return []
 
 
 def _fundability_risk(
@@ -523,8 +1260,11 @@ def _diligence_questions(
     store: EvidenceStore,
     verified_claims: list[ClaimRecord],
     *,
+    company_stage: CompanyStage,
     pmf_level: PMFLevel,
     fundability_risk: FundabilityRisk,
+    valuation_risk: ValuationRisk,
+    net_return: NetReturnEstimate,
     valid_conflicts: list[ClaimConflict],
 ) -> list[DiligenceQuestion]:
     questions: list[DiligenceQuestion] = []
@@ -534,6 +1274,7 @@ def _diligence_questions(
                 priority=1,
                 question="Resolve the conflicting deal terms in the original documents.",
                 reason="The evidence store has conflicting extracted values.",
+                evidence_ids=_conflict_evidence_ids(store, valid_conflicts),
             )
         )
     if not verified_claims:
@@ -544,18 +1285,27 @@ def _diligence_questions(
                 reason="No verified deal-term claims were available.",
             )
         )
-    elif not _has_pricing_term(verified_claims):
+    elif not _has_readable_pricing_term(verified_claims):
         questions.append(
             DiligenceQuestion(
                 priority=2,
                 question="Confirm the valuation, valuation cap, or priced-round valuation.",
                 reason="The evidence did not include a verified pricing term.",
+                evidence_ids=_claim_evidence_ids(verified_claims),
+            )
+        )
+    if company_stage == CompanyStage.UNKNOWN:
+        questions.append(
+            DiligenceQuestion(
+                priority=3,
+                question="Confirm the company stage before applying the underwriting bar.",
+                reason="The extracted evidence did not include an explicit stage signal.",
             )
         )
     if pmf_level == PMFLevel.UNKNOWN:
         questions.append(
             DiligenceQuestion(
-                priority=3,
+                priority=4,
                 question="Find concrete customer, revenue, retention, or usage evidence.",
                 reason="The extracted evidence did not show product-market fit signals.",
             )
@@ -563,9 +1313,36 @@ def _diligence_questions(
     if fundability_risk in {FundabilityRisk.HIGH, FundabilityRisk.UNKNOWN}:
         questions.append(
             DiligenceQuestion(
-                priority=4,
+                priority=5,
                 question="Check whether the company can raise the next round.",
                 reason="The evidence has limited investor or growth signals.",
+            )
+        )
+    if valuation_risk == ValuationRisk.HIGH:
+        valuation_evidence_ids = _valuation_gate_evidence_ids(
+            store,
+            verified_claims,
+            company_stage,
+            pmf_level,
+        )
+        questions.append(
+            DiligenceQuestion(
+                priority=1,
+                question="Confirm why the valuation is justified by current evidence.",
+                reason="The verified valuation appears far ahead of stage and traction.",
+                evidence_ids=valuation_evidence_ids,
+            )
+        )
+    if net_return.missing_inputs:
+        questions.append(
+            DiligenceQuestion(
+                priority=6,
+                question="Collect the missing return-math inputs before sizing the check.",
+                reason=(
+                    "Hail Mary needs verified "
+                    f"{', '.join(net_return.missing_inputs)} to model net return."
+                ),
+                evidence_ids=net_return.evidence_ids,
             )
         )
     if not questions:
@@ -649,6 +1426,48 @@ def _platform_minimum_check(verified_claims: list[ClaimRecord]) -> int | None:
 
 def _has_pricing_term(verified_claims: list[ClaimRecord]) -> bool:
     return any(claim.label in PRICING_TERM_LABELS for claim in verified_claims)
+
+
+def _has_readable_pricing_term(verified_claims: list[ClaimRecord]) -> bool:
+    valuation_claim = _valuation_claim(verified_claims)
+    if valuation_claim is None:
+        return False
+    return _entry_valuation(verified_claims, valuation_claim) is not None
+
+
+def _missing_key_terms_reason(verified_claims: list[ClaimRecord]) -> str:
+    if _pre_money_claim_needs_round_size(verified_claims) is not None:
+        return (
+            "A verified pre-money valuation needs a verified round size before "
+            "Hail Mary can calculate the entry valuation."
+        )
+    return "No verified valuation or valuation-cap term was found."
+
+
+def _missing_key_terms_evidence_ids(verified_claims: list[ClaimRecord]) -> list[str]:
+    pre_money_claim = _pre_money_claim_needs_round_size(verified_claims)
+    if pre_money_claim is None:
+        return _claim_evidence_ids(verified_claims)
+    evidence_ids = _claim_evidence_ids([pre_money_claim])
+    round_size_claim = _round_size_claim(verified_claims)
+    if round_size_claim is not None:
+        evidence_ids.extend(_claim_evidence_ids([round_size_claim]))
+    return list(dict.fromkeys(evidence_ids))
+
+
+def _pre_money_claim_needs_round_size(
+    verified_claims: list[ClaimRecord],
+) -> ClaimRecord | None:
+    round_size_claim = _round_size_claim(verified_claims)
+    round_size = _claim_money_value(round_size_claim) if round_size_claim is not None else None
+    if round_size is not None:
+        return None
+    for claim in verified_claims:
+        if claim.label == "pre-money valuation":
+            valuation = _claim_money_value(claim)
+            if valuation is not None and valuation > 0:
+                return claim
+    return None
 
 
 def _claim_money_value(claim: ClaimRecord) -> int | None:
@@ -819,6 +1638,14 @@ def _span_overlaps(
     return any(start < negated_end and negated_start < end for negated_start, negated_end in spans)
 
 
+def _match_overlaps_pattern(
+    text: str,
+    match: re.Match[str],
+    patterns: tuple[re.Pattern[str], ...],
+) -> bool:
+    return _span_overlaps(match.span(), _negated_spans(text, patterns))
+
+
 def _contains_keyword(text: str, keyword: str) -> bool:
     pattern = _keyword_pattern(keyword)
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
@@ -837,3 +1664,97 @@ def _claim_evidence_ids(claims: list[ClaimRecord]) -> list[str]:
             if citation.evidence_id not in evidence_ids:
                 evidence_ids.append(citation.evidence_id)
     return evidence_ids[:5]
+
+
+def _pricing_evidence_ids(verified_claims: list[ClaimRecord]) -> list[str]:
+    valuation_claim = _valuation_claim(verified_claims)
+    if valuation_claim is None or _entry_valuation(verified_claims, valuation_claim) is None:
+        return []
+    evidence_ids = _claim_evidence_ids([valuation_claim])
+    if valuation_claim.label == "pre-money valuation":
+        round_size_claim = _round_size_claim(verified_claims)
+        if round_size_claim is not None and _claim_money_value(round_size_claim) is not None:
+            evidence_ids.extend(_claim_evidence_ids([round_size_claim]))
+    return list(dict.fromkeys(evidence_ids))
+
+
+def _valuation_factor_evidence_ids(
+    net_return: NetReturnEstimate,
+    store: EvidenceStore,
+    company_stage: CompanyStage,
+    pmf_level: PMFLevel,
+) -> list[str]:
+    evidence_ids = list(net_return.evidence_ids)
+    evidence_ids.extend(_dedupe_evidence_ids(_stage_evidence(store.evidence, company_stage)))
+    evidence_ids.extend(_dedupe_evidence_ids(_pmf_evidence(store.evidence, pmf_level)))
+    return list(dict.fromkeys(evidence_ids))
+
+
+def _valuation_gate_evidence_ids(
+    store: EvidenceStore,
+    verified_claims: list[ClaimRecord],
+    company_stage: CompanyStage,
+    pmf_level: PMFLevel,
+) -> list[str]:
+    valuation_claim = _valuation_claim(verified_claims)
+    evidence_ids = (
+        _claim_evidence_ids([valuation_claim])
+        if valuation_claim is not None
+        else []
+    )
+    if valuation_claim is not None and valuation_claim.label == "pre-money valuation":
+        round_size_claim = _round_size_claim(verified_claims)
+        if round_size_claim is not None:
+            evidence_ids.extend(_claim_evidence_ids([round_size_claim]))
+    evidence_ids.extend(_dedupe_evidence_ids(_stage_evidence(store.evidence, company_stage)))
+    evidence_ids.extend(_dedupe_evidence_ids(_pmf_evidence(store.evidence, pmf_level)))
+    return list(dict.fromkeys(evidence_ids))[:5]
+
+
+def _conflict_evidence_ids(
+    store: EvidenceStore,
+    valid_conflicts: list[ClaimConflict],
+) -> list[str]:
+    claim_by_id = {claim.id: claim for claim in store.claims}
+    evidence_ids: list[str] = []
+    for conflict in valid_conflicts:
+        for claim_id in conflict.claim_ids:
+            claim = claim_by_id.get(claim_id)
+            if claim is None:
+                continue
+            for citation in claim.citations:
+                if citation.evidence_id not in evidence_ids:
+                    evidence_ids.append(citation.evidence_id)
+    return evidence_ids[:5]
+
+
+def _dedupe_evidence_ids(evidence: list[EvidenceRecord]) -> list[str]:
+    evidence_ids: list[str] = []
+    for record in evidence:
+        if record.id not in evidence_ids:
+            evidence_ids.append(record.id)
+    return evidence_ids[:5]
+
+
+def _stage_pmf_evidence_ids(
+    stage_evidence: list[EvidenceRecord],
+    pmf_evidence: list[EvidenceRecord],
+) -> list[str]:
+    ordered: list[EvidenceRecord] = []
+    if stage_evidence:
+        ordered.append(stage_evidence[0])
+    if pmf_evidence:
+        ordered.append(pmf_evidence[0])
+    ordered.extend(stage_evidence[1:])
+    ordered.extend(pmf_evidence[1:])
+    return _dedupe_evidence_ids(ordered)
+
+
+def _format_dollars(value: int) -> str:
+    if value >= 1_000_000_000 and value % 1_000_000_000 == 0:
+        return f"${value // 1_000_000_000}B"
+    if value >= 1_000_000 and value % 1_000_000 == 0:
+        return f"${value // 1_000_000}M"
+    if value >= 1_000 and value % 1_000 == 0:
+        return f"${value // 1_000}K"
+    return f"${value:,}"

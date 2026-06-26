@@ -635,6 +635,11 @@ def render_final_evaluation_memo(
         "**Deadline:** unknown",
         f"**Round / Instrument:** {_round_summary(verified_claims)} / unknown",
         f"**Valuation / Cap:** {_valuation_summary(verified_claims)}",
+        f"**Stage:** {scored_deal.company_stage}",
+        f"**Product-market fit:** {scored_deal.pmf_level}",
+        f"**Fundability risk:** {scored_deal.fundability_risk}",
+        f"**Valuation risk:** {scored_deal.valuation_risk}",
+        f"**Net return math:** {_net_return_summary(scored_deal)}",
         "",
         "## Rule-Based Decision And Guardrails",
         "",
@@ -646,13 +651,19 @@ def render_final_evaluation_memo(
     ]
     for gate in scored_deal.kill_gates:
         status = "TRIGGERED" if gate.triggered else "Clear"
-        lines.append(f"- {status}: {_memo_text(gate.name)}. {_memo_text(gate.reason)}")
+        lines.append(
+            f"- {status}: {_memo_text(gate.name)}. {_memo_text(gate.reason)}"
+            f"{_support_text(gate.support_status)}"
+            f"{_evidence_reference_text(gate.evidence_ids)}"
+        )
 
     lines.extend(["", "## Score Factors"])
     for factor in scored_deal.score_factors:
         lines.append(
             f"- {_memo_text(factor.name)}: {factor.score}/{factor.max_score}. "
-            f"{_memo_text(factor.explanation)}{_evidence_reference_text(factor.evidence_ids)}"
+            f"{_memo_text(factor.explanation)}{_support_text(factor.support_status)}"
+            f"{_missing_input_text(factor.missing_inputs)}"
+            f"{_evidence_reference_text(factor.evidence_ids)}"
         )
 
     lines.extend(["", "## Model Committee Findings"])
@@ -1675,6 +1686,38 @@ def _evidence_reference_text(evidence_ids: Sequence[str]) -> str:
     if not evidence_ids:
         return ""
     return f" Evidence: {', '.join(_memo_text(evidence_id) for evidence_id in evidence_ids)}."
+
+
+def _support_text(status: object) -> str:
+    return f" Support: {str(status).upper()}."
+
+
+def _missing_input_text(missing_inputs: Sequence[str]) -> str:
+    if not missing_inputs:
+        return ""
+    return f" Missing inputs: {_memo_text(', '.join(missing_inputs))}."
+
+
+def _net_return_summary(scored_deal: ScoredDeal) -> str:
+    net_return = scored_deal.net_return
+    if net_return.net_return_multiple is not None:
+        return f"{net_return.net_return_multiple:g}x estimated net return"
+    if net_return.entry_valuation is not None:
+        return (
+            f"{_format_money(net_return.entry_valuation)} entry valuation; "
+            f"missing {_memo_text(', '.join(net_return.missing_inputs) or 'return assumptions')}"
+        )
+    return "missing verified valuation inputs"
+
+
+def _format_money(value: int) -> str:
+    if value >= 1_000_000_000 and value % 1_000_000_000 == 0:
+        return f"${value // 1_000_000_000}B"
+    if value >= 1_000_000 and value % 1_000_000 == 0:
+        return f"${value // 1_000_000}M"
+    if value >= 1_000 and value % 1_000 == 0:
+        return f"${value // 1_000}K"
+    return f"${value:,}"
 
 
 def _citation_text(references: Sequence[AgentEvidenceReference]) -> str:
