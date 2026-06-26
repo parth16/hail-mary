@@ -10,7 +10,7 @@ from pathlib import Path
 
 from docx import Document
 
-from hailmary.agents.packets import build_agent_input_packet
+from hailmary.agents.packets import DEFAULT_AGENT_ROLES, build_agent_input_packet
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig
 from hailmary.evaluation import (
@@ -2626,8 +2626,8 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
     private_tail_marker = "PRIVATE_FULL_TEXT_MARKER_AT_END"
     (company / "memo.txt").write_text(
         "Valuation cap $8M. Discount 20%. Round size $1M. "
-        "ARR revenue growth with paid customers and retention. "
-        "Lead investor committed and seed round is active. "
+        "This memo intentionally leaves traction and funding evidence to the "
+        "supplied public research fixture. "
         + ("filler " * 500)
         + private_tail_marker,
         encoding="utf-8",
@@ -2645,7 +2645,9 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
                         "title": "Synthetic GoldenCo traction page",
                         "text": (
                             "Synthetic GoldenCo public site reports paid customer "
-                            "growth, retained pilots, and active enterprise usage."
+                            "growth, ARR revenue growth, retained pilots, active "
+                            "enterprise usage, and retention. Lead investor committed "
+                            "and seed round is active."
                         ),
                         "retrieved_at": "2024-01-01T12:00:00Z",
                         "source_url": "https://example.com/synthetic-goldenco/traction",
@@ -2712,9 +2714,73 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "Expected evaluate-deal to return an allowed nonzero check size.",
         actual=str(result.final_recommendation.check_size),
     )
+    evidence_store_path = (
+        config.data_dir / "processed" / "deals" / result.deal_id / "evidence_store.json"
+    )
+    store = EvidenceStore.model_validate_json(evidence_store_path.read_text(encoding="utf-8"))
+    research_evidence_ids = {
+        evidence.id
+        for evidence in store.evidence
+        if evidence.source_url == "https://example.com/synthetic-goldenco/traction"
+    }
+    _expect(
+        bool(research_evidence_ids),
+        "Expected supplied research to be imported into the final evidence store.",
+    )
+    score_evidence_ids = {
+        evidence_id
+        for factor in result.deterministic_score.score_factors
+        for evidence_id in factor.evidence_ids
+    }
+    _expect(
+        bool(research_evidence_ids & score_evidence_ids),
+        "Expected rule-based scoring to cite the imported research evidence.",
+        research_evidence_ids=", ".join(sorted(research_evidence_ids)),
+        score_evidence_ids=", ".join(sorted(score_evidence_ids)),
+    )
     _expect(
         AgentRole.FINAL_DECISION in client.roles,
         "Expected evaluate-deal to run the final model-review role.",
+    )
+    expected_specialist_roles = {
+        role for role in DEFAULT_AGENT_ROLES if role != AgentRole.FINAL_DECISION
+    }
+    observed_roles = set(client.roles)
+    missing_specialist_roles = sorted(
+        role.value for role in expected_specialist_roles - observed_roles
+    )
+    _expect(
+        not missing_specialist_roles,
+        "Expected evaluate-deal to run every specialist model-review role.",
+        missing_roles=", ".join(missing_specialist_roles),
+    )
+    packet_paths = sorted((config.data_dir / "agent-packets").glob("*.json"))
+    parsed_packets = [
+        AgentInputPacket.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in packet_paths
+    ]
+    packet_roles = {packet.agent_role for packet in parsed_packets}
+    missing_packet_roles = sorted(role.value for role in set(DEFAULT_AGENT_ROLES) - packet_roles)
+    _expect(
+        not missing_packet_roles,
+        "Expected evaluate-deal to persist parseable packet artifacts for every role.",
+        missing_roles=", ".join(missing_packet_roles),
+    )
+    output_paths = sorted(
+        path
+        for path in result.agent_output_dir.glob("*.json")
+        if "-attempt-" not in path.name
+    )
+    parsed_outputs = [
+        AgentReviewOutput.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in output_paths
+    ]
+    output_roles = {output.agent_role for output in parsed_outputs}
+    missing_output_roles = sorted(role.value for role in set(DEFAULT_AGENT_ROLES) - output_roles)
+    _expect(
+        not missing_output_roles,
+        "Expected evaluate-deal to persist parseable model-output artifacts for every role.",
+        missing_roles=", ".join(missing_output_roles),
     )
     _expect(
         result.evidence_review is not None,
@@ -2751,6 +2817,8 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
             "enough to rely on."
         ),
         "Model recommendation before guardrails:",
+        "### Product Customer Traction",
+        "Source-linked synthetic review",
         "This memo is a diligence aid, not legal, tax, financial, or investment advice.",
     ]
     missing_fragments = [fragment for fragment in expected_fragments if fragment not in memo]
