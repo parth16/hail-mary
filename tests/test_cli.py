@@ -644,6 +644,7 @@ def test_review_evidence_single_deal_latest_summary_hides_text_by_default(
     assert result.exit_code == 0, result.output
     assert "Evidence review" in result.output
     assert "SecretCo" in result.output
+    assert "Evidence health summary" in result.output
     assert "Evidence by source document" in result.output
     assert "Claims by label and status" in result.output
     assert "Evidence text is hidden by default" in result.output
@@ -826,7 +827,8 @@ def test_review_evidence_flags_invalid_source_spans(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
-    assert "Missing source spans" in normalized_output
+    assert "missing_spans" in normalized_output
+    assert "warning" in normalized_output
     assert "missing source span" in normalized_output
 
 
@@ -953,17 +955,18 @@ def test_review_evidence_summarizes_review_issues_and_conflicts(tmp_path: Path) 
     assert "Conflicts and why they matter" in normalized_output
     assert "active" in normalized_output
     assert "stale" in normalized_output
-    assert "OCR-applied evidence" in normalized_output
-    assert "Low-confidence OCR" in normalized_output
-    assert "Stale source freshness" in normalized_output
-    assert "Unknown source freshness" in normalized_output
-    assert "Missing source spans" in normalized_output
-    assert "Missing claim citations" in normalized_output
-    assert "Invalid claim citations" in normalized_output
-    assert "quote_mismatch" in normalized_output
-    assert "Low-confidence claims" in normalized_output
-    assert "External evidence missing" in normalized_output
-    assert "confidence notes" in normalized_output
+    assert "image_text" in normalized_output
+    assert "low_image_text" in normalized_output
+    assert "stale_evidence" in normalized_output
+    assert "unknown_freshness" in normalized_output
+    assert "missing_spans" in normalized_output
+    assert "missing_citations" in normalized_output
+    assert "invalid_citations" in normalized_output
+    assert "quote mismatch" in normalized_output
+    assert "low_claim_conf" in normalized_output
+    assert "external_conf" in normalized_output
+    assert "blocking" in normalized_output
+    assert "warning" in normalized_output
 
 
 def test_review_evidence_shows_table_index_with_page_number(tmp_path: Path) -> None:
@@ -1034,8 +1037,10 @@ def test_review_evidence_flags_documents_without_evidence_and_ocr_needed(
 
     assert result.exit_code == 0, result.output
     assert "scan-only.png" in normalized_output
-    assert "Documents with no usable evidence" in normalized_output
-    assert "Documents needing OCR review" in normalized_output
+    assert "doc_no_evidence" in normalized_output
+    assert "doc_needs_image" in normalized_output
+    assert "add readable files" in normalized_output
+    assert "manual review" in normalized_output
     assert "No review issues found" not in normalized_output
 
 

@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import shlex
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Annotated, Literal, NoReturn
+from typing import Annotated, Literal, NoReturn, Protocol
 
 import typer
 from rich import box
@@ -807,6 +808,7 @@ def _print_deal_evidence_review(
 ) -> None:
     console.print(Rule(deal_review.company_name, style="cyan"))
     console.print(_deal_review_summary_table(deal_review))
+    console.print(_evidence_health_table(deal_review))
     console.print(_source_document_review_table(deal_review))
     external_sources_table = _external_source_review_table(deal_review)
     if external_sources_table is not None:
@@ -825,6 +827,31 @@ def _deal_review_summary_table(deal_review: DealEvidenceReview) -> Table:
     table.add_row(_plain("Evidence records"), _plain(str(deal_review.evidence_count)))
     table.add_row(_plain("Claims"), _plain(str(deal_review.claim_count)))
     table.add_row(_plain("Stored conflicts"), _plain(str(deal_review.conflict_count)))
+    return table
+
+
+def _evidence_health_table(deal_review: DealEvidenceReview) -> Table:
+    table = Table(
+        title="Evidence health summary",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Area", style="bold cyan")
+    table.add_column("Summary", overflow="fold")
+    health = deal_review.health
+    severity_counts = _issue_severity_counts(deal_review)
+    table.add_row(_plain("Source kinds"), _plain(_metric_summary(health.source_kinds)))
+    table.add_row(
+        _plain("Claim verification"),
+        _plain(_metric_summary(health.verification_statuses)),
+    )
+    table.add_row(_plain("Source freshness"), _plain(_metric_summary(health.recency)))
+    table.add_row(_plain("Claim materiality"), _plain(_metric_summary(health.materiality)))
+    table.add_row(_plain("Claim confidence"), _plain(_metric_summary(health.confidence)))
+    table.add_row(_plain("Source lineage"), _plain(_metric_summary(health.source_lineage)))
+    table.add_row(_plain("Review issues"), _plain(_metric_summary(severity_counts)))
     return table
 
 
@@ -857,7 +884,7 @@ def _source_document_review_table(deal_review: DealEvidenceReview) -> Table:
         freshness_issues = summary.stale_count + summary.unknown_freshness_count
         table.add_row(
             _plain(str(summary.document_path)),
-            _plain(str(summary.source_kind)),
+            _plain(_enum_label(summary.source_kind)),
             _plain(str(summary.evidence_count)),
             _plain(str(summary.missing_source_span_count)),
             _plain(str(summary.ocr_applied_count)),
@@ -909,7 +936,7 @@ def _claim_review_table(deal_review: DealEvidenceReview) -> Table:
     for summary in deal_review.claim_statuses:
         table.add_row(
             _plain(summary.label),
-            _plain(str(summary.verification_status)),
+            _plain(_enum_label(summary.verification_status)),
             _plain(str(summary.count)),
         )
     return table
@@ -954,11 +981,15 @@ def _issue_review_table(deal_review: DealEvidenceReview) -> Table:
         show_edge=False,
         pad_edge=False,
     )
-    table.add_column("Issue", style="bold cyan")
+    table.add_column("Severity", no_wrap=True)
+    table.add_column("Code", no_wrap=True)
+    table.add_column("Issue", style="bold cyan", overflow="fold")
     table.add_column("Count", justify="right")
-    table.add_column("What to review")
+    table.add_column("What to review", overflow="fold")
     if not deal_review.issues:
         table.add_row(
+            _plain(""),
+            _plain(""),
             _plain("No review issues found"),
             _plain("0"),
             _plain("No evidence review warnings were found for this store."),
@@ -966,6 +997,8 @@ def _issue_review_table(deal_review: DealEvidenceReview) -> Table:
         return table
     for issue in deal_review.issues:
         table.add_row(
+            _plain(issue.severity.value),
+            _plain(issue.code),
             _plain(issue.issue),
             _plain(str(issue.count)),
             _plain(issue.guidance),
@@ -1010,7 +1043,7 @@ def _evidence_record_review_table(
             _plain(evidence.id),
             _plain(str(evidence.document_path)),
             _plain(_evidence_location(evidence)),
-            _plain(str(evidence.source_freshness)),
+            _plain(_enum_label(evidence.source_freshness)),
             _plain(_evidence_flags(evidence)),
         ]
         if excerpt_limit is not None:
@@ -1049,9 +1082,9 @@ def _evidence_flags(evidence: object) -> str:
     if getattr(evidence, "ocr_applied", False):
         ocr_confidence = getattr(evidence, "ocr_confidence", None)
         if ocr_confidence is None:
-            flags.append("OCR")
+            flags.append("image-based text reading")
         else:
-            flags.append(f"OCR {_format_review_percent(ocr_confidence)}")
+            flags.append(f"image-based text reading {_format_review_percent(ocr_confidence)}")
     source_span_start = getattr(evidence, "source_span_start", None)
     source_span_end = getattr(evidence, "source_span_end", None)
     if (
@@ -1061,7 +1094,47 @@ def _evidence_flags(evidence: object) -> str:
         or source_span_end <= source_span_start
     ):
         flags.append("missing source span")
+    if (
+        getattr(evidence, "page_number", None) is None
+        and getattr(evidence, "table_index", None) is None
+    ):
+        flags.append("missing page/table location")
     return ", ".join(flags) if flags else "none"
+
+
+class _MetricLike(Protocol):
+    @property
+    def label(self) -> str: ...
+
+    @property
+    def count(self) -> int: ...
+
+
+def _metric_summary(metrics: Sequence[_MetricLike]) -> str:
+    if not metrics:
+        return "none"
+    return ", ".join(f"{metric.label}: {metric.count}" for metric in metrics)
+
+
+def _issue_severity_counts(deal_review: DealEvidenceReview) -> list[_SimpleMetric]:
+    counts: dict[str, int] = {}
+    for issue in deal_review.issues:
+        counts[issue.severity.value] = counts.get(issue.severity.value, 0) + issue.count
+    return [
+        _SimpleMetric(label=label, count=count)
+        for label, count in sorted(counts.items(), key=lambda item: item[0])
+    ]
+
+
+@dataclass(frozen=True)
+class _SimpleMetric:
+    label: str
+    count: int
+
+
+def _enum_label(value: object) -> str:
+    raw_value = getattr(value, "value", value)
+    return str(raw_value).replace("_", " ")
 
 
 def _format_review_percent(value: float) -> str:
