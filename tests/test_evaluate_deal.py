@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -491,6 +492,37 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "Model recommendation before guardrails: INVEST" in memo_text
     assert "Guardrail override" in memo_text
+
+
+def test_evaluate_deal_scores_against_capital_after_reserve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient(
+        outputs_by_role={AgentRole.FINAL_DECISION: [_invest_output_json]}
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            mock_llm=False,
+            capital_budget=5_000,
+            reserve_percent=Decimal("100"),
+        ),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.PASS
+    assert result.deterministic_score.check_size == 0
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+    assert result.final_recommendation.check_size == 0
+    assert any("forced final PASS" in warning for warning in result.warnings)
 
 
 def test_evaluate_deal_final_memo_includes_conflict_evidence_for_forced_pass(

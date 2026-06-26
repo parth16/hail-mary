@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 from collections.abc import Sequence
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
 
@@ -26,6 +27,7 @@ from hailmary.config import (
     ConfigError,
     create_local_state,
     load_config,
+    validate_investment_settings,
 )
 from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder
@@ -172,6 +174,76 @@ def _config_with_ocr_override(
     if enable_ocr is None:
         return config
     return config.model_copy(update={"enable_ocr": enable_ocr})
+
+
+def _config_with_portfolio_overrides(
+    config: AppConfig,
+    *,
+    capital_budget: int | None,
+    min_check: int | None,
+    max_check: int | None,
+    reserve_percent: str | None,
+    reserve_dollars: int | None,
+    estimated_dilution_percent: str | None,
+    platform_fee_percent: str | None,
+    carry_percent: str | None,
+    gross_return_multiple: str | None,
+) -> AppConfig:
+    updates: dict[str, int | Decimal] = {}
+    if capital_budget is not None:
+        updates["capital_budget"] = capital_budget
+    if min_check is not None:
+        updates["min_check"] = min_check
+    if max_check is not None:
+        updates["max_check"] = max_check
+    parsed_reserve_percent: Decimal | None = None
+    if reserve_percent is not None:
+        parsed_reserve_percent = _parse_decimal_option(
+            reserve_percent,
+            option_name="reserve percent",
+        )
+    if reserve_percent is not None and reserve_dollars is not None:
+        updates["reserve_percent"] = parsed_reserve_percent or Decimal("0")
+        updates["reserve_dollars"] = reserve_dollars
+    elif reserve_percent is not None:
+        updates["reserve_percent"] = parsed_reserve_percent or Decimal("0")
+        updates["reserve_dollars"] = 0
+    elif reserve_dollars is not None:
+        updates["reserve_percent"] = Decimal("0")
+        updates["reserve_dollars"] = reserve_dollars
+    if estimated_dilution_percent is not None:
+        updates["estimated_dilution_percent"] = _parse_decimal_option(
+            estimated_dilution_percent,
+            option_name="estimated dilution percent",
+        )
+    if platform_fee_percent is not None:
+        updates["platform_fee_percent"] = _parse_decimal_option(
+            platform_fee_percent,
+            option_name="platform fee percent",
+        )
+    if carry_percent is not None:
+        updates["carry_percent"] = _parse_decimal_option(
+            carry_percent,
+            option_name="carry percent",
+        )
+    if gross_return_multiple is not None:
+        updates["gross_return_multiple"] = _parse_decimal_option(
+            gross_return_multiple,
+            option_name="gross return multiple",
+        )
+    if not updates:
+        return config
+    return validate_investment_settings(config.model_copy(update=updates))
+
+
+def _parse_decimal_option(raw_value: str, *, option_name: str) -> Decimal:
+    try:
+        value = Decimal(raw_value.strip())
+    except InvalidOperation as exc:
+        raise ConfigError(f"The {option_name} must be a number.") from exc
+    if not value.is_finite():
+        raise ConfigError(f"The {option_name} must be a finite number.")
+    return value
 
 
 def _has_ocr_warning(notes: str | None) -> bool:
@@ -789,10 +861,88 @@ def score_deals(
             help="Where Hail Mary should read generated evidence and write reports.",
         ),
     ] = None,
+    capital_budget: Annotated[
+        int | None,
+        typer.Option(
+            "--capital-budget",
+            help="Run-only starting capital budget in whole dollars.",
+        ),
+    ] = None,
+    min_check: Annotated[
+        int | None,
+        typer.Option(
+            "--min-check",
+            help="Run-only minimum allowed check size in whole dollars.",
+        ),
+    ] = None,
+    max_check: Annotated[
+        int | None,
+        typer.Option(
+            "--max-check",
+            help="Run-only maximum allowed check size in whole dollars.",
+        ),
+    ] = None,
+    reserve_percent: Annotated[
+        str | None,
+        typer.Option(
+            "--reserve-percent",
+            help="Run-only portfolio reserve as a percent of starting capital.",
+        ),
+    ] = None,
+    reserve_dollars: Annotated[
+        int | None,
+        typer.Option(
+            "--reserve-dollars",
+            help="Run-only portfolio reserve in whole dollars.",
+        ),
+    ] = None,
+    estimated_dilution_percent: Annotated[
+        str | None,
+        typer.Option(
+            "--estimated-dilution-percent",
+            help="Run-only ownership dilution estimate as a percent.",
+        ),
+    ] = None,
+    platform_fee_percent: Annotated[
+        str | None,
+        typer.Option(
+            "--platform-fee-percent",
+            help="Run-only platform fee estimate as a percent of invested checks.",
+        ),
+    ] = None,
+    carry_percent: Annotated[
+        str | None,
+        typer.Option(
+            "--carry-percent",
+            help="Run-only carry estimate as a percent of profits.",
+        ),
+    ] = None,
+    gross_return_multiple: Annotated[
+        str | None,
+        typer.Option(
+            "--gross-return-multiple",
+            help="Run-only gross return multiple for the configured net-return case.",
+        ),
+    ] = None,
 ) -> None:
     """Score ingested deals and write local Markdown memos."""
 
     config = _config_from_options(data_dir)
+    try:
+        config = _config_with_portfolio_overrides(
+            config,
+            capital_budget=capital_budget,
+            min_check=min_check,
+            max_check=max_check,
+            reserve_percent=reserve_percent,
+            reserve_dollars=reserve_dollars,
+            estimated_dilution_percent=estimated_dilution_percent,
+            platform_fee_percent=platform_fee_percent,
+            carry_percent=carry_percent,
+            gross_return_multiple=gross_return_multiple,
+        )
+    except ConfigError as exc:
+        _exit_with_config_error(exc)
     try:
         result = score_latest_ingestion(config=config)
     except ScoringError as exc:

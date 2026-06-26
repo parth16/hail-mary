@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import os
+from decimal import ROUND_HALF_UP, Decimal, DecimalException, localcontext
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from hailmary.config import CHECK_SIZE_TIERS, AppConfig, ConfigError, validate_local_state
+from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.documents import IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
-from hailmary.schemas.scoring import MemoRunSummary, Recommendation, ScoredDeal
+from hailmary.schemas.scoring import MemoRunSummary, ScoredDeal
+from hailmary.scoring.portfolio import (
+    allowed_check_tiers,
+    portfolio_rank_key,
+    portfolio_return_cases,
+    portfolio_scenario,
+    skipped_deals,
+)
+from hailmary.scoring.portfolio import (
+    ranked_deals as ranked_portfolio_deals,
+)
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -21,12 +32,8 @@ class ScoringError(RuntimeError):
     """Scoring could not continue safely."""
 
 
-CONFIDENCE_RANK = {
-    "high": 3,
-    "medium": 2,
-    "low": 1,
-}
 PORTFOLIO_REPORT_FILENAME = "portfolio-comparison-report.md"
+MAX_FIXED_DECIMAL_REPORT_CHARS = 120
 
 
 def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
@@ -45,6 +52,7 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir)
 
+    scenario = portfolio_scenario(config)
     scoring_inputs: list[tuple[EvidenceStore, ScoredDeal, Path]] = []
     for deal in summary.deals:
         if deal.evidence_store_path is None:
@@ -66,17 +74,17 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
         ranking_scored_deal = score_evidence_store(
             store,
             config=config,
-            capital_remaining=max(config.capital_budget, config.max_check),
+            capital_remaining=max(scenario.allocatable_capital, config.max_check),
         )
         memo_path = report_dir / f"{slugify(deal.company_name)}-{deal.id}-memo.md"
         scoring_inputs.append((store, ranking_scored_deal, memo_path))
 
-    remaining_capital = config.capital_budget
+    remaining_capital = scenario.allocatable_capital
     scored_by_index: dict[int, ScoredDeal] = {}
     portfolio_rank_by_index: dict[int, int] = {}
     ranked_inputs = sorted(
         enumerate(scoring_inputs),
-        key=lambda item: _portfolio_rank_key(item[1][1]),
+        key=lambda item: portfolio_rank_key(item[1][1]),
     )
     for portfolio_rank, (index, (store, _, _)) in enumerate(ranked_inputs, start=1):
         scored_deal = score_evidence_store(
@@ -197,20 +205,29 @@ def render_portfolio_report(
     *,
     config: AppConfig,
 ) -> str:
-    ranked_deals = sorted(scored_deals, key=_portfolio_report_order_key)
+    scenario = portfolio_scenario(config)
+    ranked_deals = ranked_portfolio_deals(scored_deals)
     allocated_capital = sum(deal.check_size for deal in scored_deals)
-    remaining_capital = max(0, config.capital_budget - allocated_capital)
+    remaining_capital = max(0, scenario.allocatable_capital - allocated_capital)
     lines = [
         "# Hail Mary Portfolio Comparison Report",
         "",
-        "## Portfolio Constraints",
+        "## Portfolio Scenario And Constraints",
         "",
-        f"- Capital budget: {_format_check_size(config.capital_budget)}",
-        f"- Allocated capital: {_format_check_size(allocated_capital)}",
-        f"- Remaining capital after allocation: {_format_check_size(remaining_capital)}",
+        f"- Starting capital budget: {_format_dollars(scenario.starting_capital)}",
+        f"- Reserve: {_format_dollars(scenario.reserve_amount)} ({_reserve_source_text(config)})",
+        f"- Allocatable capital after reserve: {_format_dollars(scenario.allocatable_capital)}",
+        f"- Allocated capital: {_format_dollars(allocated_capital)}",
+        f"- Remaining allocatable capital after allocation: {_format_dollars(remaining_capital)}",
         f"- Allowed check sizes: {_check_tier_text(config)}",
-        f"- Configured minimum check: {_format_check_size(config.min_check)}",
-        f"- Configured maximum check: {_format_check_size(config.max_check)}",
+        f"- Configured minimum check: {_format_check_size(scenario.min_check)}",
+        f"- Configured maximum check: {_format_check_size(scenario.max_check)}",
+        f"- Estimated dilution: {_format_percent(scenario.estimated_dilution_percent)}",
+        f"- Platform fee: {_format_percent(scenario.platform_fee_percent)}",
+        f"- Carry: {_format_percent(scenario.carry_percent)}",
+        f"- Gross return multiple: {_format_multiple(scenario.gross_return_multiple)}",
+        "- Carry means the share of profits paid to the fund manager or platform.",
+        "- Dilution means ownership reduction from future fundraising.",
         "",
         "## Ranked Deals",
         "",
@@ -222,8 +239,8 @@ def render_portfolio_report(
         lines.extend(
             [
                 "| Rank | Company | Recommendation | Check size | Score | Confidence | "
-                "Triggered kill gates | Budget before | Budget after |",
-                "| ---: | --- | --- | ---: | ---: | --- | --- | ---: | ---: |",
+                "Triggered kill gates | Diligence questions | Budget before | Budget after |",
+                "| ---: | --- | --- | ---: | ---: | --- | --- | ---: | ---: | ---: |",
             ]
         )
         for rank, deal in enumerate(ranked_deals, start=1):
@@ -236,9 +253,33 @@ def render_portfolio_report(
                 f"{deal.total_score}/{deal.max_score} | "
                 f"{_memo_metadata_value(str(deal.confidence))} | "
                 f"{_triggered_gate_summary(deal)} | "
+                f"{len(deal.diligence_questions)} | "
                 f"{_optional_check_size(deal.capital_remaining_before)} | "
                 f"{_optional_check_size(deal.capital_remaining_after)} |"
             )
+
+    lines.extend(["", "## Skipped Deals", ""])
+    skipped = skipped_deals(scored_deals)
+    if not skipped:
+        lines.append("No deals were skipped.")
+    else:
+        lines.extend(
+            [
+                "| Rank | Company | Score | Reason |",
+                "| ---: | --- | ---: | --- |",
+            ]
+        )
+        for skipped_deal in skipped:
+            lines.append(
+                "| "
+                f"{skipped_deal.rank} | "
+                f"{_memo_metadata_value(skipped_deal.company_name)} | "
+                f"{skipped_deal.score_text} | "
+                f"{_memo_metadata_value(skipped_deal.reason)} |"
+            )
+
+    lines.extend(["", "## Net Return Math", ""])
+    lines.extend(_portfolio_return_lines(allocated_capital, config=config))
 
     lines.extend(["", "## Deal Details"])
     if not ranked_deals:
@@ -255,6 +296,7 @@ def render_portfolio_report(
                 f"- Suggested check: {_format_check_size(deal.check_size)}",
                 f"- Score: {deal.total_score}/{deal.max_score}",
                 f"- Confidence: {_memo_metadata_value(str(deal.confidence))}",
+                f"- One-line reason: {_memo_metadata_value(deal.one_line_reason)}",
                 f"- Memo path: {_memo_metadata_value(str(deal.memo_path or 'not written'))}",
                 "- Key risks:",
             ]
@@ -272,6 +314,15 @@ def render_portfolio_report(
                 f"{_memo_metadata_value(gate.reason)}"
             )
 
+        lines.append("- Diligence questions:")
+        for question in deal.diligence_questions:
+            lines.append(
+                "  - "
+                f"Priority {question.priority}: {_memo_metadata_value(question.question)} "
+                f"Reason: {_memo_metadata_value(question.reason)}"
+                f"{_portfolio_evidence_text(question.evidence_ids)}"
+            )
+
     lines.extend(
         [
             "",
@@ -282,42 +333,49 @@ def render_portfolio_report(
     return "\n".join(lines)
 
 
-def _portfolio_rank_key(deal: ScoredDeal) -> tuple[int, int, int, int, str, str]:
-    return (
-        0 if deal.recommendation == Recommendation.INVEST else 1,
-        -deal.total_score,
-        -CONFIDENCE_RANK.get(str(deal.confidence), 0),
-        -deal.check_size,
-        deal.company_name.casefold(),
-        deal.deal_id.casefold(),
-    )
-
-
-def _portfolio_report_order_key(deal: ScoredDeal) -> tuple[int, int, int, int, int, str, str]:
-    if deal.portfolio_rank is not None:
-        return (0, deal.portfolio_rank, 0, 0, 0, "", "")
-    recommendation_rank, score_rank, confidence_rank, check_rank, company, deal_id = (
-        _portfolio_rank_key(deal)
-    )
-    return (
-        1,
-        recommendation_rank,
-        score_rank,
-        confidence_rank,
-        check_rank,
-        company,
-        deal_id,
-    )
-
-
 def _check_tier_text(config: AppConfig) -> str:
-    maximum_nonzero_check = min(config.max_check, config.capital_budget)
-    allowed_tiers = [
-        tier
-        for tier in CHECK_SIZE_TIERS
-        if tier == 0 or config.min_check <= tier <= maximum_nonzero_check
-    ]
+    allowed_tiers = allowed_check_tiers(config)
     return ", ".join(_format_check_size(tier) for tier in allowed_tiers)
+
+
+def _reserve_source_text(config: AppConfig) -> str:
+    if config.reserve_dollars > 0:
+        return "configured reserve dollars"
+    if config.reserve_percent > 0:
+        return f"{_format_percent(config.reserve_percent)} reserve"
+    return "no reserve"
+
+
+def _portfolio_return_lines(invested_capital: int, *, config: AppConfig) -> list[str]:
+    lines = [
+        "Net return math uses allocated checks only and excludes unallocated reserve capital.",
+        "",
+        "| Case | Gross multiple | Invested checks | Gross value before dilution | "
+        "Value after dilution | Platform fee | Carry | Net cash returned | "
+        "Net profit after fees | Net multiple |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for return_case in portfolio_return_cases(
+        invested_capital=invested_capital,
+        config=config,
+    ):
+        lines.append(
+            "| "
+            f"{_memo_metadata_value(return_case.label)} | "
+            f"{_format_multiple(return_case.gross_return_multiple)} | "
+            f"{_format_dollars(return_case.invested_capital)} | "
+            f"{_format_dollars(return_case.gross_value_before_dilution)} | "
+            f"{_format_dollars(return_case.value_after_dilution)} | "
+            f"{_format_dollars(return_case.platform_fee)} | "
+            f"{_format_dollars(return_case.carry)} | "
+            f"{_format_dollars(return_case.net_cash_returned)} | "
+            f"{_format_dollars(return_case.net_profit_after_fees)} | "
+            f"{_format_net_multiple(return_case.net_multiple)} |"
+        )
+    if invested_capital == 0:
+        lines.append("")
+        lines.append("No capital was allocated, so every return case starts from $0 invested.")
+    return lines
 
 
 def _optional_check_size(check_size: int | None) -> str:
@@ -611,6 +669,80 @@ def _format_check_size(check_size: int) -> str:
     if check_size % 1_000 == 0:
         return f"${check_size // 1_000}K"
     return f"${check_size / 1_000:g}K"
+
+
+def _format_dollars(value: int | Decimal) -> str:
+    decimal_value = Decimal(value)
+    if _fixed_decimal_report_chars(decimal_value) > MAX_FIXED_DECIMAL_REPORT_CHARS:
+        prefix = "-" if decimal_value < 0 else ""
+        return f"{prefix}${_format_scientific_decimal(decimal_value.copy_abs())}"
+    amount = _quantize_decimal(decimal_value, Decimal("0.01"))
+    prefix = "-" if amount < 0 else ""
+    absolute_amount = abs(amount)
+    if absolute_amount == absolute_amount.to_integral_value():
+        return f"{prefix}${int(absolute_amount):,}"
+    return f"{prefix}${absolute_amount:,.2f}"
+
+
+def _format_percent(value: Decimal) -> str:
+    return f"{_format_decimal(value)}%"
+
+
+def _format_multiple(value: Decimal) -> str:
+    return f"{_format_decimal(value)}x"
+
+
+def _format_net_multiple(value: Decimal) -> str:
+    if _fixed_decimal_report_chars(value) > MAX_FIXED_DECIMAL_REPORT_CHARS:
+        return f"{_format_decimal(value)}x"
+    rounded = _quantize_decimal(value, Decimal("0.01"))
+    return f"{_format_decimal(rounded)}x"
+
+
+def _quantize_decimal(value: Decimal, quantizer: Decimal) -> Decimal:
+    digits_before_decimal = max(value.adjusted() + 1, 1)
+    precision = max(len(value.as_tuple().digits), digits_before_decimal) + 4
+    with localcontext() as context:
+        context.prec = precision
+        return value.quantize(quantizer, rounding=ROUND_HALF_UP)
+
+
+def _format_decimal(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    if _fixed_decimal_report_chars(value) > MAX_FIXED_DECIMAL_REPORT_CHARS:
+        return _format_scientific_decimal(value)
+    try:
+        normalized = value.normalize()
+    except DecimalException:
+        return _format_scientific_decimal(value)
+    text = format(normalized, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
+
+
+def _fixed_decimal_report_chars(value: Decimal) -> int:
+    if value == 0:
+        return 1
+    value_tuple = value.as_tuple()
+    digit_count = len(value_tuple.digits)
+    exponent = value_tuple.exponent
+    if not isinstance(exponent, int):
+        return MAX_FIXED_DECIMAL_REPORT_CHARS + 1
+    if exponent >= 0:
+        return digit_count + exponent
+    integer_digits = max(value.adjusted() + 1, 1)
+    return integer_digits + 1 + abs(exponent)
+
+
+def _format_scientific_decimal(value: Decimal) -> str:
+    mantissa, exponent = format(value, ".6E").split("E", maxsplit=1)
+    mantissa = mantissa.rstrip("0").rstrip(".")
+    exponent_sign = exponent[0] if exponent and exponent[0] in "+-" else "+"
+    exponent_digits = exponent[1:] if exponent and exponent[0] in "+-" else exponent
+    exponent_digits = exponent_digits.lstrip("0") or "0"
+    return f"{mantissa}E{exponent_sign}{exponent_digits}"
 
 
 def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
