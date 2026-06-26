@@ -389,7 +389,7 @@ def evaluate_deal_folder(
             final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
             final_review_was_model = False
     else:
-        _stage(stage_callback, "local-only final decision")
+        _stage(stage_callback, f"{mode.name} final decision")
         specialist_results = []
         if store.evidence_count:
             final_output, guarded_decision = _rule_based_final_decision(
@@ -535,10 +535,10 @@ def _run_and_import_research(
                 )
 
     supplied_result_paths = {
-        _normalized_supplied_result_path(path) for path in results_files
+        _normalized_research_result_path(path) for path in results_files
     }
     generated_result_paths = {
-        path.resolve(strict=False)
+        _normalized_research_result_path(path)
         for path in (
             collection.output_path
             for collection in workflow.collections
@@ -548,7 +548,7 @@ def _run_and_import_research(
     for preview in workflow.import_previews:
         if preview.error is None:
             continue
-        preview_path = preview.input_path.resolve(strict=False)
+        preview_path = _normalized_research_result_path(preview.input_path)
         if preview_path in supplied_result_paths:
             raise EvaluationError(
                 "A research results file passed to evaluate-deal could not be imported: "
@@ -558,6 +558,13 @@ def _run_and_import_research(
             raise EvaluationError(
                 "External research results were collected but could not be imported: "
                 f"{preview.error}"
+            )
+
+    for issue in workflow.issues:
+        if issue.severity == "error":
+            raise EvaluationError(
+                "External research failed before scoring: "
+                f"{issue.source}: {issue.message}"
             )
 
     imports: list[ResearchImportRunSummary] = []
@@ -582,7 +589,7 @@ def _run_and_import_research(
     return EvaluationResearchRun(workflow=workflow, imports=imports)
 
 
-def _normalized_supplied_result_path(path: Path) -> Path:
+def _normalized_research_result_path(path: Path) -> Path:
     expanded_path = path.expanduser()
     absolute_path = expanded_path if expanded_path.is_absolute() else Path.cwd() / expanded_path
     return absolute_path.resolve(strict=False)
@@ -693,16 +700,26 @@ def _evaluation_mode(config: AppConfig) -> EvaluationMode:
             "recommendation comes from rule-based scoring, which means fixed checks over "
             "source-linked evidence."
         )
-    else:
-        limitation = (
-            "Model review was skipped because HAILMARY_MOCK_LLM is true. The final "
-            "recommendation comes from rule-based scoring, which means fixed checks over "
-            "source-linked evidence."
+        return EvaluationMode(
+            name="local-only",
+            model_backed=False,
+            explanation=limitation,
+            limitation=limitation,
         )
+
+    limitation = (
+        "Model review was skipped because HAILMARY_MOCK_LLM is true. The final "
+        "recommendation comes from rule-based scoring, which means fixed checks over "
+        "source-linked evidence."
+    )
     return EvaluationMode(
-        name="local-only",
+        name="rule-based",
         model_backed=False,
-        explanation=limitation,
+        explanation=(
+            "Rule-based mode is on because HAILMARY_MOCK_LLM is true. Hail Mary "
+            "will ingest local documents, run any enabled external research, then "
+            "make the final recommendation with rule-based scoring."
+        ),
         limitation=limitation,
     )
 

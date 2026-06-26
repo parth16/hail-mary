@@ -15,6 +15,12 @@ from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder, openai_review_messages
 from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
+from hailmary.research import (
+    ResearchDealInput,
+    ResearchPlan,
+    ResearchWorkflowIssue,
+    ResearchWorkflowRunSummary,
+)
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
     AgentFinding,
@@ -333,6 +339,30 @@ def test_evaluate_deal_blocks_bad_supplied_research_results_file(
     assert not list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
 
 
+def test_evaluate_deal_blocks_home_relative_bad_research_results_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    company_dir = _write_company_folder(tmp_path, company_name="HomePathResearchCo")
+    research_path = tmp_path / "bad-results.json"
+    research_path.write_text('{"results": [{}]}', encoding="utf-8")
+
+    with pytest.raises(
+        EvaluationError,
+        match="research results file passed to evaluate-deal could not be imported",
+    ):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+            max_concurrency=1,
+            research_results_files=[Path("~/bad-results.json")],
+        )
+
+    assert not list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
+
+
 def test_evaluate_deal_blocks_bad_provider_results_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -354,6 +384,82 @@ def test_evaluate_deal_blocks_bad_provider_results_file(
         )
 
     assert not list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
+
+
+def test_evaluate_deal_blocks_research_workflow_errors_before_scoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="LiveFailCo")
+
+    def fake_run_research_workflow(**_: object) -> ResearchWorkflowRunSummary:
+        return _research_workflow_summary(
+            tmp_path,
+            company_name="LiveFailCo",
+            live_collection_enabled=True,
+            issues=[
+                ResearchWorkflowIssue(
+                    severity="error",
+                    source="Direct public web pages",
+                    message="Could not fetch the public page.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(evaluation, "run_research_workflow", fake_run_research_workflow)
+
+    with pytest.raises(
+        EvaluationError,
+        match="External research failed before scoring: Direct public web pages",
+    ):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                local_only=False,
+                enable_web_research=True,
+            ),
+            max_concurrency=1,
+            website_url="https://example.com/livefailco",
+        )
+
+    assert not list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
+
+
+def test_evaluate_deal_rule_based_web_mode_is_not_labeled_local_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="RuleBasedWebCo")
+
+    def fake_run_research_workflow(**_: object) -> ResearchWorkflowRunSummary:
+        return _research_workflow_summary(
+            tmp_path,
+            company_name="RuleBasedWebCo",
+            live_collection_enabled=True,
+        )
+
+    monkeypatch.setattr(evaluation, "run_research_workflow", fake_run_research_workflow)
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            enable_web_research=True,
+            mock_llm=True,
+        ),
+        max_concurrency=1,
+        website_url="https://example.com/rulebasedwebco",
+    )
+
+    assert result.evaluation_mode == "rule-based"
+    assert "Rule-based mode is on" in result.mode_explanation
+    assert "Local-only mode was used" not in result.mode_explanation
+    memo_lines = result.final_memo_path.read_text(encoding="utf-8").splitlines()
+    assert any("Live public collection ran" in line for line in memo_lines)
 
 
 def test_evaluate_deal_local_only_filters_instruction_citations(
@@ -1609,6 +1715,34 @@ def _write_company_folder(
         text = f"{text} " + ("filler " * 500) + "PRIVATE_FULL_TEXT_MARKER_AT_END"
     (company_dir / "memo.txt").write_text(text, encoding="utf-8")
     return company_dir
+
+
+def _research_workflow_summary(
+    root: Path,
+    *,
+    company_name: str,
+    live_collection_enabled: bool,
+    issues: list[ResearchWorkflowIssue] | None = None,
+) -> ResearchWorkflowRunSummary:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    deal = ResearchDealInput(
+        deal_id=f"{company_name.casefold()}-synthetic",
+        company_name=company_name,
+        from_ingestion=True,
+    )
+    return ResearchWorkflowRunSummary(
+        created_at=created_at,
+        plan=ResearchPlan(
+            created_at=created_at,
+            local_only=not live_collection_enabled,
+            web_research_enabled=live_collection_enabled,
+            deals=[deal],
+        ),
+        plan_path=root / "data" / "research-plans" / "synthetic-plan.json",
+        result_template_path=root / "data" / "research-results" / "synthetic-template.json",
+        issues=issues or [],
+        live_collection_enabled=live_collection_enabled,
+    )
 
 
 def _evidence_record(evidence_id: str, text: str, document_path: str) -> EvidenceRecord:
