@@ -138,8 +138,18 @@ def import_research_results(
         deal_id: list(store.evidence) for deal_id, store in stores.items()
     }
     existing_ids_by_deal_id = {
-        deal_id: {evidence.id for evidence in store.evidence}
+        deal_id: {
+            evidence_id
+            for evidence in store.evidence
+            for evidence_id in _duplicate_ids_for_existing_evidence(
+                evidence,
+                deal_id=deal_id,
+            )
+        }
         for deal_id, store in stores.items()
+    }
+    existing_meridian_document_ids_by_deal_id = {
+        deal_id: _meridian_document_ids_by_source(store) for deal_id, store in stores.items()
     }
     imported_counts: dict[str, int] = {}
     duplicate_counts: dict[str, int] = {}
@@ -149,8 +159,14 @@ def import_research_results(
         if match.evidence.id in existing_ids_by_deal_id[deal_id]:
             duplicate_counts[deal_id] = duplicate_counts.get(deal_id, 0) + 1
             continue
-        evidence_by_deal_id[deal_id].append(match.evidence)
-        existing_ids_by_deal_id[deal_id].add(match.evidence.id)
+        evidence = _evidence_with_existing_meridian_document_id(
+            match.evidence,
+            existing_meridian_document_ids_by_deal_id[deal_id],
+        )
+        evidence_by_deal_id[deal_id].append(evidence)
+        existing_ids_by_deal_id[deal_id].update(
+            _duplicate_ids_for_existing_evidence(evidence, deal_id=deal_id)
+        )
         imported_counts[deal_id] = imported_counts.get(deal_id, 0) + 1
 
     if not dry_run:
@@ -264,6 +280,7 @@ def _validate_results_file_payload(raw_payload: dict[str, object]) -> ResearchRe
         if _is_blank_template_result(raw_result):
             skipped_blank_template_row_count += 1
             continue
+        _preflight_meridian_template_result(raw_result, index=index)
         try:
             result = ResearchResultInput.model_validate(raw_result)
         except ValidationError as exc:
@@ -299,6 +316,113 @@ def _is_blank_template_result(result: object) -> bool:
 
 def _is_blank_template_value(value: object) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _preflight_meridian_template_result(result: object, *, index: int) -> None:
+    if not isinstance(result, dict):
+        return
+    if result.get("provider_id") == "meridian":
+        source_url = result.get("source_url")
+        if isinstance(source_url, str) and source_url != source_url.strip():
+            raise ResearchImportError(
+                f"Research result row {index} source_url cannot contain spaces."
+            )
+    if not _looks_like_meridian_template_result(result):
+        return
+    if not _is_blank_template_value(result.get("source_api")):
+        raise ResearchImportError(
+            f"Research result row {index} uses a generated Meridian placeholder, so "
+            "source_api must be blank. Clear source_api and keep the safe Meridian "
+            "deal page URL in source_url."
+        )
+    missing_fields = _missing_completed_meridian_template_fields(result)
+    if missing_fields:
+        field_list = ", ".join(missing_fields)
+        raise ResearchImportError(
+            f"Research result row {index}: partly completed Meridian placeholder. "
+            f"Complete {field_list}, keep the generated source_url, and keep the "
+            "generated licensing marker until import, or leave the row untouched."
+        )
+    licensing_notes = result.get("licensing_notes")
+    if not isinstance(licensing_notes, str):
+        return
+    generated_source_url = _generated_meridian_source_url(licensing_notes)
+    if generated_source_url is None:
+        raise ResearchImportError(
+            f"Research result row {index} is a completed Meridian placeholder, so "
+            "licensing_notes must keep the generated placeholder marker and generated "
+            "source URL marker until import."
+        )
+    source_url = result.get("source_url")
+    if not isinstance(source_url, str):
+        return
+    try:
+        cleaned_source_url = clean_meridian_url(source_url)
+    except MeridianWorkflowError as exc:
+        raise ResearchImportError(
+            f"Research result row {index} source_url is not a safe Meridian deal page URL: "
+            f"{exc}"
+        ) from exc
+    try:
+        cleaned_generated_source_url = clean_meridian_url(generated_source_url)
+    except MeridianWorkflowError as exc:
+        raise ResearchImportError(
+            f"Research result row {index} has an unsafe generated Meridian source URL: "
+            f"{exc}"
+        ) from exc
+    if cleaned_source_url != cleaned_generated_source_url:
+        raise ResearchImportError(
+            f"Research result row {index} uses a generated Meridian placeholder, so "
+            "source_url must stay as the generated Meridian deal page URL."
+        )
+
+
+def _looks_like_meridian_template_result(result: dict[str, object]) -> bool:
+    if result.get("provider_id") != "meridian":
+        return False
+    if result.get("source_kind") not in {SourceKind.MERIDIAN.value, SourceKind.MERIDIAN}:
+        return False
+    if result.get("document_type") not in {
+        DocumentType.PLATFORM_DEAL_PAGE.value,
+        DocumentType.PLATFORM_DEAL_PAGE,
+    }:
+        return False
+    title = result.get("title")
+    confidence = result.get("confidence")
+    licensing_notes = result.get("licensing_notes")
+    return (
+        _is_meridian_placeholder_title(title)
+        or _is_meridian_placeholder_confidence(confidence)
+        or (
+            isinstance(licensing_notes, str)
+            and (
+                _has_meridian_placeholder_marker(licensing_notes)
+                or (
+                    MERIDIAN_WORKFLOW_TEMPLATE_MARKER in licensing_notes
+                    and bool(_saved_licensing_notes(licensing_notes))
+                )
+                or MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX in licensing_notes
+            )
+        )
+    )
+
+
+def _missing_completed_meridian_template_fields(
+    result: dict[str, object],
+) -> list[str]:
+    missing_fields = [
+        field
+        for field in [
+            "title",
+            "text",
+            "retrieved_at",
+            "source_url",
+            "confidence",
+            "licensing_notes",
+        ]
+        if _is_blank_template_value(result.get(field))
+    ]
+    return missing_fields
 
 
 def _is_untouched_meridian_placeholder_result(result: dict[str, object]) -> bool:
@@ -409,7 +533,10 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
                 "Use web_page, platform_deal_page, or memo."
             )
         if result.source_kind == SourceKind.MERIDIAN:
-            _validate_meridian_result_source(result, index=display_index)
+            result.source_url = _validate_meridian_result_source(
+                result,
+                index=display_index,
+            )
             _validate_completed_meridian_placeholder(result, index=display_index)
             _validate_saved_meridian_licensing_notes(result, index=display_index)
         elif result.source_url is not None:
@@ -448,7 +575,7 @@ def _validate_meridian_result_source(
     result: ResearchResultInput,
     *,
     index: int,
-) -> None:
+) -> str:
     if result.source_url is None:
         raise ResearchImportError(
             f"Research result {index} uses Meridian evidence, so source_url must be "
@@ -460,7 +587,7 @@ def _validate_meridian_result_source(
             "blank. Keep the safe Meridian deal page URL in source_url."
         )
     try:
-        clean_meridian_url(result.source_url)
+        return clean_meridian_url(result.source_url)
     except MeridianWorkflowError as exc:
         raise ResearchImportError(
             f"Research result {index} source_url is not a safe Meridian deal page URL: "
@@ -490,12 +617,26 @@ def _validate_completed_meridian_placeholder(
     if _is_meridian_placeholder_title(result.title) and generated_source_url is None:
         raise ResearchImportError(
             f"Research result {index} uses a generated Meridian placeholder title, so "
-            "licensing_notes must keep the generated placeholder marker until import."
+            "licensing_notes must keep the generated placeholder marker and generated "
+            "source URL marker until import."
         )
-    if generated_source_url is not None and result.source_url != generated_source_url:
+    if generated_source_url is not None:
+        try:
+            cleaned_generated_source_url = clean_meridian_url(generated_source_url)
+        except MeridianWorkflowError as exc:
+            raise ResearchImportError(
+                f"Research result {index} has an unsafe generated Meridian source URL: "
+                f"{exc}"
+            ) from exc
+        if result.source_url != cleaned_generated_source_url:
+            raise ResearchImportError(
+                f"Research result {index} uses a generated Meridian placeholder, so "
+                "source_url must stay as the generated Meridian deal page URL."
+            )
+    elif _has_meridian_placeholder_marker(result.licensing_notes):
         raise ResearchImportError(
             f"Research result {index} uses a generated Meridian placeholder, so "
-            "source_url must stay as the generated Meridian deal page URL."
+            "licensing_notes must keep the generated source URL marker until import."
         )
     if not _is_meridian_placeholder_confidence(result.confidence):
         return
@@ -729,7 +870,7 @@ def _evidence_record_for_result(
         document_type = DocumentType.PLATFORM_DEAL_PAGE
 
     return EvidenceRecord(
-        id=f"ev_external_{slugify(result.provider_id)}_{digest[:16]}",
+        id=_external_evidence_id(result.provider_id, digest),
         deal_id=deal.id,
         document_id=_external_document_id(result, deal_id=deal.id),
         document_path=Path("external-research")
@@ -772,18 +913,109 @@ def _saved_licensing_notes(licensing_notes: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _meridian_document_ids_by_source(store: EvidenceStore) -> dict[str, str]:
+    document_ids: dict[str, str] = {}
+    for evidence in store.evidence:
+        source_reference = _canonical_meridian_source_reference(evidence)
+        if source_reference is None:
+            continue
+        document_ids.setdefault(source_reference, evidence.document_id)
+    return document_ids
+
+
+def _evidence_with_existing_meridian_document_id(
+    evidence: EvidenceRecord,
+    existing_document_ids: dict[str, str],
+) -> EvidenceRecord:
+    source_reference = _canonical_meridian_source_reference(evidence)
+    if source_reference is None:
+        return evidence
+    document_id = existing_document_ids.get(source_reference)
+    if document_id is None:
+        existing_document_ids[source_reference] = evidence.document_id
+        return evidence
+    if evidence.document_id == document_id:
+        return evidence
+    return evidence.model_copy(update={"document_id": document_id})
+
+
+def _duplicate_ids_for_existing_evidence(
+    evidence: EvidenceRecord,
+    *,
+    deal_id: str,
+) -> set[str]:
+    duplicate_ids = {evidence.id}
+    meridian_id = _canonical_meridian_evidence_id(evidence, deal_id=deal_id)
+    if meridian_id is not None:
+        duplicate_ids.add(meridian_id)
+    return duplicate_ids
+
+
+def _canonical_meridian_evidence_id(
+    evidence: EvidenceRecord,
+    *,
+    deal_id: str,
+) -> str | None:
+    source_reference = _canonical_meridian_source_reference(evidence)
+    if source_reference is None:
+        return None
+    provider_id = "meridian"
+    digest = _research_result_digest(
+        deal_id=deal_id,
+        provider_id=provider_id,
+        source_kind=evidence.source_kind,
+        source_reference=source_reference,
+        text=evidence.text,
+    )
+    return _external_evidence_id(provider_id, digest)
+
+
+def _canonical_meridian_source_reference(evidence: EvidenceRecord) -> str | None:
+    if evidence.provider_id != "meridian":
+        return None
+    if evidence.source_kind != SourceKind.MERIDIAN:
+        return None
+    if evidence.source_url is None:
+        return None
+    try:
+        return clean_meridian_url(evidence.source_url)
+    except MeridianWorkflowError:
+        return None
+
+
 def _result_digest(result: ResearchResultInput, *, deal_id: str) -> str:
     source_reference = result.source_url or result.source_api or ""
+    return _research_result_digest(
+        deal_id=deal_id,
+        provider_id=result.provider_id,
+        source_kind=result.source_kind,
+        source_reference=source_reference,
+        text=result.text,
+    )
+
+
+def _research_result_digest(
+    *,
+    deal_id: str,
+    provider_id: str,
+    source_kind: SourceKind,
+    source_reference: str,
+    text: str,
+) -> str:
     payload = "\0".join(
         [
             deal_id,
-            result.provider_id,
-            result.source_kind.value,
+            provider_id,
+            source_kind.value,
             source_reference,
-            result.text,
+            text,
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _external_evidence_id(provider_id: str, digest: str) -> str:
+    return f"ev_external_{slugify(provider_id)}_{digest[:16]}"
 
 
 def _external_document_id(result: ResearchResultInput, *, deal_id: str) -> str:
@@ -1005,6 +1237,11 @@ def _plain_research_result_validation_message(
     message: str,
     error_type: str,
 ) -> str:
+    if error_type == "extra_forbidden":
+        return (
+            f"{field_name} is not an allowed research result field. Use source_url "
+            "for an exact web page URL or source_api for an API source reference."
+        )
     if field_name == "retrieved_at":
         if error_type != "missing":
             return (

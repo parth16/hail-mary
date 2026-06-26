@@ -8,7 +8,7 @@ import shlex
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +40,12 @@ MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE = (
     "match; or low: needs follow-up."
 )
 MERIDIAN_DEAL_SLUG_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+MERIDIAN_TOKENIZED_URL_PATTERN = re.compile(
+    r"(?:^|[;&?#/_-])(?:access[_-]?token|auth|cookie|jwt|secret|session|"
+    r"signature|signed[_-]?url|token)(?:[=;&?#/_-]|$)",
+    re.IGNORECASE,
+)
+MERIDIAN_ENCODED_DELIMITERS = ("?", "#", ";", "&")
 MERIDIAN_RECOMMENDED_FACTS = [
     "Company name",
     "Round type",
@@ -74,6 +80,8 @@ class MeridianWorkflow(BaseModel):
     manual_steps: list[str] = Field(default_factory=list)
     do_not_collect: list[str] = Field(default_factory=list)
     term_definitions: dict[str, str] = Field(default_factory=dict)
+    required_result_fields: dict[str, str] = Field(default_factory=dict)
+    recommendation_policy: str
     required_when_visible_sections: dict[str, list[str]] = Field(default_factory=dict)
     optional_when_visible_sections: dict[str, list[str]] = Field(default_factory=dict)
     before_import_checklist: list[str] = Field(default_factory=list)
@@ -133,6 +141,8 @@ def prepare_meridian_workflow(
         manual_steps=_manual_steps(),
         do_not_collect=_do_not_collect(),
         term_definitions=_term_definitions(),
+        required_result_fields=_required_result_fields(),
+        recommendation_policy=_recommendation_policy(),
         required_when_visible_sections=_required_when_visible_sections(),
         optional_when_visible_sections=_optional_when_visible_sections(),
         before_import_checklist=_before_import_checklist(),
@@ -177,6 +187,8 @@ def clean_meridian_url(url: str) -> str:
     cleaned = url.strip()
     if not cleaned:
         raise MeridianWorkflowError("Meridian URL cannot be blank.")
+    if cleaned != url or any(character.isspace() for character in url):
+        raise MeridianWorkflowError("The Meridian URL cannot contain spaces.")
     try:
         parsed = urlparse(cleaned)
     except ValueError as exc:
@@ -199,12 +211,20 @@ def clean_meridian_url(url: str) -> str:
         raise MeridianWorkflowError(
             "The Meridian URL cannot include a username or password."
         )
-    if any(character.isspace() for character in cleaned):
-        raise MeridianWorkflowError("The Meridian URL cannot contain spaces.")
+    if _has_encoded_url_delimiter(parsed.path):
+        raise MeridianWorkflowError(
+            "The Meridian URL cannot include encoded query strings, fragments, "
+            "or path parameters. Use the base deal page URL."
+        )
     if ";" in parsed.path or parsed.params or parsed.query or parsed.fragment:
         raise MeridianWorkflowError(
-            "The Meridian URL cannot include extra text after ;, ?, or #. "
-            "Use the base deal page URL."
+            "The Meridian URL cannot include query strings, fragments, path "
+            "parameters, or signed URL text. Use the base deal page URL."
+        )
+    if _has_tokenized_url_marker(cleaned):
+        raise MeridianWorkflowError(
+            "The Meridian URL cannot include tokenized, signed, session, or "
+            "authentication text. Use the base deal page URL."
         )
     if host.casefold() != "portal.angellist.com":
         raise MeridianWorkflowError(
@@ -228,7 +248,40 @@ def clean_meridian_url(url: str) -> str:
             "The Meridian deal URL can include only letters, numbers, dots, "
             "underscores, or hyphens in the deal name."
         )
-    return cleaned
+    return f"https://portal.angellist.com/m/{path_parts[2]}/invest"
+
+
+def _has_encoded_url_delimiter(path: str) -> bool:
+    decoded = path
+    for _ in range(5):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    if decoded == path:
+        return False
+    return any(delimiter in decoded for delimiter in MERIDIAN_ENCODED_DELIMITERS)
+
+
+def _has_tokenized_url_marker(url: str) -> bool:
+    decoded = url
+    for _ in range(5):
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    try:
+        parsed = urlparse(decoded)
+    except ValueError as exc:
+        raise MeridianWorkflowError("The Meridian URL is not a valid URL.") from exc
+    unsafe_parts = [parsed.params, parsed.query, parsed.fragment]
+    path_parts = parsed.path.split("/")
+    if len(path_parts) != 4:
+        unsafe_parts.append(parsed.path)
+    return any(
+        MERIDIAN_TOKENIZED_URL_PATTERN.search(part or "") is not None
+        for part in unsafe_parts
+    )
 
 
 def _has_explicit_port(netloc: str) -> bool:
@@ -329,6 +382,39 @@ def _safety_rules() -> list[str]:
     ]
 
 
+def _required_result_fields() -> dict[str, str]:
+    return {
+        "source_url": (
+            "Keep the generated safe Meridian deal page URL. Do not paste signed URLs, "
+            "query strings, screenshots, or browser URLs."
+        ),
+        "title": "Use a short label for the fact, such as Meridian: Minimum investment.",
+        "text": "Paste one short allowed fact or excerpt, not a raw page dump.",
+        "retrieved_at": (
+            "Enter the time you viewed the page in ISO format, such as "
+            "2026-01-01T12:00:00Z."
+        ),
+        "confidence": (
+            "Replace the placeholder with your own confidence note, such as "
+            "high: exact short page excerpt."
+        ),
+        "licensing_notes": (
+            "Explain why this short fact can be saved locally. Keep the generated "
+            "marker until import; Hail Mary strips it before saving evidence."
+        ),
+        "source_kind": "Keep meridian.",
+        "document_type": "Keep platform_deal_page.",
+    }
+
+
+def _recommendation_policy() -> str:
+    return (
+        "Do not enter INVEST, PASS, check size recommendations, or allocation advice "
+        "in Meridian task templates. Hail Mary makes final recommendations only through "
+        "the evaluate-deal scoring and review path."
+    )
+
+
 def _manual_steps() -> list[str]:
     return [
         "Sign into Meridian normally in your own browser.",
@@ -351,6 +437,10 @@ def _manual_steps() -> list[str]:
             "any unused placeholder rows untouched."
         ),
         "Keep source_url as the generated Meridian page URL for completed rows.",
+        (
+            "Do not write INVEST, PASS, check sizes, or allocation recommendations in "
+            "the template. Collect source-backed facts only."
+        ),
         "Run the import-research-results dry-run command before importing evidence.",
     ]
 

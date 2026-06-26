@@ -1548,11 +1548,17 @@ def run_meridian_workflow_guards_fixture(work_dir: Path) -> None:
     config = AppConfig(data_dir=(work_dir / "data").resolve(strict=False))
     unsafe_urls = [
         "http://portal.angellist.com/m/synthetic-meridianco/invest",
+        " https://portal.angellist.com/m/synthetic-meridianco/invest",
+        "https://portal.angellist.com/m/synthetic-meridianco/invest ",
+        "https://portal.angellist.com:444/m/synthetic-meridianco/invest",
+        "https://portal.angellist.com:/m/synthetic-meridianco/invest",
         "https://portal.angellist.com/m/synthetic-meridianco/invest?token=secret",
         "https://portal.angellist.com/m/synthetic-meridianco/invest#details",
         "https://portal.angellist.com/m/synthetic-meridianco/invest;jsessionid=secret",
         "https://portal.angellist.com/m/synthetic%3Bmeridianco/invest",
         "https://portal.angellist.com/m/synthetic%3Fmeridianco/invest",
+        "https://portal.angellist.com/m/synthetic%253Fmeridianco/invest",
+        "https://portal.angellist.com/m/synthetic%2525253Fmeridianco/invest",
         "https://portal.angellist.com/m/synthetic-meridianco/session-token/invest",
         "https://user:token@portal.angellist.com/m/synthetic-meridianco/invest",
     ]
@@ -1598,8 +1604,19 @@ def run_meridian_workflow_guards_fixture(work_dir: Path) -> None:
     workflow = prepare_meridian_workflow(
         config=config,
         company_name="Synthetic MeridianCo",
-        meridian_url="https://portal.angellist.com/m/synthetic-meridianco/invest",
+        meridian_url="https://PORTAL.ANGELLIST.com/m/synthetic-meridianco/invest",
         created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    _expect_equal(
+        workflow.workflow.meridian_url,
+        "https://portal.angellist.com/m/synthetic-meridianco/invest",
+        "Expected Meridian workflow to store only the canonical safe deal URL.",
+    )
+    _expect(
+        "source_url" in workflow.workflow.required_result_fields
+        and "Do not enter INVEST, PASS" in workflow.workflow.recommendation_policy,
+        "Expected Meridian workflow v3 instructions to describe required fields "
+        "and recommendation policy.",
     )
     original_payload = json.loads(
         workflow.result_template_path.read_text(encoding="utf-8")

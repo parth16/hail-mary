@@ -510,6 +510,29 @@ def test_evaluate_deal_includes_live_collection_warnings(
     assert "No research workflow issues were recorded." not in memo_text
 
 
+def test_evaluate_deal_surfaces_meridian_manual_workflow_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="MeridianWarnCo")
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+        meridian_url="https://portal.angellist.com/m/meridianwarnco/invest",
+    )
+
+    assert any(
+        "Research warning: meridian: Meridian is a manual authenticated workflow."
+        in warning
+        for warning in result.warnings
+    )
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Warning: meridian: Meridian is a manual authenticated workflow." in memo_text
+
+
 def test_evaluate_deal_warns_incomplete_search_is_not_clean_no_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

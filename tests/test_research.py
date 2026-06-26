@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 import socket
@@ -69,6 +70,8 @@ from hailmary.research.meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
     MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+    MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
+    clean_meridian_url,
 )
 from hailmary.research.schemas import ResearchResultInput
 from hailmary.research.web import (
@@ -281,6 +284,7 @@ def test_research_workflow_command_creates_artifacts_and_reports_status(
     assert "Saved the private research plan" in result.output
     assert "Saved the fillable results template" in result.output
     assert "Saved the Meridian workflow" in result.output
+    assert "Meridian is a manual authenticated workflow" in result.output
     assert "need manual or local-file work" in result.output
     assert "Live public collection did not run" in result.output
     assert "Ready to import: no completed result files were found yet" in result.output
@@ -343,7 +347,7 @@ def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
 
     assert result.exit_code != 0
     output = _plain_cli_output(result.output)
-    assert "Meridian URL cannot include extra text" in output
+    assert "Meridian URL cannot include query strings" in output
     assert not (data_dir / "research-plans").exists()
     assert "token=secret" not in output
 
@@ -3940,6 +3944,13 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert "allocation" in workflow["term_definitions"]
     assert "target raise" in workflow["term_definitions"]
     assert "closing date" in workflow["term_definitions"]
+    assert workflow["required_result_fields"]["source_url"].startswith("Keep the generated")
+    assert "text" in workflow["required_result_fields"]
+    assert "retrieved_at" in workflow["required_result_fields"]
+    assert "confidence" in workflow["required_result_fields"]
+    assert "licensing_notes" in workflow["required_result_fields"]
+    assert "Do not enter INVEST, PASS" in workflow["recommendation_policy"]
+    assert any("Do not write INVEST, PASS" in step for step in workflow["manual_steps"])
     assert set(workflow["required_when_visible_sections"]) == {
         "deal_terms",
         "traction_customer_evidence",
@@ -4001,10 +4012,19 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert "Keep source_url unchanged" in row["licensing_notes"]
 
 
+def test_clean_meridian_url_returns_canonical_safe_url() -> None:
+    assert (
+        clean_meridian_url("https://PORTAL.ANGELLIST.com/m/acme-ai/invest")
+        == "https://portal.angellist.com/m/acme-ai/invest"
+    )
+
+
 @pytest.mark.parametrize(
     "meridian_url",
     [
         "",
+        " https://portal.angellist.com/m/acme-ai/invest",
+        "https://portal.angellist.com/m/acme-ai/invest ",
         "mailto:founder@example.com",
         "http://portal.angellist.com/m/acme-ai/invest",
         "https://example.com/m/acme-ai/invest",
@@ -4016,6 +4036,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "https://portal.angellist.com/m/acme-ai/invest/",
         "https://portal.angellist.com/m/acme-ai/session-token/invest",
         "https://user:token@portal.angellist.com/m/acme-ai/invest",
+        "https://portal.angellist.com%5B/m/acme-ai/invest",
         "https://portal.angellist.com:bad/m/acme-ai/invest",
         "https://portal.angellist.com:444/m/acme-ai/invest",
         "https://portal.angellist.com:/m/acme-ai/invest",
@@ -4024,7 +4045,10 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "https://portal.angellist.com/m/acme-ai/invest;jsessionid=secret",
         "https://portal.angellist.com/m/acme%3Bjsessionid=secret/invest",
         "https://portal.angellist.com/m/acme%3Ftoken=secret/invest",
+        "https://portal.angellist.com/m/acme%253Ftoken=secret/invest",
+        "https://portal.angellist.com/m/acme%2525253Ftoken=secret/invest",
         "https://portal.angellist.com/m/acme-ai/invest?token=secret",
+        "https://portal.angellist.com/m/acme-ai/invest?signature=secret",
         "https://portal.angellist.com/m/acme-ai/invest#details",
     ],
 )
@@ -5477,6 +5501,85 @@ def test_import_research_results_rejects_completed_meridian_placeholder_url_edit
         )
 
 
+def test_import_research_results_reports_unsafe_completed_meridian_placeholder_source_url(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+            "source_url": "https://portal.angellist.com/m/example/invest?debug=1",
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError) as exc_info:
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+    message = str(exc_info.value)
+    assert "row 1 source_url is not a safe Meridian deal page URL" in message
+    assert "generated Meridian source URL" not in message
+
+
+def test_import_research_results_rejects_completed_meridian_placeholder_source_api(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+            "source_api": "https://portal.angellist.com/m/example/invest?debug=1",
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError) as exc_info:
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+    message = str(exc_info.value)
+    assert "source_api must be blank" in message
+    assert "Clear source_api" in message
+    assert "partly completed Meridian placeholder" not in message
+
+
 def test_import_research_results_rejects_completed_meridian_placeholder_missing_marker(
     tmp_path: Path,
 ) -> None:
@@ -5505,6 +5608,45 @@ def test_import_research_results_rejects_completed_meridian_placeholder_missing_
     )
 
     with pytest.raises(ResearchImportError, match="generated placeholder marker"):
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
+def test_import_research_results_rejects_template_marker_without_source_url_marker(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "title": "Meridian deal page excerpt",
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+            "source_url": "https://portal.angellist.com/m/other-example/invest",
+            "licensing_notes": (
+                f"{MERIDIAN_WORKFLOW_TEMPLATE_MARKER} Authenticated source."
+            ),
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match="generated source URL marker"):
         import_research_results(
             config=config,
             results_path=workflow.result_template_path,
@@ -5643,11 +5785,11 @@ def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
         ),
         (
             "https://portal.angellist.com/m/example/invest;jsessionid=secret",
-            "extra text after",
+            "query strings",
         ),
         (
             "https://portal.angellist.com/m/example;jsessionid=secret/invest",
-            "extra text after",
+            "query strings",
         ),
         (
             "https://portal.angellist.com/m/example/session-token/invest",
@@ -5655,11 +5797,11 @@ def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
         ),
         (
             "https://portal.angellist.com/m/example/invest?token=secret",
-            "extra text after",
+            "query strings",
         ),
         (
             "https://portal.angellist.com/m/example/invest#details",
-            "extra text after",
+            "query strings",
         ),
         (
             "https://portal.angellist.com//m/example/invest",
@@ -5671,7 +5813,23 @@ def test_import_research_results_strips_meridian_workflow_marker_from_evidence(
         ),
         (
             "https://portal.angellist.com/m/example%3Ftoken=secret/invest",
-            "deal URL can include only",
+            "encoded query strings",
+        ),
+        (
+            "https://portal.angellist.com/m/example%253Ftoken=secret/invest",
+            "encoded query strings",
+        ),
+        (
+            "https://portal.angellist.com/m/example%2525253Ftoken=secret/invest",
+            "encoded query strings",
+        ),
+        (
+            " https://portal.angellist.com/m/example/invest",
+            "cannot contain spaces",
+        ),
+        (
+            "https://portal.angellist.com/m/example/invest ",
+            "cannot contain spaces",
         ),
         (
             "https://user:token@portal.angellist.com/m/example/invest",
@@ -5766,6 +5924,36 @@ def test_import_research_results_rejects_marker_only_meridian_licensing_notes(
     )
 
     with pytest.raises(ResearchImportError, match="licensing_notes must explain"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_rejects_unsafe_meridian_alternate_source_fields(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-meridian-extra-source.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                source_url="https://portal.angellist.com/m/example/invest",
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                portal_source_url="https://portal.angellist.com/m/example/invest?token=secret",
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ResearchImportError,
+        match="portal_source_url is not an allowed research result field",
+    ):
         import_research_results(
             config=config,
             results_path=bad_results_path,
@@ -5984,6 +6172,182 @@ def test_import_research_results_skips_duplicate_records(tmp_path: Path) -> None
     assert len([evidence for evidence in saved_store.evidence if evidence.provider_id]) == 1
 
 
+def test_import_research_results_skips_legacy_meridian_duplicate_after_canonicalizing_url(
+    tmp_path: Path,
+) -> None:
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    meridian_results_path = tmp_path / "research-results-meridian.json"
+    meridian_source_url = "https://PORTAL.ANGELLIST.com/m/example/invest"
+    _write_results(
+        meridian_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian deal page excerpt",
+                source_url=meridian_source_url,
+                source_api=None,
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                licensing_notes="Authenticated source.",
+            )
+        ],
+    )
+    import_research_results(
+        config=config,
+        results_path=meridian_results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence = next(
+        evidence for evidence in saved_store.evidence if evidence.provider_id == "meridian"
+    )
+    legacy_evidence_id, legacy_document_id = _legacy_meridian_external_ids(
+        deal_id=deal.id,
+        source_url=meridian_source_url,
+        text=meridian_evidence.text,
+    )
+    legacy_evidence = meridian_evidence.model_copy(
+        update={
+            "id": legacy_evidence_id,
+            "document_id": legacy_document_id,
+            "source_url": meridian_source_url,
+        }
+    )
+    legacy_store = saved_store.model_copy(
+        update={
+            "evidence": [
+                legacy_evidence if evidence.id == meridian_evidence.id else evidence
+                for evidence in saved_store.evidence
+            ]
+        }
+    )
+    deal.evidence_store_path.write_text(
+        legacy_store.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=meridian_results_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 0
+    assert result.skipped_duplicate_count == 1
+    saved_again = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence_records = [
+        evidence for evidence in saved_again.evidence if evidence.provider_id == "meridian"
+    ]
+    assert len(meridian_evidence_records) == 1
+    assert meridian_evidence_records[0].source_url == meridian_source_url
+
+
+def test_import_research_results_reuses_legacy_meridian_document_id(
+    tmp_path: Path,
+) -> None:
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    meridian_results_path = tmp_path / "research-results-meridian.json"
+    meridian_source_url = "https://PORTAL.ANGELLIST.com/m/example/invest"
+    _write_results(
+        meridian_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian deal page excerpt",
+                source_url=meridian_source_url,
+                source_api=None,
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                licensing_notes="Authenticated source.",
+            )
+        ],
+    )
+    import_research_results(
+        config=config,
+        results_path=meridian_results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence = next(
+        evidence for evidence in saved_store.evidence if evidence.provider_id == "meridian"
+    )
+    legacy_evidence_id, legacy_document_id = _legacy_meridian_external_ids(
+        deal_id=deal.id,
+        source_url=meridian_source_url,
+        text=meridian_evidence.text,
+    )
+    legacy_evidence = meridian_evidence.model_copy(
+        update={
+            "id": legacy_evidence_id,
+            "document_id": legacy_document_id,
+            "source_url": meridian_source_url,
+        }
+    )
+    legacy_store = saved_store.model_copy(
+        update={
+            "evidence": [
+                legacy_evidence if evidence.id == meridian_evidence.id else evidence
+                for evidence in saved_store.evidence
+            ]
+        }
+    )
+    deal.evidence_store_path.write_text(
+        legacy_store.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    second_result_path = tmp_path / "research-results-meridian-second.json"
+    _write_results(
+        second_result_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian deal page traction excerpt",
+                text="Acme AI reports customer growth from paid pilots.",
+                source_url=meridian_source_url,
+                source_api=None,
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                licensing_notes="Authenticated source.",
+            )
+        ],
+    )
+    result = import_research_results(
+        config=config,
+        results_path=second_result_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 1
+    saved_again = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence_records = [
+        evidence for evidence in saved_again.evidence if evidence.provider_id == "meridian"
+    ]
+    assert len(meridian_evidence_records) == 2
+    assert {evidence.document_id for evidence in meridian_evidence_records} == {
+        legacy_document_id
+    }
+    assert {evidence.source_url for evidence in meridian_evidence_records} == {
+        meridian_source_url,
+        "https://portal.angellist.com/m/example/invest",
+    }
+
+
 def test_import_research_results_dry_run_reports_duplicates_without_writing(
     tmp_path: Path,
 ) -> None:
@@ -6086,7 +6450,7 @@ def test_import_research_results_defaults_meridian_to_meridian_source_kind(
                 provider_id="meridian",
                 provider_name=None,
                 title="Meridian deal page excerpt",
-                source_url="https://portal.angellist.com/m/example/invest",
+                source_url="https://PORTAL.ANGELLIST.com/m/example/invest",
                 source_api=None,
                 licensing_notes="Authenticated source.",
             )
@@ -6108,6 +6472,16 @@ def test_import_research_results_defaults_meridian_to_meridian_source_kind(
     )
     assert meridian_evidence.source_kind == SourceKind.MERIDIAN
     assert meridian_evidence.document_type == DocumentType.PLATFORM_DEAL_PAGE
+    assert meridian_evidence.provider_id == "meridian"
+    assert meridian_evidence.provider_name == "Meridian deal page"
+    assert meridian_evidence.source_url == "https://portal.angellist.com/m/example/invest"
+    assert meridian_evidence.source_api is None
+    assert meridian_evidence.retrieved_at == datetime(2026, 1, 1, 12, tzinfo=UTC)
+    assert meridian_evidence.external_confidence == "high: exact company match"
+    assert meridian_evidence.licensing_notes == "Authenticated source."
+    assert meridian_evidence.text == (
+        "Acme AI reports revenue growth from customers. Minimum investment $2,500."
+    )
 
 
 def test_import_research_results_escapes_external_metadata_in_memos(
@@ -6667,6 +7041,37 @@ def _research_result(**overrides: object) -> dict[str, object]:
 
 def _write_results(path: Path, results: list[dict[str, object]]) -> None:
     path.write_text(json.dumps({"results": results}), encoding="utf-8")
+
+
+def _legacy_meridian_external_ids(
+    *,
+    deal_id: str,
+    source_url: str,
+    text: str,
+) -> tuple[str, str]:
+    evidence_payload = "\0".join(
+        [
+            deal_id,
+            "meridian",
+            SourceKind.MERIDIAN.value,
+            source_url,
+            text,
+        ]
+    )
+    evidence_digest = hashlib.sha256(evidence_payload.encode("utf-8")).hexdigest()
+    document_payload = "\0".join(
+        [
+            deal_id,
+            "meridian",
+            SourceKind.MERIDIAN.value,
+            source_url,
+        ]
+    )
+    document_digest = hashlib.sha256(document_payload.encode("utf-8")).hexdigest()
+    return (
+        f"ev_external_meridian_{evidence_digest[:16]}",
+        f"doc_external_meridian_{document_digest[:12]}",
+    )
 
 
 def _plain_cli_output(output: str) -> str:
