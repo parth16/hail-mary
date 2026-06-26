@@ -17,7 +17,12 @@ from hailmary.agents.packets import (
 )
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig, ConfigError, create_local_state, validate_local_state
-from hailmary.ingest.folder_loader import IngestionError, ingest_folder
+from hailmary.ingest.folder_loader import (
+    DealFolderInspection,
+    IngestionError,
+    ingest_folder,
+    inspect_deal_folder,
+)
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
     AgentFinding,
@@ -28,6 +33,7 @@ from hailmary.schemas.agents import (
     AgentRole,
     AgentSummaryPoint,
     AgentValidationIssue,
+    AgentValidationResult,
 )
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
@@ -97,15 +103,38 @@ class GuardedFinalDecision:
 
 
 @dataclass(frozen=True)
+class DeterministicEvidenceSelection:
+    references: list[AgentEvidenceReference]
+    filtered_reference_count: int = 0
+
+
+@dataclass(frozen=True)
+class EvaluationMode:
+    name: str
+    model_backed: bool
+    explanation: str
+    limitation: str | None = None
+
+
+@dataclass(frozen=True)
 class DealEvaluationResult:
     deal_id: str
     company_name: str
+    evaluation_mode: str
+    mode_explanation: str
+    document_count: int
+    evidence_count: int
+    claim_count: int
+    conflict_count: int
     deterministic_score: ScoredDeal
     final_recommendation: AgentRecommendationRationale
     final_output: AgentReviewOutput
     specialist_results: list[RoleReviewResult]
+    failed_specialist_roles: list[AgentRole]
     final_memo_path: Path
     agent_output_dir: Path
+    ocr_status: str
+    operator_limitations: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -205,12 +234,20 @@ def evaluate_deal_folder(
         create_local_state(config, force=False)
         config = validate_local_state(config)
     except ConfigError as exc:
-        raise EvaluationError(str(exc)) from exc
-    settings = load_llm_settings(config)
-    review_client = model_client or OpenAIAgentReviewClient(
-        model=settings.model,
-        api_key=settings.api_key,
-    )
+        raise EvaluationError(f"Local generated-data setup failed: {exc}") from exc
+
+    _stage(stage_callback, "folder preflight")
+    inspection = _inspect_single_deal_folder(folder, config=config)
+
+    mode = _evaluation_mode(config)
+    _stage(stage_callback, f"mode selection - {mode.explanation}")
+    review_client: AgentReviewClient | None = None
+    if mode.model_backed:
+        settings = load_llm_settings(config)
+        review_client = model_client or OpenAIAgentReviewClient(
+            model=settings.model,
+            api_key=settings.api_key,
+        )
 
     _stage(stage_callback, "ingestion")
     try:
@@ -220,63 +257,83 @@ def evaluate_deal_folder(
     deal = _single_ingested_deal(ingestion_summary)
     store = _load_evidence_store_for_deal(deal, config=config)
 
-    _stage(stage_callback, "deterministic scoring")
+    _stage(stage_callback, "rule-based scoring")
     scored_deal = score_evidence_store(
         store,
         config=config,
         capital_remaining=portfolio_scenario(config).allocatable_capital,
     )
 
-    _stage(stage_callback, "agent packet preparation")
     packet_created_at = created_at or datetime.now(UTC)
     output_dir = config.data_dir / "agent-outputs" / deal.id
-    packet_files = _write_agent_packets(
-        store,
-        scored_deal,
-        config=config,
-        created_at=packet_created_at,
-    )
-    packets_by_role = {
-        packet_file.agent_role: _packet_from_file(packet_file.path)
-        for packet_file in packet_files
-    }
-    packet_paths_by_role = {
-        packet_file.agent_role: packet_file.path for packet_file in packet_files
-    }
 
-    final_packet = packets_by_role[AgentRole.FINAL_DECISION]
-    if final_packet.allowed_evidence_ids:
-        _stage(stage_callback, "specialist committee review")
-        specialist_results = _run_specialist_reviews(
-            review_client,
-            packets_by_role=packets_by_role,
-            packet_paths_by_role=packet_paths_by_role,
-            output_dir=output_dir,
-            max_concurrency=max_concurrency,
+    if mode.model_backed:
+        if review_client is None:
+            raise EvaluationError("Model-backed evaluation could not start a model client.")
+        _stage(stage_callback, "model review preparation")
+        packet_files = _write_agent_packets(
+            store,
+            scored_deal,
+            config=config,
+            created_at=packet_created_at,
         )
+        packets_by_role = {
+            packet_file.agent_role: _packet_from_file(packet_file.path)
+            for packet_file in packet_files
+        }
+        packet_paths_by_role = {
+            packet_file.agent_role: packet_file.path for packet_file in packet_files
+        }
 
-        _stage(stage_callback, "final decision review")
-        final_result = _run_packet_with_repair(
-            review_client,
-            final_packet,
-            packet_path=packet_paths_by_role[AgentRole.FINAL_DECISION],
-            output_dir=output_dir,
-            committee_context=_committee_context_text(specialist_results),
-            fail_on_model_error=True,
-        )
-        if final_result.output is None:
-            raise EvaluationError(
-                "The final-decision review did not pass validation after one repair attempt. "
-                "Hail Mary did not write a final memo."
+        final_packet = packets_by_role[AgentRole.FINAL_DECISION]
+        if final_packet.allowed_evidence_ids:
+            _stage(stage_callback, "specialist model review")
+            specialist_results = _run_specialist_reviews(
+                review_client,
+                packets_by_role=packets_by_role,
+                packet_paths_by_role=packet_paths_by_role,
+                output_dir=output_dir,
+                max_concurrency=max_concurrency,
             )
-        final_output = final_result.output
-        guarded_decision = _guard_final_decision(scored_deal, store, final_output)
-        final_review_was_model = True
+
+            _stage(stage_callback, "final model review")
+            final_result = _run_packet_with_repair(
+                review_client,
+                final_packet,
+                packet_path=packet_paths_by_role[AgentRole.FINAL_DECISION],
+                output_dir=output_dir,
+                committee_context=_committee_context_text(specialist_results),
+                fail_on_model_error=True,
+            )
+            if final_result.output is None:
+                raise EvaluationError(
+                    "The final model review did not pass validation after one repair attempt. "
+                    "Hail Mary did not write a final memo."
+                )
+            final_output = final_result.output
+            guarded_decision = _guard_final_decision(scored_deal, store, final_output)
+            final_review_was_model = True
+        else:
+            _stage(stage_callback, "final decision")
+            specialist_results = []
+            final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
+            final_review_was_model = False
     else:
-        _stage(stage_callback, "specialist committee review")
+        _stage(stage_callback, "local-only final decision")
         specialist_results = []
-        _stage(stage_callback, "final decision review")
-        final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
+        if store.evidence_count:
+            final_output, guarded_decision = _rule_based_final_decision(
+                scored_deal,
+                store,
+                mode=mode,
+            )
+        else:
+            final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
+            if mode.limitation:
+                guarded_decision = GuardedFinalDecision(
+                    recommendation=guarded_decision.recommendation,
+                    warning=f"{guarded_decision.warning} {mode.limitation}",
+                )
         final_review_was_model = False
 
     _stage(stage_callback, "final memo write")
@@ -284,9 +341,21 @@ def evaluate_deal_folder(
     _ensure_private_directory(report_dir, private_root=config.data_dir, description="report")
     final_memo_path = report_dir / f"{deal.id}-final-evaluation.md"
     warnings = [
+        *_unreadable_path_warnings(
+            [*inspection.unreadable_paths, *ingestion_summary.unreadable_paths]
+        ),
         *_ingestion_ocr_warnings(deal),
         *_evaluation_warnings(specialist_results, guarded_decision),
     ]
+    failed_specialist_roles = [
+        result.role for result in specialist_results if result.failed
+    ]
+    operator_limitations = _operator_limitations(
+        mode,
+        specialist_results,
+        guarded_decision=guarded_decision,
+        no_evidence=store.evidence_count == 0,
+    )
     _write_private_text(
         final_memo_path,
         render_final_evaluation_memo(
@@ -304,12 +373,21 @@ def evaluate_deal_folder(
     return DealEvaluationResult(
         deal_id=deal.id,
         company_name=deal.company_name,
+        evaluation_mode=mode.name,
+        mode_explanation=mode.explanation,
+        document_count=len(deal.documents),
+        evidence_count=store.evidence_count,
+        claim_count=store.claim_count,
+        conflict_count=store.conflict_count,
         deterministic_score=scored_deal,
         final_recommendation=guarded_decision.recommendation,
         final_output=final_output,
         specialist_results=specialist_results,
+        failed_specialist_roles=failed_specialist_roles,
         final_memo_path=final_memo_path,
         agent_output_dir=output_dir,
+        ocr_status=_ocr_status(config, deal),
+        operator_limitations=operator_limitations,
         warnings=warnings,
     )
 
@@ -324,26 +402,27 @@ def load_llm_settings(
     provider = raw_provider.lower()
     if not raw_provider:
         raise EvaluationError(
-            "HAILMARY_LLM_PROVIDER is missing. Set HAILMARY_LLM_PROVIDER=openai "
-            "before running `hailmary evaluate-deal`."
+            "Model-backed evaluation is enabled, but HAILMARY_LLM_PROVIDER is missing. "
+            "Set HAILMARY_LLM_PROVIDER=openai before running `hailmary evaluate-deal`."
         )
     if provider != "openai":
         raise EvaluationError(
-            f"HAILMARY_LLM_PROVIDER must be openai. Got {raw_provider!r}."
+            "Model-backed evaluation is enabled, but HAILMARY_LLM_PROVIDER must be "
+            f"openai. Got {raw_provider!r}."
         )
 
     model = env.get("HAILMARY_MODEL", "").strip()
     if not model:
         raise EvaluationError(
-            "HAILMARY_MODEL is missing. Set HAILMARY_MODEL to the OpenAI model "
-            "for the diligence committee."
+            "Model-backed evaluation is enabled, but HAILMARY_MODEL is missing. "
+            "Set HAILMARY_MODEL to the OpenAI model for the diligence committee."
         )
 
     api_key = env.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise EvaluationError(
-            "OPENAI_API_KEY is missing. Set OPENAI_API_KEY before running "
-            "`hailmary evaluate-deal`."
+            "Model-backed evaluation is enabled, but OPENAI_API_KEY is missing. "
+            "Set OPENAI_API_KEY before running `hailmary evaluate-deal`."
         )
 
     if config.local_only:
@@ -358,6 +437,178 @@ def load_llm_settings(
         )
 
     return LLMSettings(provider=provider, model=model, api_key=api_key)
+
+
+def _inspect_single_deal_folder(folder: Path, *, config: AppConfig) -> DealFolderInspection:
+    try:
+        inspection = inspect_deal_folder(folder, config=config)
+    except (FileNotFoundError, NotADirectoryError, IngestionError) as exc:
+        raise EvaluationError(str(exc)) from exc
+
+    if inspection.readable_document_count == 0:
+        details: list[str] = []
+        if inspection.unreadable_paths:
+            path_word = "path" if len(inspection.unreadable_paths) == 1 else "paths"
+            details.append(
+                f"Hail Mary could not read {len(inspection.unreadable_paths)} {path_word}."
+            )
+        if inspection.skipped_files:
+            file_word = "file" if len(inspection.skipped_files) == 1 else "files"
+            details.append(
+                f"Hail Mary skipped {len(inspection.skipped_files)} unsupported or "
+                f"ignored {file_word}."
+            )
+        detail_text = f" {' '.join(details)}" if details else ""
+        raise EvaluationError(
+            f"No readable diligence documents were found in {inspection.root_path}. "
+            "Put one company's supported documents directly in that folder and run "
+            "`hailmary evaluate-deal` again. Supported file types include PDF, DOCX, "
+            f"XLSX, CSV, HTML, TXT, Markdown, PNG, and JPG.{detail_text}"
+        )
+
+    if len(inspection.deal_names) > 1:
+        visible_names = ", ".join(inspection.deal_names[:5])
+        if len(inspection.deal_names) > 5:
+            visible_names = f"{visible_names}, and {len(inspection.deal_names) - 5} more"
+        raise EvaluationError(
+            f"The folder appears to contain {len(inspection.deal_names)} deals: "
+            f"{visible_names}. Run `hailmary evaluate-deal` on one company folder, "
+            "not a collection folder."
+        )
+
+    return inspection
+
+
+def _evaluation_mode(config: AppConfig) -> EvaluationMode:
+    if not config.local_only and not config.mock_llm:
+        return EvaluationMode(
+            name="model-backed",
+            model_backed=True,
+            explanation=(
+                "Model-backed mode is on. Hail Mary will ingest local documents, run "
+                "rule-based scoring, then send selected source-linked evidence excerpts "
+                "to the configured model for review."
+            ),
+        )
+
+    if config.local_only:
+        limitation = (
+            "Local-only mode was used, so model review was skipped. The final "
+            "recommendation comes from rule-based scoring, which means fixed checks over "
+            "source-linked evidence."
+        )
+    else:
+        limitation = (
+            "Model review was skipped because HAILMARY_MOCK_LLM is true. The final "
+            "recommendation comes from rule-based scoring, which means fixed checks over "
+            "source-linked evidence."
+        )
+    return EvaluationMode(
+        name="local-only",
+        model_backed=False,
+        explanation=limitation,
+        limitation=limitation,
+    )
+
+
+def _rule_based_final_decision(
+    scored_deal: ScoredDeal,
+    store: EvidenceStore,
+    *,
+    mode: EvaluationMode,
+) -> tuple[AgentReviewOutput, GuardedFinalDecision]:
+    evidence_selection = _deterministic_recommendation_evidence_selection(
+        store,
+        scored_deal,
+    )
+    references = evidence_selection.references
+    citation_limitation = None
+    final_recommendation = scored_deal.recommendation
+    final_check_size = scored_deal.check_size
+    final_reason = (
+        "INFERRED: Rule-based scoring set the final recommendation: "
+        f"{scored_deal.one_line_reason}"
+    )
+    final_confidence = scored_deal.confidence
+    unsupported = not references
+    if (
+        scored_deal.recommendation == Recommendation.INVEST
+        and evidence_selection.filtered_reference_count
+        and references
+    ):
+        citation_limitation = (
+            "Rule-based scoring suggested INVEST, but one or more supporting evidence "
+            "records looked like instructions embedded in source documents, not "
+            "investment evidence. The final recommendation was changed to PASS until "
+            "the score can be verified without that unsafe support."
+        )
+        final_recommendation = Recommendation.PASS
+        final_check_size = 0
+        final_reason = f"NEEDS_DILIGENCE: {citation_limitation}"
+        final_confidence = ConfidenceLevel.LOW
+        unsupported = True
+        references = []
+    elif scored_deal.recommendation == Recommendation.INVEST and not references:
+        citation_limitation = (
+            "Rule-based scoring suggested INVEST, but Hail Mary could not keep safe "
+            "cited evidence after citation checks. The final recommendation was "
+            "changed to PASS until source-linked evidence can be verified."
+        )
+        final_recommendation = Recommendation.PASS
+        final_check_size = 0
+        final_reason = f"NEEDS_DILIGENCE: {citation_limitation}"
+        final_confidence = ConfidenceLevel.LOW
+        unsupported = True
+    elif evidence_selection.filtered_reference_count and not references:
+        citation_limitation = (
+            "Hail Mary removed all rule-based recommendation citations because they "
+            "looked like instructions embedded in source documents, not investment "
+            "evidence. Treat this PASS as limited until source-linked evidence is "
+            "verified."
+        )
+    recommendation = AgentRecommendationRationale(
+        recommendation=final_recommendation,
+        check_size=final_check_size,
+        reason=final_reason,
+        evidence=references,
+    )
+    limitations = [
+        limitation
+        for limitation in (mode.limitation, citation_limitation)
+        if limitation
+    ]
+    output = AgentReviewOutput(
+        deal_id=scored_deal.deal_id,
+        company_name=scored_deal.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        summary=[
+            AgentSummaryPoint(
+                summary=(
+                    "INFERRED: Hail Mary completed rule-based scoring without model "
+                    "committee review."
+                ),
+                evidence=references,
+                unsupported=unsupported,
+            )
+        ],
+        findings=[
+            AgentFinding(
+                title="Rule-based final decision",
+                finding=(
+                    "The final recommendation is based on fixed scoring checks and "
+                    "guardrails, not model judgment."
+                ),
+                confidence=final_confidence,
+                materiality="high",
+                evidence=references,
+                unsupported=unsupported,
+            )
+        ],
+        limitations=limitations,
+        recommendation=recommendation,
+    )
+    warning = " ".join(limitations) if limitations else None
+    return output, GuardedFinalDecision(recommendation=recommendation, warning=warning)
 
 
 def render_final_evaluation_memo(
@@ -385,11 +636,13 @@ def render_final_evaluation_memo(
         f"**Round / Instrument:** {_round_summary(verified_claims)} / unknown",
         f"**Valuation / Cap:** {_valuation_summary(verified_claims)}",
         "",
-        "## Deterministic Decision And Guardrails",
+        "## Rule-Based Decision And Guardrails",
         "",
-        f"- Deterministic recommendation: {scored_deal.recommendation}.",
-        f"- Deterministic suggested check: {_format_check_size(scored_deal.check_size)}.",
-        f"- Deterministic reason: {_memo_text(scored_deal.one_line_reason)}",
+        "- Rule-based scoring means fixed checks over source-linked evidence. "
+        "This is the deterministic score.",
+        f"- Rule-based recommendation: {scored_deal.recommendation}.",
+        f"- Rule-based suggested check: {_format_check_size(scored_deal.check_size)}.",
+        f"- Rule-based reason: {_memo_text(scored_deal.one_line_reason)}",
     ]
     for gate in scored_deal.kill_gates:
         status = "TRIGGERED" if gate.triggered else "Clear"
@@ -425,8 +678,13 @@ def render_final_evaluation_memo(
                     f"Confidence: {finding.confidence}. Materiality: "
                     f"{_memo_text(finding.materiality)}.{_citation_text(finding.evidence)}"
                 )
-    else:
+    elif final_review_was_model:
         lines.append("- No specialist output passed validation.")
+    else:
+        lines.append(
+            "- Model review was skipped for this run, so no specialist model roles "
+            "were attempted."
+        )
 
     lines.extend(["", "## Final Recommendation"])
     if final_review_was_model and final_output.recommendation is not None:
@@ -527,15 +785,14 @@ def _stage(callback: Callable[[str], None] | None, stage: str) -> None:
 def _single_ingested_deal(summary: IngestionSummary) -> IngestedDeal:
     if not summary.deals:
         raise EvaluationError(
-            "The folder did not produce any deals. Put one company's supported "
-            "diligence documents directly in the company folder and run "
+            "No readable diligence documents were found. Put one company's supported "
+            "documents directly in the company folder and run "
             "`hailmary evaluate-deal` on that folder."
         )
     if len(summary.deals) > 1:
         raise EvaluationError(
-            f"The folder produced {len(summary.deals)} deals. Point "
-            "`hailmary evaluate-deal` at one company folder, not a collection folder "
-            "such as pitch-decks."
+            f"The folder appears to contain {len(summary.deals)} deals. Run "
+            "`hailmary evaluate-deal` on one company folder, not a collection folder."
         )
     return summary.deals[0]
 
@@ -562,7 +819,7 @@ def _load_evidence_store_for_deal(deal: IngestedDeal, *, config: AppConfig) -> E
     except ValidationError as exc:
         detail = _validation_error_detail(exc)
         raise EvaluationError(
-            f"The evidence store for {deal.company_name} could not be read. "
+            f"The saved evidence store for {deal.company_name} is malformed. "
             f"First problem: {detail}"
         ) from exc
 
@@ -710,7 +967,7 @@ def _run_packet_with_repair(
     if fail_on_model_error:
         issue_text = _issues_text(last_issues)
         raise EvaluationError(
-            "The final-decision review did not pass validation after one repair "
+            "The final model review did not pass validation after one repair "
             f"attempt. First problem: {issue_text}"
         )
 
@@ -735,7 +992,7 @@ def _parse_and_validate_agent_output(
             AgentValidationIssue(
                 location="document",
                 message=(
-                    "The model output was not valid AgentReviewOutput JSON. "
+                    "The model output was not valid Hail Mary review JSON. "
                     f"First problem: {_validation_error_detail(exc)}"
                 ),
             )
@@ -801,25 +1058,50 @@ def _guard_final_decision(
     model_recommendation = final_output.recommendation
     if model_recommendation is None:
         raise EvaluationError(
-            "The final-decision review passed schema checks without a recommendation. "
+            "The final model review passed validation without a recommendation. "
             "Hail Mary did not write a final memo."
         )
 
     if scored_deal.recommendation == Recommendation.PASS:
+        evidence_selection = _deterministic_recommendation_evidence_selection(
+            store,
+            scored_deal,
+        )
         forced_pass_warning = (
             "The final model recommended "
-            f"{_recommendation_summary(model_recommendation)}, but deterministic scoring "
+            f"{_recommendation_summary(model_recommendation)}, but rule-based scoring "
             "forced final PASS/$0 because the model cannot override Hail Mary kill "
-            "gates or score gates into INVEST."
+            "gates or score gates into INVEST. Rule-based scoring means fixed checks "
+            "over source-linked evidence."
         )
+        warnings = [forced_pass_warning]
+        forced_pass_reason = f"Rule-based scoring forced PASS: {scored_deal.one_line_reason}"
+        if evidence_selection.filtered_reference_count and not evidence_selection.references:
+            citation_limitation = (
+                "Hail Mary removed all rule-based recommendation citations because they "
+                "looked like instructions embedded in source documents, not investment "
+                "evidence. Treat this PASS as limited until source-linked evidence is "
+                "verified."
+            )
+            warnings.append(citation_limitation)
+            forced_pass_reason = (
+                f"NEEDS_DILIGENCE: {citation_limitation} "
+                f"Rule-based scoring forced PASS: {scored_deal.one_line_reason}"
+            )
+        elif evidence_selection.filtered_reference_count:
+            warnings.append(
+                "Hail Mary removed one or more rule-based recommendation citations "
+                "because they looked like instructions embedded in source documents, "
+                "not investment evidence."
+            )
         return GuardedFinalDecision(
             recommendation=AgentRecommendationRationale(
                 recommendation=Recommendation.PASS,
                 check_size=0,
-                reason=f"Deterministic scoring forced PASS: {scored_deal.one_line_reason}",
-                evidence=_deterministic_recommendation_evidence(store, scored_deal),
+                reason=forced_pass_reason,
+                evidence=evidence_selection.references,
             ),
-            warning=forced_pass_warning,
+            warning=" ".join(warnings),
         )
 
     if model_recommendation.recommendation == Recommendation.PASS:
@@ -830,8 +1112,9 @@ def _guard_final_decision(
     if check_size != model_recommendation.check_size:
         capped_check_warning = (
             "The final model recommended "
-            f"{_recommendation_summary(model_recommendation)}, but the deterministic "
-            f"allocation set the final check size to {_format_check_size(check_size)}."
+            f"{_recommendation_summary(model_recommendation)}, but the rule-based "
+            "allocation (deterministic allocation) set the final check size to "
+            f"{_format_check_size(check_size)}."
         )
     return GuardedFinalDecision(
         recommendation=model_recommendation.model_copy(update={"check_size": check_size}),
@@ -848,14 +1131,15 @@ def _no_evidence_final_decision(
 ) -> tuple[AgentReviewOutput, GuardedFinalDecision]:
     limitation = (
         "No usable source-linked evidence was available, so Hail Mary skipped model "
-        "committee review and wrote a deterministic PASS/$0 memo."
+        "committee review and wrote a rule-based PASS/$0 memo. Rule-based scoring means "
+        "fixed checks over source-linked evidence."
     )
     recommendation = AgentRecommendationRationale(
         recommendation=Recommendation.PASS,
         check_size=0,
         reason=(
             "NEEDS_DILIGENCE: No usable source-linked evidence was available; "
-            f"deterministic scoring forced PASS. {scored_deal.one_line_reason}"
+            f"rule-based scoring forced PASS. {scored_deal.one_line_reason}"
         ),
         evidence=[],
     )
@@ -894,6 +1178,13 @@ def _deterministic_recommendation_evidence(
     store: EvidenceStore,
     scored_deal: ScoredDeal,
 ) -> list[AgentEvidenceReference]:
+    return _deterministic_recommendation_evidence_selection(store, scored_deal).references
+
+
+def _deterministic_recommendation_evidence_selection(
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> DeterministicEvidenceSelection:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
     references: list[AgentEvidenceReference] = []
     for evidence_id in _deterministic_support_evidence_ids(store, scored_deal):
@@ -901,7 +1192,93 @@ def _deterministic_recommendation_evidence(
         if evidence is None:
             continue
         references.append(_reference_for_evidence(evidence))
-    return references[:5]
+    safe_references = _validated_deterministic_recommendation_references(
+        references,
+        store,
+        scored_deal,
+    )
+    return DeterministicEvidenceSelection(
+        references=safe_references[:5],
+        filtered_reference_count=len(references) - len(safe_references),
+    )
+
+
+def _validated_deterministic_recommendation_references(
+    references: Sequence[AgentEvidenceReference],
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> list[AgentEvidenceReference]:
+    if not references:
+        return []
+    packet = _full_evidence_validation_packet(store, scored_deal)
+    safe_references: list[AgentEvidenceReference] = []
+    for reference in references:
+        record_validation = _validate_deterministic_recommendation_reference(
+            AgentEvidenceReference(evidence_id=reference.evidence_id),
+            packet,
+            scored_deal,
+        )
+        if any(
+            issue.location.startswith("recommendation.evidence")
+            for issue in record_validation.issues
+        ):
+            continue
+        validation = _validate_deterministic_recommendation_reference(
+            reference,
+            packet,
+            scored_deal,
+        )
+        if not any(
+            issue.location.startswith("recommendation.evidence")
+            for issue in validation.issues
+        ):
+            safe_references.append(reference)
+    return safe_references
+
+
+def _validate_deterministic_recommendation_reference(
+    reference: AgentEvidenceReference,
+    packet: AgentInputPacket,
+    scored_deal: ScoredDeal,
+) -> AgentValidationResult:
+    recommendation = AgentRecommendationRationale(
+        recommendation=scored_deal.recommendation,
+        check_size=scored_deal.check_size,
+        reason="INFERRED: Rule-based recommendation citation validation.",
+        evidence=[reference],
+    )
+    return validate_agent_output(
+        AgentReviewOutput(
+            deal_id=scored_deal.deal_id,
+            company_name=scored_deal.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            summary=[
+                AgentSummaryPoint(
+                    summary="UNVERIFIED: Citation validation placeholder.",
+                    unsupported=True,
+                )
+            ],
+            recommendation=recommendation,
+        ),
+        packet,
+    )
+
+def _full_evidence_validation_packet(
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> AgentInputPacket:
+    max_evidence_chars = max(
+        (len(evidence.text) for evidence in store.evidence),
+        default=1,
+    )
+    return build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.FINAL_DECISION,
+        created_at=store.created_at,
+        max_evidence_records=max(len(store.evidence), 1),
+        max_evidence_chars=max(max_evidence_chars, 1),
+    )
 
 
 def _deterministic_support_evidence_ids(
@@ -951,13 +1328,13 @@ def _reference_for_evidence(evidence: EvidenceRecord) -> AgentEvidenceReference:
 
 
 def _reference_quote(text: str) -> str:
-    collapsed = " ".join(text.split())
-    if not collapsed:
+    stripped = text.strip()
+    if not stripped:
         return ""
-    sentence = collapsed.split(".", 1)[0].strip()
+    sentence = stripped.split(".", 1)[0].strip()
     if sentence:
         return sentence[:240].rstrip()
-    return collapsed[:240].rstrip()
+    return stripped[:240].rstrip()
 
 
 def _evaluation_warnings(
@@ -976,6 +1353,46 @@ def _evaluation_warnings(
     return warnings
 
 
+def _unreadable_path_warnings(paths: Sequence[str]) -> list[str]:
+    unreadable_paths = tuple(dict.fromkeys(paths))
+    if not unreadable_paths:
+        return []
+    path_word = "path" if len(unreadable_paths) == 1 else "paths"
+    return [
+        f"Could not read {len(unreadable_paths)} {path_word}. Hail Mary did not "
+        "scan those locations, so diligence documents may be missing."
+    ]
+
+
+def _operator_limitations(
+    mode: EvaluationMode,
+    specialist_results: Sequence[RoleReviewResult],
+    *,
+    guarded_decision: GuardedFinalDecision,
+    no_evidence: bool,
+) -> list[str]:
+    limitations: list[str] = []
+
+    def add_limitation(limitation: str | None) -> None:
+        if limitation and limitation not in limitations:
+            limitations.append(limitation)
+
+    add_limitation(mode.limitation)
+    if no_evidence:
+        add_limitation(
+            "No usable source-linked evidence was available, so the memo is limited to "
+            "a PASS/$0 rule-based decision."
+        )
+    for result in specialist_results:
+        if result.failed:
+            add_limitation(
+                result.limitation
+                or f"{_role_title(result.role)} model review failed validation."
+            )
+    add_limitation(guarded_decision.warning)
+    return limitations
+
+
 def _ingestion_ocr_warnings(deal: IngestedDeal) -> list[str]:
     ocr_warning_documents = sum(
         1
@@ -990,6 +1407,53 @@ def _ingestion_ocr_warnings(deal: IngestedDeal) -> list[str]:
         "warnings during ingestion. OCR means reading text from images. Review the saved "
         "document metadata before relying on that text."
     ]
+
+
+def _ocr_status(config: AppConfig, deal: IngestedDeal) -> str:
+    applied_documents = sum(
+        1 for document in deal.documents if document.source.ocr_applied
+    )
+    recommended_documents = sum(
+        1
+        for document in deal.documents
+        if document.source.ocr_recommended or document.source.vision_recommended
+    )
+    warning_documents = sum(
+        1 for document in deal.documents if _has_ocr_warning(document.source.notes)
+    )
+
+    if config.enable_ocr:
+        parts = [
+            "Image-based text reading (OCR) was enabled. OCR means reading text from images."
+        ]
+        if applied_documents:
+            document_word = "document" if applied_documents == 1 else "documents"
+            parts.append(f"It was used on {applied_documents} {document_word}.")
+        if recommended_documents:
+            document_word = "document" if recommended_documents == 1 else "documents"
+            parts.append(
+                f"{recommended_documents} {document_word} still may need review before "
+                "relying on all extracted text."
+            )
+        elif not applied_documents:
+            parts.append("No document needed OCR during this run.")
+        if warning_documents:
+            document_word = "document" if warning_documents == 1 else "documents"
+            parts.append(f"{warning_documents} {document_word} had OCR warnings.")
+        return " ".join(parts)
+
+    if recommended_documents:
+        document_word = "document" if recommended_documents == 1 else "documents"
+        return (
+            "Image-based text reading (OCR) was not enabled. OCR means reading text from "
+            f"images. {recommended_documents} {document_word} may need OCR before Hail "
+            "Mary can use all content."
+        )
+
+    return (
+        "Image-based text reading (OCR) was not enabled and was not recommended for these "
+        "documents. OCR means reading text from images."
+    )
 
 
 def _has_ocr_warning(notes: str | None) -> bool:
@@ -1170,7 +1634,7 @@ def _role_failure_limitation(
         if first_issue is not None
         else "No validation detail was available."
     )
-    return f"{_role_title(role)} failed validation after one repair attempt. {detail}"
+    return f"{_role_title(role)} model review failed validation after one repair attempt. {detail}"
 
 
 def _role_title(role: AgentRole) -> str:

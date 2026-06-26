@@ -258,6 +258,41 @@ def test_ingest_folder_warns_for_each_deal_without_usable_evidence(
     assert "FullCo" not in result.output.split("No usable evidence text was built", 1)[1]
 
 
+def test_evaluate_deal_local_only_cli_prints_safe_run_summary(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "CliEvalCo"
+    source.mkdir()
+    (source / "memo.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M. "
+        "ARR revenue growth with paid customers and retention. "
+        "Lead investor committed and seed round is active. PRIVATE_FULL_TEXT_MARKER_AT_END",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["evaluate-deal", str(source), "--data-dir", str(tmp_path / "data")],
+    )
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Deal evaluation complete" in normalized_output
+    assert "Local-only mode was used" in normalized_output
+    assert "rule-based scoring" in normalized_output
+    assert "Documents ingested" in normalized_output
+    assert "Evidence records" in normalized_output
+    assert "Claims found" in normalized_output
+    assert "Conflicts found" in normalized_output
+    assert "Rule-based recommendation" in normalized_output
+    assert "Final recommendation" in normalized_output
+    assert "Failed model roles none" in normalized_output
+    assert "OCR means reading text from images" in normalized_output
+    assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
+    assert "Valuation cap $8M" not in result.output
+
+
 def test_ingest_folder_unreadable_path_has_plain_english_warning(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
