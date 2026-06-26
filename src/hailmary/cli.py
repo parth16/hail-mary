@@ -246,6 +246,11 @@ def _parse_decimal_option(raw_value: str, *, option_name: str) -> Decimal:
     return value
 
 
+def _role_display(role: object) -> str:
+    value = getattr(role, "value", str(role))
+    return str(value).replace("_", " ").title()
+
+
 def _has_ocr_warning(notes: str | None) -> bool:
     if not notes:
         return False
@@ -1023,21 +1028,12 @@ def evaluate_deal(
         _config_from_options(data_dir),
         enable_ocr=enable_ocr,
     )
-    stages = [
-        "local setup and privacy checks",
-        "ingestion",
-        "deterministic scoring",
-        "agent packet preparation",
-        "specialist committee review",
-        "final decision review",
-        "final memo write",
-    ]
-    stage_numbers = {stage: index for index, stage in enumerate(stages, start=1)}
+    stage_count = 0
 
     def print_stage(stage: str) -> None:
-        number = stage_numbers.get(stage)
-        prefix = f"{number}. " if number is not None else ""
-        console.print(_plain(f"{prefix}{stage}", style="bold cyan"))
+        nonlocal stage_count
+        stage_count += 1
+        console.print(_plain(f"{stage_count}. {stage}", style="bold cyan"))
 
     try:
         result = evaluate_deal_folder(
@@ -1051,8 +1047,18 @@ def evaluate_deal(
         raise typer.Exit(1) from None
 
     summary = _two_column_table("Result", "Value")
+    summary.add_row(_plain("Company"), _plain(result.company_name))
+    summary.add_row(_plain("Mode"), _plain(result.evaluation_mode))
+    summary.add_row(_plain("Documents ingested"), _plain(str(result.document_count)))
+    summary.add_row(_plain("Evidence records"), _plain(str(result.evidence_count)))
+    summary.add_row(_plain("Claims found"), _plain(str(result.claim_count)))
+    summary.add_row(_plain("Conflicts found"), _plain(str(result.conflict_count)))
     summary.add_row(
-        _plain("Recommendation"),
+        _plain("Rule-based recommendation"),
+        _plain(str(result.deterministic_score.recommendation)),
+    )
+    summary.add_row(
+        _plain("Final recommendation"),
         _plain(str(result.final_recommendation.recommendation)),
     )
     summary.add_row(
@@ -1060,15 +1066,19 @@ def evaluate_deal(
         _plain(_format_check_size(result.final_recommendation.check_size)),
     )
     summary.add_row(
-        _plain("Score"),
+        _plain("Rule-based score"),
         _plain(f"{result.deterministic_score.total_score}/{result.deterministic_score.max_score}"),
     )
     summary.add_row(_plain("Confidence"), _plain(str(result.deterministic_score.confidence)))
     summary.add_row(_plain("Final memo"), _plain(str(result.final_memo_path)))
+    failed_roles = ", ".join(_role_display(role) for role in result.failed_specialist_roles)
+    summary.add_row(_plain("Failed model roles"), _plain(failed_roles or "none"))
 
     renderables: list[RenderableType] = [
         _plain(f"Evaluated {result.company_name}."),
+        _plain(result.mode_explanation),
         summary,
+        _plain(result.ocr_status),
     ]
     if result.warnings:
         warning_table = _two_column_table("Warning", "Detail")
@@ -1076,7 +1086,14 @@ def evaluate_deal(
             warning_table.add_row(_plain(str(index)), _plain(warning))
         renderables.append(warning_table)
     else:
-        renderables.append(_plain("Validation warnings: none."))
+        renderables.append(_plain("Warnings: none."))
+    if result.operator_limitations:
+        limitation_table = _two_column_table("Limitation", "Detail")
+        for index, limitation in enumerate(result.operator_limitations, start=1):
+            limitation_table.add_row(_plain(str(index)), _plain(limitation))
+        renderables.append(limitation_table)
+    else:
+        renderables.append(_plain("Limitations: none beyond the source evidence in the memo."))
 
     _print_panel("Deal evaluation complete", renderables, border_style="green")
 
