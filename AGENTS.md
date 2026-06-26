@@ -130,3 +130,4 @@ Rules for all future Codex runs:
 - PR #55 loop 2: evaluate-deal memos and warnings must include live collector warnings from research collections, not only top-level research workflow issues.
 - PR #56 loop 1: Portfolio ledger failures must be wrapped in workflow-specific plain-English errors, ledger reads must validate the parent portfolio folder before treating missing ledgers as empty, and whole-dollar formatting should preserve arbitrary-size integers without float conversion.
 - PR #56 loop 2: Read-only portfolio status and plan paths must avoid mutating local Git exclude state or depending on writable `.git/info/exclude`; keep Git-exclude updates limited to init and write flows.
+- PR #56 loop 3: Ledger reads must distinguish a truly missing ledger from permission or access errors on the portfolio folder or ledger file; never return an empty ledger when recorded investments may be hidden by unreadable paths.

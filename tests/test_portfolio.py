@@ -146,3 +146,21 @@ def test_load_portfolio_ledger_rejects_portfolio_folder_as_file(
 
     with pytest.raises(PortfolioError, match="must be a folder"):
         load_portfolio_ledger(AppConfig(data_dir=data_dir))
+
+
+def test_load_portfolio_ledger_rejects_unreadable_portfolio_folder(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    portfolio_dir = data_dir / "portfolio"
+    portfolio_dir.mkdir(parents=True)
+    ledger_path = portfolio_dir / "ledger.json"
+    ledger_path.write_text('{"version":"1","investments":[]}', encoding="utf-8")
+    portfolio_dir.chmod(0)
+    try:
+        if os.access(portfolio_dir, os.R_OK | os.X_OK):
+            pytest.skip("This platform still allows access to chmod 000 directories.")
+        with pytest.raises(PortfolioError, match="Could not access"):
+            load_portfolio_ledger(AppConfig(data_dir=data_dir))
+    finally:
+        portfolio_dir.chmod(0o700)

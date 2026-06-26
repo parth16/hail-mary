@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -96,14 +97,17 @@ def load_portfolio_ledger(config: AppConfig) -> PortfolioLedger:
     config = validate_local_state(config, update_git_exclude=False)
     ledger_path = config.data_dir / "portfolio" / "ledger.json"
     _validate_private_directory(ledger_path.parent, private_root=config.data_dir)
-    if ledger_path.is_symlink():
-        raise PortfolioError("The portfolio ledger file cannot be a symlink.")
-    if not ledger_path.exists():
+    ledger_stat = _optional_lstat(ledger_path, description="portfolio ledger")
+    if ledger_stat is None:
         return PortfolioLedger()
-    if not ledger_path.is_file():
+    if stat.S_ISLNK(ledger_stat.st_mode):
+        raise PortfolioError("The portfolio ledger file cannot be a symlink.")
+    if stat.S_ISDIR(ledger_stat.st_mode):
         raise PortfolioError(
             f"Hail Mary needs {ledger_path} to be a file, but it is a folder."
         )
+    if not stat.S_ISREG(ledger_stat.st_mode):
+        raise PortfolioError(f"Hail Mary needs {ledger_path} to be a regular file.")
     try:
         raw_text = ledger_path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
@@ -247,8 +251,14 @@ def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
 
 
 def _validate_private_directory(path: Path, *, private_root: Path) -> None:
-    if path.is_symlink():
-        raise PortfolioError(f"The portfolio ledger folder {path} cannot be a symlink.")
+    path_stat = _optional_lstat(path, description="portfolio ledger folder")
+    if path_stat is not None:
+        if stat.S_ISLNK(path_stat.st_mode):
+            raise PortfolioError(f"The portfolio ledger folder {path} cannot be a symlink.")
+        if not stat.S_ISDIR(path_stat.st_mode):
+            raise PortfolioError(
+                f"The portfolio ledger folder {path} must be a folder, but it is a file."
+            )
     root = private_root.resolve(strict=False)
     resolved = path.resolve(strict=False)
     try:
@@ -257,10 +267,22 @@ def _validate_private_directory(path: Path, *, private_root: Path) -> None:
         raise PortfolioError(
             f"The portfolio ledger folder {path} resolves outside the private data directory."
         ) from exc
-    if path.exists() and not path.is_dir():
+    if path_stat is None:
+        return
+    if not os.access(path, os.R_OK | os.X_OK):
         raise PortfolioError(
-            f"The portfolio ledger folder {path} must be a folder, but it is a file."
+            f"Could not access the portfolio ledger folder at {path}. "
+            "Check that the folder is readable by the current user."
         )
+
+
+def _optional_lstat(path: Path, *, description: str) -> os.stat_result | None:
+    try:
+        return path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PortfolioError(f"Could not inspect the {description} at {path}: {exc}") from exc
 
 
 def _first_validation_detail(exc: ValidationError) -> str:
