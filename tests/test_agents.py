@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import stat
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,6 +20,7 @@ from hailmary.agents.packets import (
 from hailmary.agents.validation import validate_agent_output
 from hailmary.cli import app
 from hailmary.config import AppConfig
+from hailmary.portfolio import add_portfolio_investment
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
     AgentFinding,
@@ -1347,6 +1348,27 @@ def test_prepare_agent_packets_allocates_after_reserve_percent(tmp_path: Path) -
         ),
         roles=(AgentRole.FINAL_DECISION,),
     )
+
+    packet = load_agent_input_packet(result.packets[0].path)
+    assert packet.score.recommendation == Recommendation.PASS
+    assert packet.score.check_size == 0
+    assert "No configured check size fits" in packet.score.one_line_reason
+
+
+def test_prepare_agent_packets_subtracts_recorded_portfolio_investments(
+    tmp_path: Path,
+) -> None:
+    store = _strong_store(deal_id="deal_recorded", company_name="Recorded Packet")
+    _write_ingestion_summary(tmp_path, [store])
+    config = AppConfig(data_dir=tmp_path / "data", capital_budget=5_000, min_check=5_000)
+    add_portfolio_investment(
+        config=config,
+        company_name="PriorCo",
+        amount=5_000,
+        invested_on=date(2026, 6, 23),
+    )
+
+    result = prepare_agent_packets(config=config, roles=(AgentRole.FINAL_DECISION,))
 
     packet = load_agent_input_packet(result.packets[0].path)
     assert packet.score.recommendation == Recommendation.PASS

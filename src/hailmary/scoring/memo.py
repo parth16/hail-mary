@@ -7,6 +7,11 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from hailmary.config import AppConfig, ConfigError, validate_local_state
+from hailmary.portfolio import portfolio_status
+from hailmary.portfolio.scenario import (
+    allowed_check_tiers_for_available_capital,
+    portfolio_scenario,
+)
 from hailmary.schemas.documents import IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import MemoRunSummary, ScoredDeal
@@ -14,7 +19,6 @@ from hailmary.scoring.portfolio import (
     allowed_check_tiers,
     portfolio_rank_key,
     portfolio_return_cases,
-    portfolio_scenario,
     skipped_deals,
 )
 from hailmary.scoring.portfolio import (
@@ -52,7 +56,7 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir)
 
-    scenario = portfolio_scenario(config)
+    status = portfolio_status(config)
     scoring_inputs: list[tuple[EvidenceStore, ScoredDeal, Path]] = []
     for deal in summary.deals:
         if deal.evidence_store_path is None:
@@ -74,12 +78,12 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
         ranking_scored_deal = score_evidence_store(
             store,
             config=config,
-            capital_remaining=max(scenario.allocatable_capital, config.max_check),
+            capital_remaining=max(status.available_capital, config.max_check),
         )
         memo_path = report_dir / f"{slugify(deal.company_name)}-{deal.id}-memo.md"
         scoring_inputs.append((store, ranking_scored_deal, memo_path))
 
-    remaining_capital = scenario.allocatable_capital
+    remaining_capital = status.available_capital
     scored_by_index: dict[int, ScoredDeal] = {}
     portfolio_rank_by_index: dict[int, int] = {}
     ranked_inputs = sorted(
@@ -116,7 +120,11 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
     portfolio_report_path = report_dir / PORTFOLIO_REPORT_FILENAME
     _write_private_text(
         portfolio_report_path,
-        render_portfolio_report(scored_deals, config=config),
+        render_portfolio_report(
+            scored_deals,
+            config=config,
+            existing_invested_capital=status.invested_amount,
+        ),
         description="portfolio comparison report",
     )
 
@@ -216,11 +224,14 @@ def render_portfolio_report(
     scored_deals: list[ScoredDeal],
     *,
     config: AppConfig,
+    existing_invested_capital: int = 0,
 ) -> str:
     scenario = portfolio_scenario(config)
     ranked_deals = ranked_portfolio_deals(scored_deals)
-    allocated_capital = sum(deal.check_size for deal in scored_deals)
-    remaining_capital = max(0, scenario.allocatable_capital - allocated_capital)
+    new_allocated_capital = sum(deal.check_size for deal in scored_deals)
+    available_for_new_checks = max(0, scenario.allocatable_capital - existing_invested_capital)
+    remaining_capital = max(0, available_for_new_checks - new_allocated_capital)
+    return_math_capital = existing_invested_capital + new_allocated_capital
     lines = [
         "# Hail Mary Portfolio Comparison Report",
         "",
@@ -229,9 +240,11 @@ def render_portfolio_report(
         f"- Starting capital budget: {_format_dollars(scenario.starting_capital)}",
         f"- Reserve: {_format_dollars(scenario.reserve_amount)} ({_reserve_source_text(config)})",
         f"- Allocatable capital after reserve: {_format_dollars(scenario.allocatable_capital)}",
-        f"- Allocated capital: {_format_dollars(allocated_capital)}",
+        f"- Recorded existing investments: {_format_dollars(existing_invested_capital)}",
+        f"- Allocatable capital for new checks: {_format_dollars(available_for_new_checks)}",
+        f"- Allocated capital: {_format_dollars(new_allocated_capital)}",
         f"- Remaining allocatable capital after allocation: {_format_dollars(remaining_capital)}",
-        f"- Allowed check sizes: {_check_tier_text(config)}",
+        f"- Allowed check sizes: {_check_tier_text(config, available_for_new_checks)}",
         f"- Configured minimum check: {_format_check_size(scenario.min_check)}",
         f"- Configured maximum check: {_format_check_size(scenario.max_check)}",
         f"- Estimated dilution: {_format_percent(scenario.estimated_dilution_percent)}",
@@ -291,7 +304,13 @@ def render_portfolio_report(
             )
 
     lines.extend(["", "## Net Return Math", ""])
-    lines.extend(_portfolio_return_lines(allocated_capital, config=config))
+    lines.extend(
+        _portfolio_return_lines(
+            return_math_capital,
+            config=config,
+            includes_existing=existing_invested_capital > 0,
+        )
+    )
 
     lines.extend(["", "## Deal Details"])
     if not ranked_deals:
@@ -345,8 +364,15 @@ def render_portfolio_report(
     return "\n".join(lines)
 
 
-def _check_tier_text(config: AppConfig) -> str:
-    allowed_tiers = allowed_check_tiers(config)
+def _check_tier_text(config: AppConfig, available_capital: int | None = None) -> str:
+    allowed_tiers = (
+        allowed_check_tiers(config)
+        if available_capital is None
+        else allowed_check_tiers_for_available_capital(
+            config,
+            available_capital=available_capital,
+        )
+    )
     return ", ".join(_format_check_size(tier) for tier in allowed_tiers)
 
 
@@ -358,9 +384,20 @@ def _reserve_source_text(config: AppConfig) -> str:
     return "no reserve"
 
 
-def _portfolio_return_lines(invested_capital: int, *, config: AppConfig) -> list[str]:
+def _portfolio_return_lines(
+    invested_capital: int,
+    *,
+    config: AppConfig,
+    includes_existing: bool = False,
+) -> list[str]:
+    scope_text = (
+        "Net return math uses recorded investments plus newly allocated checks and "
+        "excludes unallocated reserve capital."
+        if includes_existing
+        else "Net return math uses allocated checks only and excludes unallocated reserve capital."
+    )
     lines = [
-        "Net return math uses allocated checks only and excludes unallocated reserve capital.",
+        scope_text,
         "",
         "| Case | Gross multiple | Invested checks | Gross value before dilution | "
         "Value after dilution | Platform fee | Carry | Net cash returned | "

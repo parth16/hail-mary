@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 from collections.abc import Sequence
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Literal, NoReturn
@@ -40,6 +41,14 @@ from hailmary.ingest.folder_loader import (
 from hailmary.ingest.folder_loader import (
     ingest_folder as ingest_folder_path,
 )
+from hailmary.portfolio import (
+    PortfolioError,
+    PortfolioStatus,
+    add_portfolio_investment,
+)
+from hailmary.portfolio import (
+    portfolio_status as build_portfolio_status,
+)
 from hailmary.research import (
     MeridianWorkflowError,
     ResearchCollectionError,
@@ -75,6 +84,11 @@ app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
+portfolio_app = typer.Typer(
+    help="Track recorded investments and available capital for new checks.",
+    no_args_is_help=True,
+)
+app.add_typer(portfolio_app, name="portfolio")
 console = Console(highlight=False)
 DEFAULT_REVIEW_QUOTE_LIMIT = 240
 MAX_REVIEW_QUOTE_LIMIT = 500
@@ -271,6 +285,207 @@ def _has_ocr_warning(notes: str | None) -> bool:
             "needs the local",
         ]
     )
+
+
+@portfolio_app.command("status")
+def portfolio_status_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read the private portfolio ledger.",
+        ),
+    ] = None,
+) -> None:
+    """Show recorded investments and capital available for new checks."""
+
+    config = _config_from_options(data_dir)
+    try:
+        status = build_portfolio_status(config)
+    except (ConfigError, PortfolioError) as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    renderables: list[RenderableType] = [_portfolio_status_table(status)]
+    if status.ledger.investments:
+        investments = Table(
+            title="Recorded investments",
+            box=box.SIMPLE,
+            header_style="bold",
+            show_edge=False,
+            pad_edge=False,
+        )
+        investments.add_column("Company", style="bold cyan")
+        investments.add_column("Amount", justify="right")
+        investments.add_column("Date")
+        for investment in sorted(
+            status.ledger.investments,
+            key=lambda item: (item.invested_on, item.company_name.casefold(), item.id),
+        ):
+            investments.add_row(
+                _plain(investment.company_name),
+                _plain(_format_dollars(investment.amount)),
+                _plain(investment.invested_on.isoformat()),
+            )
+        renderables.append(investments)
+    else:
+        renderables.append(_plain("No investments have been recorded yet."))
+
+    _print_panel("Portfolio status", renderables, border_style="green")
+
+
+@portfolio_app.command("add-investment")
+def portfolio_add_investment_command(
+    company: Annotated[
+        str,
+        typer.Option(
+            "--company",
+            help="Company name for the investment record.",
+        ),
+    ],
+    amount: Annotated[
+        int,
+        typer.Option(
+            "--amount",
+            help="Investment amount in whole dollars.",
+        ),
+    ],
+    invested_on: Annotated[
+        str,
+        typer.Option(
+            "--date",
+            help="Investment date as YYYY-MM-DD.",
+        ),
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should write the private portfolio ledger.",
+        ),
+    ] = None,
+) -> None:
+    """Record one completed investment in the private local ledger."""
+
+    config = _config_from_options(data_dir)
+    try:
+        investment_date = _parse_portfolio_date(invested_on)
+        create_local_state(config, force=False)
+        ledger, investment, ledger_path = add_portfolio_investment(
+            config=config,
+            company_name=company,
+            amount=amount,
+            invested_on=investment_date,
+        )
+        status = build_portfolio_status(config)
+    except (ConfigError, PortfolioError) as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    summary = _two_column_table("Result", "Value")
+    summary.add_row(_plain("Company"), _plain(investment.company_name))
+    summary.add_row(_plain("Amount"), _plain(_format_dollars(investment.amount)))
+    summary.add_row(_plain("Date"), _plain(investment.invested_on.isoformat()))
+    summary.add_row(_plain("Ledger file"), _plain(str(ledger_path)))
+    summary.add_row(_plain("Recorded investments"), _plain(str(ledger.investment_count)))
+    summary.add_row(
+        _plain("Available for new checks"),
+        _plain(_format_dollars(status.available_capital)),
+    )
+    _print_panel(
+        "Investment recorded",
+        [
+            _plain("Recorded the investment in the private local portfolio ledger."),
+            summary,
+        ],
+        border_style="green",
+    )
+
+
+@portfolio_app.command("plan")
+def portfolio_plan_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read the private portfolio ledger.",
+        ),
+    ] = None,
+) -> None:
+    """Show capital available for the next Hail Mary decisions."""
+
+    config = _config_from_options(data_dir)
+    try:
+        status = build_portfolio_status(config)
+    except (ConfigError, PortfolioError) as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    allowed_nonzero = [tier for tier in status.allowed_check_tiers if tier > 0]
+    if allowed_nonzero:
+        plan_text = (
+            "Next nonzero checks may use: "
+            f"{', '.join(_format_check_size(tier) for tier in allowed_nonzero)}."
+        )
+    else:
+        plan_text = (
+            "No nonzero check currently fits the recorded portfolio budget. "
+            "New `evaluate-deal` runs will be forced to PASS/$0 by capital limits."
+        )
+
+    _print_panel(
+        "Portfolio plan",
+        [
+            _portfolio_status_table(status),
+            _plain(plan_text),
+            _plain(
+                "Recorded investments are subtracted before Hail Mary sizes new checks."
+            ),
+        ],
+        border_style="cyan",
+    )
+
+
+def _portfolio_status_table(status: PortfolioStatus) -> Table:
+    scenario = status.scenario
+    summary = _two_column_table("Metric", "Value")
+    summary.add_row(
+        _plain("Starting capital budget"),
+        _plain(_format_dollars(scenario.starting_capital)),
+    )
+    summary.add_row(_plain("Reserve"), _plain(_format_dollars(scenario.reserve_amount)))
+    summary.add_row(
+        _plain("Allocatable after reserve"),
+        _plain(_format_dollars(scenario.allocatable_capital)),
+    )
+    summary.add_row(
+        _plain("Recorded investments"),
+        _plain(_format_dollars(status.invested_amount)),
+    )
+    summary.add_row(
+        _plain("Available for new checks"),
+        _plain(_format_dollars(status.available_capital)),
+    )
+    if status.over_allocated_amount:
+        summary.add_row(
+            _plain("Over budget"),
+            _plain(_format_dollars(status.over_allocated_amount)),
+        )
+    summary.add_row(
+        _plain("Allowed next checks"),
+        _plain(", ".join(_format_check_size(tier) for tier in status.allowed_check_tiers)),
+    )
+    summary.add_row(_plain("Ledger file"), _plain(str(status.ledger_path)))
+    return summary
+
+
+def _parse_portfolio_date(raw_value: str) -> date:
+    try:
+        return date.fromisoformat(raw_value.strip())
+    except ValueError as exc:
+        raise PortfolioError(
+            "The investment date must use YYYY-MM-DD, such as 2026-06-23."
+        ) from exc
 
 
 @app.command("init")
@@ -2806,3 +3021,7 @@ def _format_check_size(check_size: int) -> str:
     if check_size % 1_000 == 0:
         return f"${check_size // 1_000}K"
     return f"${check_size / 1_000:g}K"
+
+
+def _format_dollars(amount: int) -> str:
+    return f"${amount:,.0f}"

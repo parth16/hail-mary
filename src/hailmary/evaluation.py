@@ -23,6 +23,7 @@ from hailmary.ingest.folder_loader import (
     ingest_folder,
     inspect_deal_folder,
 )
+from hailmary.portfolio import portfolio_status
 from hailmary.research import (
     GitHubRepositorySearchClient,
     ResearchImportError,
@@ -51,7 +52,6 @@ from hailmary.schemas.agents import (
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal
-from hailmary.scoring.portfolio import portfolio_scenario
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -328,10 +328,11 @@ def evaluate_deal_folder(
             store = _load_evidence_store_for_deal(deal, config=config)
 
     _stage(stage_callback, "rule-based scoring")
+    status = portfolio_status(config)
     scored_deal = score_evidence_store(
         store,
         config=config,
-        capital_remaining=portfolio_scenario(config).allocatable_capital,
+        capital_remaining=status.available_capital,
     )
 
     packet_created_at = created_at or datetime.now(UTC)

@@ -47,6 +47,8 @@ def test_local_state_uses_owner_only_permissions(
     assert (tmp_path / "local-data" / "research-results").is_dir()
     assert (tmp_path / "local-data" / "agent-outputs").is_dir()
     assert stat.S_IMODE((tmp_path / "local-data" / "agent-outputs").stat().st_mode) == 0o700
+    assert (tmp_path / "local-data" / "portfolio").is_dir()
+    assert stat.S_IMODE((tmp_path / "local-data" / "portfolio").stat().st_mode) == 0o700
     assert (tmp_path / "local-data" / "meridian-workflows").is_dir()
     assert (tmp_path / "local-data" / "browser-profiles" / "meridian").is_dir()
     assert (
@@ -727,6 +729,7 @@ def test_init_rejects_meridian_profile_reserved_data_paths(
     for profile_dir in [
         Path("local-data"),
         Path("local-data/raw"),
+        Path("local-data/portfolio"),
         Path("local-data/agent-packets"),
         Path("local-data/agent-outputs"),
         Path("local-data/research-plans"),
