@@ -13,6 +13,7 @@ from hailmary.config import AppConfig
 from hailmary.evidence.store import verify_citation
 from hailmary.ingest.ocr import LOW_OCR_CONFIDENCE_THRESHOLD
 from hailmary.schemas.documents import (
+    FileType,
     IngestedDeal,
     IngestedDocument,
     IngestionSummary,
@@ -22,6 +23,7 @@ from hailmary.schemas.evidence import (
     ClaimConflict,
     ClaimRecord,
     EvidenceCitation,
+    EvidenceKind,
     EvidenceRecord,
     EvidenceStore,
     SourceFreshness,
@@ -31,6 +33,7 @@ from hailmary.utils.source_instructions import looks_like_embedded_source_instru
 
 LOW_CLAIM_CONFIDENCE_THRESHOLD = 0.5
 HIGH_CLAIM_CONFIDENCE_THRESHOLD = 0.75
+PAGE_LOCATION_FILE_TYPES = frozenset({FileType.PDF, FileType.PNG, FileType.JPG})
 
 
 class EvidenceReviewError(RuntimeError):
@@ -901,6 +904,8 @@ def _citation_review_status(
     citation: EvidenceCitation,
     evidence_by_id: dict[str, EvidenceRecord],
 ) -> VerificationStatus:
+    if citation.evidence_id not in evidence_by_id:
+        return VerificationStatus.EVIDENCE_NOT_FOUND
     if citation.verification_status != VerificationStatus.VERIFIED:
         return citation.verification_status
     return verify_citation(citation, evidence_by_id)
@@ -938,9 +943,17 @@ def _missing_source_span(evidence: EvidenceRecord) -> bool:
 
 
 def _missing_location(evidence: EvidenceRecord) -> bool:
-    if evidence.source_kind != SourceKind.LOCAL_FILE:
+    if not supports_page_or_table_location(evidence):
         return False
     return evidence.page_number is None and evidence.table_index is None
+
+
+def supports_page_or_table_location(evidence: EvidenceRecord) -> bool:
+    if evidence.source_kind != SourceKind.LOCAL_FILE:
+        return False
+    if evidence.evidence_kind == EvidenceKind.TABLE_TEXT:
+        return True
+    return evidence.file_type in PAGE_LOCATION_FILE_TYPES
 
 
 def _confidence_bucket(claim: ClaimRecord) -> str:

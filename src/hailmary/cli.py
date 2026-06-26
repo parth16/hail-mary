@@ -35,7 +35,10 @@ from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder
 from hailmary.evidence import EvidenceReviewError
 from hailmary.evidence import review_evidence as build_evidence_review
-from hailmary.evidence.review import DealEvidenceReview
+from hailmary.evidence.review import (
+    DealEvidenceReview,
+    supports_page_or_table_location,
+)
 from hailmary.ingest.folder_loader import (
     IngestionError,
 )
@@ -78,6 +81,7 @@ from hailmary.research import (
     run_research_workflow,
 )
 from hailmary.schemas.documents import SourceKind
+from hailmary.schemas.evidence import EvidenceRecord
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 
 app = typer.Typer(
@@ -1077,7 +1081,7 @@ def _evidence_location(evidence: object) -> str:
     return "document"
 
 
-def _evidence_flags(evidence: object) -> str:
+def _evidence_flags(evidence: EvidenceRecord) -> str:
     flags: list[str] = []
     if getattr(evidence, "ocr_applied", False):
         ocr_confidence = getattr(evidence, "ocr_confidence", None)
@@ -1094,10 +1098,8 @@ def _evidence_flags(evidence: object) -> str:
         or source_span_end <= source_span_start
     ):
         flags.append("missing source span")
-    if (
-        getattr(evidence, "source_kind", None) == SourceKind.LOCAL_FILE
-        and getattr(evidence, "page_number", None) is None
-        and getattr(evidence, "table_index", None) is None
+    if supports_page_or_table_location(evidence) and (
+        evidence.page_number is None and evidence.table_index is None
     ):
         flags.append("missing page/table location")
     return ", ".join(flags) if flags else "none"

@@ -132,3 +132,4 @@ Rules for all future Codex runs:
 - PR #56 loop 2: Read-only portfolio status and plan paths must avoid mutating local Git exclude state or depending on writable `.git/info/exclude`; keep Git-exclude updates limited to init and write flows.
 - PR #56 loop 3: Ledger reads must distinguish a truly missing ledger from permission or access errors on the portfolio folder or ledger file; never return an empty ledger when recorded investments may be hidden by unreadable paths.
 - PR #59 loop 1: Evidence review location warnings should apply only to source formats that can provide page or table coordinates; external URL or API evidence can have complete lineage without page or table locations.
+- PR #59 loop 2: Evidence review location warnings should also exempt local text-like evidence that cannot provide page or table coordinates, and citation health checks must detect missing evidence IDs before trusting a saved non-verified citation status.

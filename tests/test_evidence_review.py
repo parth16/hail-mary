@@ -63,6 +63,7 @@ def test_evidence_health_flags_missing_spans_and_location_as_warnings() -> None:
     evidence = _evidence(
         "ev_weak_lineage",
         "Valuation cap $8M.",
+        file_type=FileType.PDF,
         source_span=False,
         page_number=None,
     )
@@ -79,6 +80,40 @@ def test_evidence_health_flags_missing_spans_and_location_as_warnings() -> None:
         "missing page or table location": 1,
         "missing source span": 1,
     }
+
+
+def test_evidence_health_does_not_require_page_location_for_text_files() -> None:
+    evidence = _evidence(
+        "ev_text_lineage",
+        "Valuation cap $8M.",
+        file_type=FileType.TXT,
+        page_number=None,
+    )
+
+    health = build_evidence_health(_store(evidence=[evidence]), [])
+
+    assert "missing_location" not in _issue_codes(health.issues)
+    assert _metric_counts(health.source_lineage) == {"complete source lineage": 1}
+
+
+def test_evidence_health_rechecks_missing_evidence_before_saved_citation_status() -> None:
+    existing = _evidence("ev_existing", "Round size $1M.")
+    removed = _evidence("ev_removed", "Valuation cap $8M.")
+    claim = _claim("valuation cap", "$8M", removed)
+    stale_citation = claim.citations[0].model_copy(
+        update={
+            "evidence_id": "ev_removed",
+            "verification_status": VerificationStatus.SPAN_MISMATCH,
+        }
+    )
+    claim = claim.model_copy(update={"citations": [stale_citation]})
+
+    health = build_evidence_health(_store(evidence=[existing], claims=[claim]), [])
+
+    missing_evidence = _issue_by_code(health.issues, "missing_evidence")
+    assert missing_evidence.severity == ReviewIssueSeverity.BLOCKING
+    assert missing_evidence.count == 1
+    assert "broken_citations" not in _issue_codes(health.issues)
 
 
 def test_evidence_health_includes_source_documents_without_evidence_or_image_text() -> None:
@@ -302,6 +337,7 @@ def _evidence(
     source_freshness: SourceFreshness = SourceFreshness.CURRENT,
     source_span: bool = True,
     page_number: int | None = 1,
+    file_type: FileType = FileType.TXT,
     ocr_applied: bool = False,
     ocr_confidence: float | None = None,
     external_confidence: str | None = "high: synthetic exact match",
@@ -316,7 +352,7 @@ def _evidence(
         evidence_kind=EvidenceKind.PAGE_TEXT,
         source_kind=source_kind,
         document_type=DocumentType.MEMO,
-        file_type=FileType.TXT,
+        file_type=file_type,
         text=text,
         page_number=page_number,
         source_span_start=0 if source_span else None,

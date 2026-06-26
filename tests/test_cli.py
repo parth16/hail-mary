@@ -1075,6 +1075,33 @@ def test_review_evidence_shows_exact_external_source_reference(tmp_path: Path) -
     assert "missing page/table location" not in result.output
 
 
+def test_review_evidence_does_not_flag_text_file_without_page_location(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_text_lineage",
+        "Synthetic memo says valuation cap $8M.",
+        deal_id="deal_text_lineage",
+        document_id="doc_text_lineage",
+        document_path=Path("memo.txt"),
+        file_type=FileType.TXT,
+        page_number=None,
+    )
+    store = _review_store(
+        deal_id="deal_text_lineage",
+        company_name="TextLineageCo",
+        evidence=[evidence],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(app, ["review-evidence", "--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "missing page/table location" not in result.output
+    assert "missing_location" not in result.output
+    assert "complete source lineage" in result.output
+
+
 def _review_evidence_record(
     evidence_id: str,
     text: str,
@@ -1085,6 +1112,8 @@ def _review_evidence_record(
     source_kind: SourceKind = SourceKind.LOCAL_FILE,
     source_freshness: SourceFreshness = SourceFreshness.CURRENT,
     source_span: bool = True,
+    file_type: FileType = FileType.TXT,
+    page_number: int | None = 1,
     ocr_applied: bool = False,
     ocr_confidence: float | None = None,
     external_confidence: str | None = "high: exact synthetic source",
@@ -1099,9 +1128,9 @@ def _review_evidence_record(
         evidence_kind=EvidenceKind.PAGE_TEXT,
         source_kind=source_kind,
         document_type=DocumentType.MEMO,
-        file_type=FileType.TXT,
+        file_type=file_type,
         text=text,
-        page_number=1,
+        page_number=page_number,
         source_span_start=0 if source_span else None,
         source_span_end=len(text) if source_span else None,
         ocr_applied=ocr_applied,
