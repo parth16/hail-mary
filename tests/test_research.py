@@ -6063,6 +6063,10 @@ def test_import_research_results_requires_plain_english_licensing_notes(
             "credential, redirect",
         ),
         (
+            "https://www.sec.gov/example/acme-ai#access_token=secret",
+            "URL fragments",
+        ),
+        (
             "https://www.sec.gov/example/acme%3Ftoken=secret",
             "encoded query, fragment, or parameter delimiters",
         ),
@@ -6103,6 +6107,10 @@ def test_import_research_results_rejects_unsafe_source_urls(
         (
             "https://api.example.com/result?next=https%3A%2F%2Fexample.com",
             "source_api cannot include token, signature, credential, redirect",
+        ),
+        (
+            "https://api.example.com/result#access_token=secret",
+            "source_api cannot include URL fragments",
         ),
         (
             "https://user:token@api.example.com/result",

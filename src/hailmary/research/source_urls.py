@@ -67,6 +67,8 @@ def validate_http_url(url: str, *, field_name: str) -> None:
         raise ValueError(f"{field_name} cannot contain spaces")
     if parsed.params or ";" in parsed.path:
         raise ValueError(f"{field_name} cannot include path parameters")
+    if parsed.fragment:
+        raise ValueError(f"{field_name} cannot include URL fragments")
     if _decoded_component_has_delimiter(parsed.path):
         raise ValueError(
             f"{field_name} cannot include encoded query, fragment, or "
