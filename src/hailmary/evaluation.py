@@ -23,7 +23,7 @@ from hailmary.ingest.folder_loader import (
     ingest_folder,
     inspect_deal_folder,
 )
-from hailmary.portfolio import portfolio_status
+from hailmary.portfolio import PortfolioError, portfolio_status
 from hailmary.research import (
     GitHubRepositorySearchClient,
     ResearchImportError,
@@ -328,7 +328,12 @@ def evaluate_deal_folder(
             store = _load_evidence_store_for_deal(deal, config=config)
 
     _stage(stage_callback, "rule-based scoring")
-    status = portfolio_status(config)
+    try:
+        status = portfolio_status(config)
+    except PortfolioError as exc:
+        raise EvaluationError(
+            f"Could not read the private portfolio ledger: {exc}"
+        ) from exc
     scored_deal = score_evidence_store(
         store,
         config=config,

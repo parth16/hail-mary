@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from hailmary.config import AppConfig, ConfigError, validate_local_state
-from hailmary.portfolio import portfolio_status
+from hailmary.portfolio import PortfolioError, portfolio_status
 from hailmary.portfolio.scenario import (
     allowed_check_tiers_for_available_capital,
     portfolio_scenario,
@@ -56,7 +56,10 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir)
 
-    status = portfolio_status(config)
+    try:
+        status = portfolio_status(config)
+    except PortfolioError as exc:
+        raise ScoringError(f"Could not read the private portfolio ledger: {exc}") from exc
     scoring_inputs: list[tuple[EvidenceStore, ScoredDeal, Path]] = []
     for deal in summary.deals:
         if deal.evidence_store_path is None:

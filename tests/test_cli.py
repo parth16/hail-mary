@@ -9,7 +9,7 @@ from pathlib import Path
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
-from hailmary.cli import app
+from hailmary.cli import _format_dollars, app
 from hailmary.ingest import folder_loader
 from hailmary.ingest.extractors import ExtractionResult
 from hailmary.ingest.extractors import extract_document as real_extract_document
@@ -185,6 +185,12 @@ def test_portfolio_add_investment_negative_amount_has_plain_english_error(
     normalized_output = " ".join(result.output.split())
     assert "investment amount must be greater than zero" in normalized_output
     assert "Traceback" not in result.output
+
+
+def test_portfolio_dollar_formatting_preserves_large_integers() -> None:
+    amount = 10**100 + 123_456_789
+
+    assert _format_dollars(amount) == f"${amount:,}"
 
 
 def test_ingest_folder_command_writes_summary(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

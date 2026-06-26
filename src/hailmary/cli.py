@@ -3024,4 +3024,4 @@ def _format_check_size(check_size: int) -> str:
 
 
 def _format_dollars(amount: int) -> str:
-    return f"${amount:,.0f}"
+    return f"${amount:,}"

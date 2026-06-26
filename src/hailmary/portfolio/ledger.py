@@ -93,7 +93,9 @@ def portfolio_ledger_path(config: AppConfig) -> Path:
 
 
 def load_portfolio_ledger(config: AppConfig) -> PortfolioLedger:
-    ledger_path = portfolio_ledger_path(config)
+    config = validate_local_state(config)
+    ledger_path = config.data_dir / "portfolio" / "ledger.json"
+    _validate_private_directory(ledger_path.parent, private_root=config.data_dir)
     if ledger_path.is_symlink():
         raise PortfolioError("The portfolio ledger file cannot be a symlink.")
     if not ledger_path.exists():
@@ -234,6 +236,19 @@ def _write_private_ledger(path: Path, ledger: PortfolioLedger) -> None:
 
 
 def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
+    _validate_private_directory(path, private_root=private_root)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+    except OSError as exc:
+        raise PortfolioError(
+            f"Could not create the portfolio ledger folder at {path}: {exc}"
+        ) from exc
+
+
+def _validate_private_directory(path: Path, *, private_root: Path) -> None:
+    if path.is_symlink():
+        raise PortfolioError(f"The portfolio ledger folder {path} cannot be a symlink.")
     root = private_root.resolve(strict=False)
     resolved = path.resolve(strict=False)
     try:
@@ -242,15 +257,10 @@ def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
         raise PortfolioError(
             f"The portfolio ledger folder {path} resolves outside the private data directory."
         ) from exc
-    if path.is_symlink():
-        raise PortfolioError(f"The portfolio ledger folder {path} cannot be a symlink.")
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        path.chmod(0o700)
-    except OSError as exc:
+    if path.exists() and not path.is_dir():
         raise PortfolioError(
-            f"Could not create the portfolio ledger folder at {path}: {exc}"
-        ) from exc
+            f"The portfolio ledger folder {path} must be a folder, but it is a file."
+        )
 
 
 def _first_validation_detail(exc: ValidationError) -> str:

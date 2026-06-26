@@ -1688,6 +1688,27 @@ def test_evaluate_deal_wraps_malformed_evidence_store_in_plain_english(
         )
 
 
+def test_evaluate_deal_wraps_malformed_portfolio_ledger_in_plain_english(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path)
+    ledger_path = tmp_path / "data" / "portfolio" / "ledger.json"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text("{bad json", encoding="utf-8")
+
+    with pytest.raises(
+        EvaluationError,
+        match="private portfolio ledger.*not valid JSON",
+    ):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+            max_concurrency=1,
+        )
+
+
 def test_evaluate_deal_rejects_invalid_generated_data_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

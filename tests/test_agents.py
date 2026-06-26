@@ -1433,6 +1433,25 @@ def test_prepare_agent_packets_command_missing_summary_has_plain_english_error(
     assert "Traceback" not in result.output
 
 
+def test_prepare_agent_packets_malformed_portfolio_ledger_has_plain_english_error(
+    tmp_path: Path,
+) -> None:
+    _write_ingestion_summary(tmp_path, [_strong_store()])
+    ledger_path = tmp_path / "data" / "portfolio" / "ledger.json"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text("{bad json", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["prepare-agent-packets", "--data-dir", str(tmp_path / "data")],
+    )
+
+    assert result.exit_code != 0
+    assert "private portfolio ledger" in result.output
+    assert "not valid JSON" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_validate_agent_output_command_reports_unknown_evidence_id(
     tmp_path: Path,
 ) -> None:

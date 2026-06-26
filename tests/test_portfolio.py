@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -82,3 +83,31 @@ def test_load_portfolio_ledger_rejects_bad_json(tmp_path: Path) -> None:
     with pytest.raises(PortfolioError, match="not valid JSON"):
         load_portfolio_ledger(AppConfig(data_dir=tmp_path / "data"))
 
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="Symlinks are not supported here")
+def test_load_portfolio_ledger_rejects_symlinked_portfolio_folder(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    outside_dir = tmp_path / "outside"
+    data_dir.mkdir()
+    outside_dir.mkdir()
+    (data_dir / "portfolio").symlink_to(outside_dir, target_is_directory=True)
+    (outside_dir / "ledger.json").write_text(
+        '{"version":"1","investments":[]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PortfolioError, match="cannot be a symlink"):
+        load_portfolio_ledger(AppConfig(data_dir=data_dir))
+
+
+def test_load_portfolio_ledger_rejects_portfolio_folder_as_file(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "portfolio").write_text("not a folder", encoding="utf-8")
+
+    with pytest.raises(PortfolioError, match="must be a folder"):
+        load_portfolio_ledger(AppConfig(data_dir=data_dir))
