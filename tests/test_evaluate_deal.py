@@ -510,6 +510,50 @@ def test_evaluate_deal_includes_live_collection_warnings(
     assert "No research workflow issues were recorded." not in memo_text
 
 
+def test_evaluate_deal_surfaces_evidence_health_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="EvidenceHealthCo")
+
+    def ingest_with_missing_span(folder: Path, *, config: AppConfig) -> object:
+        summary = real_ingest_folder(folder, config=config)
+        store_path = summary.deals[0].evidence_store_path
+        assert store_path is not None
+        store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+        first_evidence = store.evidence[0].model_copy(
+            update={"source_span_start": None, "source_span_end": None}
+        )
+        updated_store = store.model_copy(
+            update={"evidence": [first_evidence, *store.evidence[1:]]}
+        )
+        store_path.write_text(updated_store.model_dump_json(indent=2), encoding="utf-8")
+        return summary
+
+    monkeypatch.setattr(evaluation, "ingest_folder", ingest_with_missing_span)
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+    )
+
+    assert result.evidence_review is not None
+    assert any(
+        issue.issue == "Missing source spans" and issue.count == 1
+        for issue in result.evidence_review.issues
+    )
+    assert any(
+        "Evidence review found" in warning and "Missing source spans" in warning
+        for warning in result.warnings
+    )
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "## Evidence Health" in memo_text
+    assert "Evidence health means whether saved source records" in memo_text
+    assert "Missing source spans (1)" in memo_text
+
+
 def test_evaluate_deal_surfaces_meridian_manual_workflow_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

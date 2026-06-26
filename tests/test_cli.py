@@ -421,6 +421,9 @@ def test_evaluate_deal_local_only_cli_prints_safe_run_summary(
     assert "Evidence records" in normalized_output
     assert "Claims found" in normalized_output
     assert "Conflicts found" in normalized_output
+    assert "Evidence health" in normalized_output
+    assert "Evidence health review found" in normalized_output
+    assert "saved source records are complete and safe enough" in normalized_output
     assert "Rule-based recommendation" in normalized_output
     assert "Final recommendation" in normalized_output
     assert "Failed model roles none" in normalized_output
