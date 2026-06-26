@@ -9,7 +9,7 @@ from pathlib import Path
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
-from hailmary.cli import app
+from hailmary.cli import _format_dollars, app
 from hailmary.ingest import folder_loader
 from hailmary.ingest.extractors import ExtractionResult
 from hailmary.ingest.extractors import extract_document as real_extract_document
@@ -85,7 +85,112 @@ def test_init_creates_local_state(tmp_path: Path, monkeypatch: MonkeyPatch) -> N
     assert (data_dir / "raw").is_dir()
     assert (data_dir / "processed").is_dir()
     assert (data_dir / "reports").is_dir()
+    assert (data_dir / "portfolio").is_dir()
     assert (tmp_path / ".hailmary" / "config.yaml").is_file()
+
+
+def test_portfolio_commands_record_and_show_investments(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+
+    add_result = runner.invoke(
+        app,
+        [
+            "portfolio",
+            "add-investment",
+            "--company",
+            "ExampleCo",
+            "--amount",
+            "5000",
+            "--date",
+            "2026-06-23",
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+
+    assert add_result.exit_code == 0, add_result.output
+    assert "Investment recorded" in add_result.output
+    assert "ExampleCo" in add_result.output
+    assert "$5,000" in add_result.output
+    assert (data_dir / "portfolio" / "ledger.json").is_file()
+
+    status_result = runner.invoke(
+        app,
+        ["portfolio", "status", "--data-dir", str(data_dir)],
+    )
+
+    assert status_result.exit_code == 0, status_result.output
+    assert "Portfolio status" in status_result.output
+    assert "Recorded investments" in status_result.output
+    assert "ExampleCo" in status_result.output
+    assert "$5,000" in status_result.output
+
+    plan_result = runner.invoke(
+        app,
+        ["portfolio", "plan", "--data-dir", str(data_dir)],
+    )
+
+    assert plan_result.exit_code == 0, plan_result.output
+    assert "Portfolio plan" in plan_result.output
+    assert "Recorded investments are subtracted" in plan_result.output
+
+
+def test_portfolio_add_investment_bad_date_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "portfolio",
+            "add-investment",
+            "--company",
+            "ExampleCo",
+            "--amount",
+            "5000",
+            "--date",
+            "06/23/2026",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "investment date must use YYYY-MM-DD" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_portfolio_add_investment_negative_amount_has_plain_english_error(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "portfolio",
+            "add-investment",
+            "--company",
+            "ExampleCo",
+            "--amount",
+            "-1",
+            "--date",
+            "2026-06-23",
+        ],
+    )
+
+    assert result.exit_code == 1
+    normalized_output = " ".join(result.output.split())
+    assert "investment amount must be greater than zero" in normalized_output
+    assert "Traceback" not in result.output
+
+
+def test_portfolio_dollar_formatting_preserves_large_integers() -> None:
+    amount = 10**100 + 123_456_789
+
+    assert _format_dollars(amount) == f"${amount:,}"
 
 
 def test_ingest_folder_command_writes_summary(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

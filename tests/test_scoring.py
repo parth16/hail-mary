@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import stat
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.ingest.folder_loader import ingest_folder
+from hailmary.portfolio import add_portfolio_investment
 from hailmary.schemas.documents import (
     DocumentType,
     FileType,
@@ -2069,6 +2070,37 @@ def test_score_latest_ingestion_allocates_after_reserve_percent(
     assert "No allocatable capital remained for an allowed nonzero check." in report
 
 
+def test_score_latest_ingestion_subtracts_recorded_portfolio_investments(
+    tmp_path: Path,
+) -> None:
+    stores = [
+        _strong_store(deal_id="deal_alpha", company_name="Alpha Ledger"),
+        _strong_store(deal_id="deal_zeta", company_name="Zeta Ledger"),
+    ]
+    _write_ingestion_summary(tmp_path, stores)
+    config = AppConfig(data_dir=tmp_path / "data", capital_budget=5_000)
+    add_portfolio_investment(
+        config=config,
+        company_name="PriorCo",
+        amount=2_500,
+        invested_on=date(2026, 6, 23),
+    )
+
+    result = score_latest_ingestion(config=config)
+
+    scored_by_company = {deal.company_name: deal for deal in result.scored_deals}
+    assert scored_by_company["Alpha Ledger"].recommendation == Recommendation.INVEST
+    assert scored_by_company["Alpha Ledger"].check_size == 2_500
+    assert scored_by_company["Zeta Ledger"].recommendation == Recommendation.PASS
+    assert scored_by_company["Zeta Ledger"].check_size == 0
+
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    assert "Recorded existing investments: $2,500" in report
+    assert "Allocatable capital for new checks: $2,500" in report
+    assert "Net return math uses recorded investments plus newly allocated checks" in report
+
+
 def test_score_latest_ingestion_ceils_high_precision_reserve_percent(
     tmp_path: Path,
 ) -> None:
@@ -2748,6 +2780,23 @@ def test_score_deals_command_rejects_oversized_decimal_override(tmp_path: Path) 
 
     assert result.exit_code != 0
     assert "gross return multiple is too long" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_score_deals_malformed_portfolio_ledger_has_plain_english_error(
+    tmp_path: Path,
+) -> None:
+    store = _strong_store(deal_id="deal_one", company_name="Deal One")
+    _write_ingestion_summary(tmp_path, [store])
+    ledger_path = tmp_path / "data" / "portfolio" / "ledger.json"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text("{bad json", encoding="utf-8")
+
+    result = runner.invoke(app, ["score-deals", "--data-dir", str(tmp_path / "data")])
+
+    assert result.exit_code != 0
+    assert "private portfolio ledger" in result.output
+    assert "not valid JSON" in result.output
     assert "Traceback" not in result.output
 
 

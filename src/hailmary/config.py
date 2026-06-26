@@ -294,7 +294,11 @@ def validate_investment_settings(config: AppConfig) -> AppConfig:
     return config
 
 
-def validate_local_state(config: AppConfig) -> AppConfig:
+def validate_local_state(
+    config: AppConfig,
+    *,
+    update_git_exclude: bool = True,
+) -> AppConfig:
     """Validate generated-output paths without creating local folders."""
 
     config = _expand_config_paths(config)
@@ -312,11 +316,12 @@ def validate_local_state(config: AppConfig) -> AppConfig:
     _ensure_folder_path(config.meridian_profile_dir)
     _ensure_folder_path(config.config_dir)
     _ensure_config_file_path(config.config_path)
-    _ensure_repo_local_path_ignored(config.data_dir, purpose="data directory")
-    _ensure_repo_local_path_ignored(config.config_dir, purpose="local config directory")
-    _ensure_repo_local_path_ignored(
-        config.meridian_profile_dir, purpose="Meridian browser profile directory"
-    )
+    if update_git_exclude:
+        _ensure_repo_local_path_ignored(config.data_dir, purpose="data directory")
+        _ensure_repo_local_path_ignored(config.config_dir, purpose="local config directory")
+        _ensure_repo_local_path_ignored(
+            config.meridian_profile_dir, purpose="Meridian browser profile directory"
+        )
     return config
 
 
@@ -330,6 +335,7 @@ def create_local_state(config: AppConfig, *, force: bool) -> InitResult:
         config.data_dir / "raw",
         config.data_dir / "processed",
         config.data_dir / "reports",
+        config.data_dir / "portfolio",
         config.data_dir / "agent-packets",
         config.data_dir / "agent-outputs",
         config.data_dir / "research-plans",
@@ -605,6 +611,7 @@ def _ensure_dedicated_data_dir(path: Path) -> None:
         "raw",
         "processed",
         "reports",
+        "portfolio",
         "agent-packets",
         "agent-outputs",
         "research-plans",
@@ -637,6 +644,7 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         data_dir / "raw",
         data_dir / "processed",
         data_dir / "reports",
+        data_dir / "portfolio",
         data_dir / "agent-packets",
         data_dir / "agent-outputs",
         data_dir / "research-plans",
@@ -660,8 +668,9 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
         if profile_dir == reserved_path:
             raise ConfigError(
                 "The Meridian browser profile directory cannot be the data, raw, "
-                "processed, reports, agent-packets, agent-outputs, research-plans, "
-                "research-results, research-results-templates, or meridian-workflows folder. "
+                "processed, reports, portfolio, agent-packets, agent-outputs, "
+                "research-plans, research-results, research-results-templates, "
+                "or meridian-workflows folder. "
                 "Choose a separate generated-data folder."
             )
         try:
@@ -676,8 +685,8 @@ def _ensure_meridian_profile_not_reserved_data_path(config: AppConfig) -> None:
             continue
         raise ConfigError(
             "The Meridian browser profile directory cannot be inside a reserved Hail Mary "
-            "data folder such as raw, processed, reports, agent-packets, agent-outputs, "
-            "research-plans, research-results, research-results-templates, or "
+            "data folder such as raw, processed, reports, portfolio, agent-packets, "
+            "agent-outputs, research-plans, research-results, research-results-templates, or "
             "meridian-workflows. "
             "Choose a separate generated-data folder."
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,6 +15,7 @@ from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder, openai_review_messages
 from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
+from hailmary.portfolio import add_portfolio_investment
 from hailmary.research import (
     ResearchDealInput,
     ResearchPlan,
@@ -1263,6 +1264,44 @@ def test_evaluate_deal_scores_against_capital_after_reserve(
     assert any("forced final PASS" in warning for warning in result.warnings)
 
 
+def test_evaluate_deal_subtracts_recorded_portfolio_investments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        mock_llm=False,
+        capital_budget=5_000,
+        min_check=5_000,
+    )
+    add_portfolio_investment(
+        config=config,
+        company_name="PriorCo",
+        amount=5_000,
+        invested_on=date(2026, 6, 23),
+    )
+    client = RecordingReviewClient(
+        outputs_by_role={AgentRole.FINAL_DECISION: [_invest_output_json]}
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.PASS
+    assert result.deterministic_score.check_size == 0
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+    assert result.final_recommendation.check_size == 0
+    assert any("forced final PASS" in warning for warning in result.warnings)
+
+
 def test_evaluate_deal_final_memo_includes_conflict_evidence_for_forced_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1642,6 +1681,27 @@ def test_evaluate_deal_wraps_malformed_evidence_store_in_plain_english(
     monkeypatch.setattr(evaluation, "ingest_folder", corrupt_store)
 
     with pytest.raises(EvaluationError, match="saved evidence store.*malformed"):
+        evaluate_deal_folder(
+            company_dir,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+            max_concurrency=1,
+        )
+
+
+def test_evaluate_deal_wraps_malformed_portfolio_ledger_in_plain_english(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path)
+    ledger_path = tmp_path / "data" / "portfolio" / "ledger.json"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text("{bad json", encoding="utf-8")
+
+    with pytest.raises(
+        EvaluationError,
+        match="private portfolio ledger.*not valid JSON",
+    ):
         evaluate_deal_folder(
             company_dir,
             config=AppConfig(data_dir=tmp_path / "data", local_only=True),

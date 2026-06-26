@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from hailmary.config import AppConfig, ConfigError, validate_local_state
+from hailmary.portfolio import PortfolioError, portfolio_status
 from hailmary.schemas.agents import (
     AgentClaimItem,
     AgentConflictItem,
@@ -29,7 +30,7 @@ from hailmary.schemas.scoring import (
     ScoreFactor,
     ScoreSupportStatus,
 )
-from hailmary.scoring.portfolio import portfolio_rank_key, portfolio_scenario
+from hailmary.scoring.portfolio import portfolio_rank_key
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -176,7 +177,12 @@ def prepare_agent_packets(
     output_dir = config.data_dir / "agent-packets"
     _ensure_private_directory(output_dir, private_root=config.data_dir)
     packet_created_at = created_at or datetime.now(UTC)
-    scenario = portfolio_scenario(config)
+    try:
+        status = portfolio_status(config)
+    except PortfolioError as exc:
+        raise AgentPacketError(
+            f"Could not read the private portfolio ledger: {exc}"
+        ) from exc
     packet_files: list[AgentPacketFile] = []
     packet_inputs: list[tuple[IngestedDeal, EvidenceStore, ScoredDeal]] = []
 
@@ -200,11 +206,15 @@ def prepare_agent_packets(
         ranking_scored_deal = score_evidence_store(
             store,
             config=config,
-            capital_remaining=max(scenario.allocatable_capital, config.max_check),
+            capital_remaining=max(status.available_capital, config.max_check),
         )
         packet_inputs.append((deal, store, ranking_scored_deal))
 
-    scored_by_index = _score_with_ranked_capital_allocation(packet_inputs, config=config)
+    scored_by_index = _score_with_ranked_capital_allocation(
+        packet_inputs,
+        config=config,
+        available_capital=status.available_capital,
+    )
     for index, (deal, store, _) in enumerate(packet_inputs):
         scored_deal = scored_by_index[index]
         for role in roles:
@@ -238,8 +248,9 @@ def _score_with_ranked_capital_allocation(
     packet_inputs: list[tuple[IngestedDeal, EvidenceStore, ScoredDeal]],
     *,
     config: AppConfig,
+    available_capital: int,
 ) -> dict[int, ScoredDeal]:
-    remaining_capital = portfolio_scenario(config).allocatable_capital
+    remaining_capital = available_capital
     scored_by_index: dict[int, ScoredDeal] = {}
     ranked_inputs = sorted(
         enumerate(packet_inputs),

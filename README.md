@@ -47,6 +47,10 @@ Then sync the project environment and run commands directly:
 ```bash
 uv sync
 hailmary init
+hailmary evaluate-deal ./pitch-decks/ExampleCo
+hailmary portfolio status
+hailmary portfolio add-investment --company "ExampleCo" --amount 5000 --date 2026-06-23
+hailmary portfolio plan
 hailmary ingest-folder ./pitch-decks
 hailmary ingest-folder ./pitch-decks --enable-ocr
 hailmary review-evidence
@@ -82,7 +86,11 @@ hailmary import-research-results research-results.json --dry-run
 hailmary import-research-results research-results.json
 ```
 
-`init` creates ignored local folders for generated files. `ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `review-evidence` reads those ignored local evidence stores and shows plain-English summaries of evidence records, claim status, conflicts, OCR use, source freshness, source spans, and citation gaps without printing confidential evidence text by default. Use `--show-text` or `--quote-limit` only when you intentionally want short local excerpts. `score-deals` reads the local evidence stores and writes deterministic Markdown memos and a portfolio comparison report under `data/reports/`.
+`evaluate-deal` is the main operator-facing command. It evaluates one company folder end to end: local privacy checks, ingestion, optional external research workflow, evidence import, deterministic scoring, optional model review, final guardrails, and a final memo. Deterministic scoring means fixed rules applied to source-linked evidence. Guardrails mean Hail Mary keeps the final decision inside the allowed `INVEST` or `PASS` choices and the allowed check sizes.
+
+`init` creates ignored local folders for generated files. `portfolio status`, `portfolio add-investment`, and `portfolio plan` manage a private local investment ledger at `data/portfolio/ledger.json`. The ledger stores only manually entered company names, whole-dollar amounts, and investment dates. Recorded investments are subtracted before `evaluate-deal`, `score-deals`, or `prepare-agent-packets` sizes a new check.
+
+`ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `review-evidence` reads those ignored local evidence stores and shows plain-English summaries of evidence records, claim status, conflicts, OCR use, source freshness, source spans, and citation gaps without printing confidential evidence text by default. Use `--show-text` or `--quote-limit` only when you intentionally want short local excerpts. `score-deals` reads the local evidence stores and writes deterministic Markdown memos and a portfolio comparison report under `data/reports/`.
 
 `score-deals` supports run-only portfolio scenario inputs for allocation and net-return math: `--capital-budget`, `--min-check`, `--max-check`, `--reserve-percent`, `--reserve-dollars`, `--estimated-dilution-percent`, `--platform-fee-percent`, `--carry-percent`, and `--gross-return-multiple`. The same values can be saved in `.hailmary/config.yaml` or supplied through `HAILMARY_...` environment variables. Carry means the share of profits paid to the fund manager or platform. Dilution means ownership reduction from future fundraising.
 
