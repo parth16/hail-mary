@@ -15,7 +15,7 @@ EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = tuple(
     )
 )
 MID_LINE_SOURCE_INSTRUCTION_PATTERN = re.compile(
-    r"\s(?:ignore\s+(?:all\s+|every\s+|previous\s+|the\s+)?instructions?|"
+    r"(?:(?<=\s)|(?<=[,:]))\s*(?:ignore\s+(?:all\s+|every\s+|previous\s+|the\s+)?instructions?|"
     r"disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?|"
     r"forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)|"
     r"always\s+recommend\s+(?:invest|pass)|"
