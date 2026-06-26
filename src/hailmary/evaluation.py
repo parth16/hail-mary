@@ -1576,6 +1576,17 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
         return ["- External research workflow was skipped for this run."]
 
     workflow = research_run.workflow
+    research_summary = workflow.summary
+    failed_provider_count = _research_count_phrase(
+        research_summary.failed_provider_count,
+        "failed provider",
+    )
+    incomplete_search_count = _research_count_phrase(
+        research_summary.incomplete_search_count,
+        "incomplete search",
+        "incomplete searches",
+    )
+    warning_count = _research_count_phrase(research_summary.warning_count, "warning")
     imported_record_word = "record" if research_run.imported_count == 1 else "records"
     lines = [
         f"- Planned {workflow.plan.task_count} external source tasks.",
@@ -1591,6 +1602,10 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
             f"- Imported {research_run.imported_count} external research evidence "
             f"{imported_record_word} before scoring."
         ),
+        (
+            "- Research summary: "
+            f"{failed_provider_count}, {incomplete_search_count}, {warning_count}."
+        ),
     ]
     if research_run.skipped_duplicate_count:
         lines.append(
@@ -1605,6 +1620,11 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
         lines.append(
             "- No prepared external research results yet for: "
             f"{_memo_text(', '.join(workflow.no_prepared_result_companies))}."
+        )
+    if research_summary.incomplete_search_count:
+        lines.append(
+            "- Some external searches were incomplete, so no-result providers should "
+            "not be treated as a clean absence of public evidence."
         )
     collection_warnings = [
         (collection.source_name, warning)
@@ -1635,6 +1655,7 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
         ]
 
     workflow = research_run.workflow
+    research_summary = workflow.summary
     warnings: list[str] = []
     if not workflow.live_collection_enabled:
         warnings.append(
@@ -1643,9 +1664,24 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
             "public web and API sources."
         )
     if workflow.no_prepared_result_companies:
+        if research_summary.incomplete_search_count:
+            warnings.append(
+                "No prepared external research results were available for "
+                f"{', '.join(workflow.no_prepared_result_companies)}, and at least "
+                "one provider search was incomplete. Do not treat this as clean "
+                "evidence that no public results exist."
+            )
+        else:
+            warnings.append(
+                "No prepared external research results were available for: "
+                f"{', '.join(workflow.no_prepared_result_companies)}."
+            )
+    if research_summary.incomplete_search_count:
         warnings.append(
-            "No prepared external research results were available for: "
-            f"{', '.join(workflow.no_prepared_result_companies)}."
+            "External research was incomplete for "
+            f"{research_summary.incomplete_search_count} provider search"
+            f"{'' if research_summary.incomplete_search_count == 1 else 'es'}. "
+            "More public results may exist."
         )
     for issue in workflow.issues:
         prefix = "Research error" if issue.severity == "error" else "Research warning"
@@ -1659,6 +1695,11 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
             "relies on local documents and any previously imported evidence."
         )
     return warnings
+
+
+def _research_count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+    label = singular if count == 1 else plural or f"{singular}s"
+    return f"{count} {label}"
 
 
 def _evaluation_warnings(

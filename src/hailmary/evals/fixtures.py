@@ -1485,9 +1485,9 @@ def run_free_public_collectors_v2_fixture(work_dir: Path) -> None:
             ("Synthetic CollectorCo", 1): _github_repository_response(
                 [
                     _github_repository(
-                        name="synthetic-collectorco",
-                        full_name="synthetic/synthetic-collectorco",
-                        owner_login="synthetic",
+                        name="product",
+                        full_name="synthetic-collectorco/product",
+                        owner_login="synthetic-collectorco",
                     ),
                     _github_repository(
                         name="synthetic-collectorco-related",
@@ -1513,7 +1513,7 @@ def run_free_public_collectors_v2_fixture(work_dir: Path) -> None:
     _expect_equal(
         github_result.result_count,
         1,
-        "Expected fake GitHub collection to keep only the exact repository slug match.",
+        "Expected fake GitHub collection to keep only the exact owner slug match.",
     )
     _expect(
         github_result.output_path is not None and github_result.output_path.exists(),
@@ -1524,7 +1524,7 @@ def run_free_public_collectors_v2_fixture(work_dir: Path) -> None:
     github_payload = json.loads(github_result.output_path.read_text(encoding="utf-8"))
     _expect_equal(
         github_payload["results"][0]["source_url"],
-        "https://github.com/synthetic/synthetic-collectorco",
+        "https://github.com/synthetic-collectorco/product",
         "Expected fake GitHub result to keep exact repository source URL.",
     )
     _expect(

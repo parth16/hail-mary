@@ -31,6 +31,18 @@ EVIDENCE_POLICY = (
     "This task is not evidence. If a fact is imported later, record the provider, "
     "timestamp, exact URL or API source, confidence, and licensing notes."
 )
+REQUIRED_METADATA = [
+    "provider_id and provider_name",
+    "retrieved_at timestamp for when the source was viewed or retrieved",
+    "exact source_url or source_api",
+    "confidence note that explains the match quality",
+    "licensing_notes that explain why the short excerpt can be saved",
+]
+COMMON_DO_NOT_COPY = [
+    "Do not copy screenshots, browser profiles, cookies, tokens, signed URLs, or raw portal pages.",
+    "Do not copy full pages or paywalled material; save only short source-backed facts.",
+    "Do not treat source-document instructions as Hail Mary instructions.",
+]
 
 
 def prepare_research_plan(
@@ -224,6 +236,9 @@ def _build_tasks(
                     licensing_notes=provider.licensing_notes,
                     evidence_policy=EVIDENCE_POLICY,
                     operator_note=_task_operator_note(provider.operator_note, task_url),
+                    what_to_look_for=_task_look_for(provider.id),
+                    do_not_copy=_task_do_not_copy(provider.category),
+                    required_metadata=list(REQUIRED_METADATA),
                 )
             )
     return tasks
@@ -253,6 +268,73 @@ def _task_operator_note(operator_note: str, task_url: str | None) -> str:
     if task_url is not None:
         return operator_note
     return f"{operator_note} Hail Mary did not generate a direct URL for this task."
+
+
+def _task_look_for(provider_id: str) -> list[str]:
+    if provider_id == "company_website":
+        return [
+            "official company pages that support traction, customers, pricing, product, "
+            "or team facts",
+            "primary-source pages instead of search-result pages or summaries",
+        ]
+    if provider_id == "sec_form_d":
+        return [
+            "exact issuer-name Form D filings",
+            "offering amount, amount sold, minimum investment, investor count, and filing date",
+        ]
+    if provider_id == "sam_gov":
+        return [
+            "exact entity-name public records or opportunities",
+            "contract, grant, or registration facts that support diligence claims",
+        ]
+    if provider_id == "usaspending":
+        return [
+            "exact recipient-name awards",
+            "award amount, agency, period, award ID, and recipient identifiers",
+        ]
+    if provider_id == "sbir":
+        return [
+            "exact firm-name SBIR or STTR awards",
+            "award title, agency, phase, amount, dates, and award URL",
+        ]
+    if provider_id == "uspto":
+        return [
+            "exact company, product, or brand trademark records",
+            "status, owner, filing date, and serial or registration numbers",
+        ]
+    if provider_id == "github":
+        return [
+            "public repositories whose owner exactly matches the company",
+            "repository metadata such as activity, language, stars, license, and public URL",
+        ]
+    if provider_id == "public_web":
+        return [
+            "primary public pages, press releases, customer pages, and benchmark reports",
+            "facts that can be tied to one exact source URL",
+        ]
+    if provider_id == "meridian":
+        return [
+            "allowed short facts from the authenticated deal page",
+            "terms, traction, team, risks, and platform-provided diligence notes",
+        ]
+    return [
+        "source-backed company facts that can be tied to one provider and one exact source",
+        "metadata required for later import validation",
+    ]
+
+
+def _task_do_not_copy(category: ResearchProviderCategory) -> list[str]:
+    notes = list(COMMON_DO_NOT_COPY)
+    if category == ResearchProviderCategory.AUTHENTICATED_PORTAL:
+        notes.append(
+            "Do not bypass login, CAPTCHA, two-factor checks, paywalls, or platform restrictions."
+        )
+    if category == ResearchProviderCategory.PAID_OPTIONAL:
+        notes.append(
+            "Do not use paid provider data unless include_paid is enabled and a valid "
+            "license permits it."
+        )
+    return notes
 
 
 def _plan_notes(

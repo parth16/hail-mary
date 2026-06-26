@@ -90,6 +90,9 @@ class ResearchTask(BaseModel):
     licensing_notes: str
     evidence_policy: str
     operator_note: str
+    what_to_look_for: list[str] = Field(default_factory=list)
+    do_not_copy: list[str] = Field(default_factory=list)
+    required_metadata: list[str] = Field(default_factory=list)
 
 
 class ResearchPlan(BaseModel):
