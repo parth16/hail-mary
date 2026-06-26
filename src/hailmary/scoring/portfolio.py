@@ -210,5 +210,18 @@ def _reserve_amount(config: AppConfig) -> int:
         return config.reserve_dollars
     if config.reserve_percent <= 0:
         return 0
-    reserve = Decimal(config.capital_budget) * config.reserve_percent / PERCENT_BASE
+    capital_budget = Decimal(config.capital_budget)
+    with localcontext() as context:
+        context.prec = max(
+            context.prec,
+            _decimal_digit_count(capital_budget)
+            + _decimal_digit_count(config.reserve_percent)
+            + _decimal_digit_count(PERCENT_BASE)
+            + 4,
+        )
+        reserve = capital_budget * config.reserve_percent / PERCENT_BASE
     return int(reserve.to_integral_value(rounding=ROUND_CEILING))
+
+
+def _decimal_digit_count(value: Decimal) -> int:
+    return len(value.as_tuple().digits)

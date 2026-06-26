@@ -110,3 +110,4 @@ Rules for all future Codex runs:
 - PR #53 loop 2: Run-only reserve overrides should clear the saved alternate reserve mode for that command while still rejecting two explicit reserve modes, and portfolio return reporting must bound Decimal arithmetic and fixed-point formatting for extreme finite scenario values.
 - PR #53 loop 3: Portfolio decimal assumptions should be bounded during config validation, including CLI overrides and init writes, so extreme finite exponents fail with plain-English errors before report math or YAML rendering.
 - PR #53 loop 4: Environment reserve overrides should clear the saved alternate reserve mode the same way CLI overrides do, so env-only scenario testing does not require editing saved config.
+- PR #53 loop 5: Percentage reserve calculations should widen Decimal precision before multiplying and ceiling, so high-precision reserve percentages cannot round away fractional dollars and allow oversized checks.

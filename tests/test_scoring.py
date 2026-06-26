@@ -1273,6 +1273,33 @@ def test_score_latest_ingestion_allocates_after_reserve_percent(
     assert "No allocatable capital remained for an allowed nonzero check." in report
 
 
+def test_score_latest_ingestion_ceils_high_precision_reserve_percent(
+    tmp_path: Path,
+) -> None:
+    store = _strong_store(deal_id="deal_precise_reserve", company_name="Precise Reserve")
+    _write_ingestion_summary(tmp_path, [store])
+
+    result = score_latest_ingestion(
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            capital_budget=100_000,
+            min_check=5_000,
+            max_check=5_000,
+            reserve_percent=Decimal("95.000000000000000000000000001"),
+        )
+    )
+
+    scored = result.scored_deals[0]
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert scored.capital_remaining_before == 4_999
+
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    assert "Reserve: $95,001 (95% reserve)" in report
+    assert "Allocatable capital after reserve: $4,999" in report
+
+
 def test_score_latest_ingestion_respects_max_check_in_portfolio_allocation(
     tmp_path: Path,
 ) -> None:
