@@ -270,7 +270,10 @@ def _has_tokenized_url_marker(url: str) -> bool:
         if next_decoded == decoded:
             break
         decoded = next_decoded
-    parsed = urlparse(decoded)
+    try:
+        parsed = urlparse(decoded)
+    except ValueError as exc:
+        raise MeridianWorkflowError("The Meridian URL is not a valid URL.") from exc
     unsafe_parts = [parsed.params, parsed.query, parsed.fragment]
     path_parts = parsed.path.split("/")
     if len(path_parts) != 4:

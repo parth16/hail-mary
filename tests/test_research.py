@@ -66,6 +66,7 @@ from hailmary.research.meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
     MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+    MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
     clean_meridian_url,
 )
 from hailmary.research.schemas import ResearchResultInput
@@ -3773,6 +3774,7 @@ def test_clean_meridian_url_returns_canonical_safe_url() -> None:
         "https://portal.angellist.com/m/acme-ai/invest/",
         "https://portal.angellist.com/m/acme-ai/session-token/invest",
         "https://user:token@portal.angellist.com/m/acme-ai/invest",
+        "https://portal.angellist.com%5B/m/acme-ai/invest",
         "https://portal.angellist.com:bad/m/acme-ai/invest",
         "https://portal.angellist.com:444/m/acme-ai/invest",
         "https://portal.angellist.com:/m/acme-ai/invest",
@@ -5308,6 +5310,45 @@ def test_import_research_results_rejects_completed_meridian_placeholder_missing_
         )
 
 
+def test_import_research_results_rejects_template_marker_without_source_url_marker(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "title": "Meridian deal page excerpt",
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+            "source_url": "https://portal.angellist.com/m/other-example/invest",
+            "licensing_notes": (
+                f"{MERIDIAN_WORKFLOW_TEMPLATE_MARKER} Authenticated source."
+            ),
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError, match="generated source URL marker"):
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+
 def test_import_research_results_rejects_meridian_placeholder_confidence(
     tmp_path: Path,
 ) -> None:
@@ -5859,19 +5900,15 @@ def test_import_research_results_skips_legacy_meridian_duplicate_after_canonical
     meridian_evidence = next(
         evidence for evidence in saved_store.evidence if evidence.provider_id == "meridian"
     )
-    legacy_payload = "\0".join(
-        [
-            deal.id,
-            "meridian",
-            SourceKind.MERIDIAN.value,
-            meridian_source_url,
-            meridian_evidence.text,
-        ]
+    legacy_evidence_id, legacy_document_id = _legacy_meridian_external_ids(
+        deal_id=deal.id,
+        source_url=meridian_source_url,
+        text=meridian_evidence.text,
     )
-    legacy_digest = hashlib.sha256(legacy_payload.encode("utf-8")).hexdigest()
     legacy_evidence = meridian_evidence.model_copy(
         update={
-            "id": f"ev_external_meridian_{legacy_digest[:16]}",
+            "id": legacy_evidence_id,
+            "document_id": legacy_document_id,
             "source_url": meridian_source_url,
         }
     )
@@ -5904,6 +5941,105 @@ def test_import_research_results_skips_legacy_meridian_duplicate_after_canonical
     ]
     assert len(meridian_evidence_records) == 1
     assert meridian_evidence_records[0].source_url == meridian_source_url
+
+
+def test_import_research_results_reuses_legacy_meridian_document_id(
+    tmp_path: Path,
+) -> None:
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    meridian_results_path = tmp_path / "research-results-meridian.json"
+    meridian_source_url = "https://PORTAL.ANGELLIST.com/m/example/invest"
+    _write_results(
+        meridian_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian deal page excerpt",
+                source_url=meridian_source_url,
+                source_api=None,
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                licensing_notes="Authenticated source.",
+            )
+        ],
+    )
+    import_research_results(
+        config=config,
+        results_path=meridian_results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence = next(
+        evidence for evidence in saved_store.evidence if evidence.provider_id == "meridian"
+    )
+    legacy_evidence_id, legacy_document_id = _legacy_meridian_external_ids(
+        deal_id=deal.id,
+        source_url=meridian_source_url,
+        text=meridian_evidence.text,
+    )
+    legacy_evidence = meridian_evidence.model_copy(
+        update={
+            "id": legacy_evidence_id,
+            "document_id": legacy_document_id,
+            "source_url": meridian_source_url,
+        }
+    )
+    legacy_store = saved_store.model_copy(
+        update={
+            "evidence": [
+                legacy_evidence if evidence.id == meridian_evidence.id else evidence
+                for evidence in saved_store.evidence
+            ]
+        }
+    )
+    deal.evidence_store_path.write_text(
+        legacy_store.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    second_result_path = tmp_path / "research-results-meridian-second.json"
+    _write_results(
+        second_result_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian deal page traction excerpt",
+                text="Acme AI reports customer growth from paid pilots.",
+                source_url=meridian_source_url,
+                source_api=None,
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                licensing_notes="Authenticated source.",
+            )
+        ],
+    )
+    result = import_research_results(
+        config=config,
+        results_path=second_result_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 1
+    saved_again = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence_records = [
+        evidence for evidence in saved_again.evidence if evidence.provider_id == "meridian"
+    ]
+    assert len(meridian_evidence_records) == 2
+    assert {evidence.document_id for evidence in meridian_evidence_records} == {
+        legacy_document_id
+    }
+    assert {evidence.source_url for evidence in meridian_evidence_records} == {
+        meridian_source_url,
+        "https://portal.angellist.com/m/example/invest",
+    }
 
 
 def test_import_research_results_dry_run_reports_duplicates_without_writing(
@@ -6543,6 +6679,37 @@ def _research_result(**overrides: object) -> dict[str, object]:
 
 def _write_results(path: Path, results: list[dict[str, object]]) -> None:
     path.write_text(json.dumps({"results": results}), encoding="utf-8")
+
+
+def _legacy_meridian_external_ids(
+    *,
+    deal_id: str,
+    source_url: str,
+    text: str,
+) -> tuple[str, str]:
+    evidence_payload = "\0".join(
+        [
+            deal_id,
+            "meridian",
+            SourceKind.MERIDIAN.value,
+            source_url,
+            text,
+        ]
+    )
+    evidence_digest = hashlib.sha256(evidence_payload.encode("utf-8")).hexdigest()
+    document_payload = "\0".join(
+        [
+            deal_id,
+            "meridian",
+            SourceKind.MERIDIAN.value,
+            source_url,
+        ]
+    )
+    document_digest = hashlib.sha256(document_payload.encode("utf-8")).hexdigest()
+    return (
+        f"ev_external_meridian_{evidence_digest[:16]}",
+        f"doc_external_meridian_{document_digest[:12]}",
+    )
 
 
 def _plain_cli_output(output: str) -> str:

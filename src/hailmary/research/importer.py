@@ -145,6 +145,9 @@ def import_research_results(
         }
         for deal_id, store in stores.items()
     }
+    existing_meridian_document_ids_by_deal_id = {
+        deal_id: _meridian_document_ids_by_source(store) for deal_id, store in stores.items()
+    }
     imported_counts: dict[str, int] = {}
     duplicate_counts: dict[str, int] = {}
 
@@ -153,9 +156,13 @@ def import_research_results(
         if match.evidence.id in existing_ids_by_deal_id[deal_id]:
             duplicate_counts[deal_id] = duplicate_counts.get(deal_id, 0) + 1
             continue
-        evidence_by_deal_id[deal_id].append(match.evidence)
+        evidence = _evidence_with_existing_meridian_document_id(
+            match.evidence,
+            existing_meridian_document_ids_by_deal_id[deal_id],
+        )
+        evidence_by_deal_id[deal_id].append(evidence)
         existing_ids_by_deal_id[deal_id].update(
-            _duplicate_ids_for_existing_evidence(match.evidence, deal_id=deal_id)
+            _duplicate_ids_for_existing_evidence(evidence, deal_id=deal_id)
         )
         imported_counts[deal_id] = imported_counts.get(deal_id, 0) + 1
 
@@ -340,7 +347,8 @@ def _preflight_meridian_template_result(result: object, *, index: int) -> None:
     if generated_source_url is None:
         raise ResearchImportError(
             f"Research result row {index} is a completed Meridian placeholder, so "
-            "licensing_notes must keep the generated placeholder marker until import."
+            "licensing_notes must keep the generated placeholder marker and generated "
+            "source URL marker until import."
         )
     source_url = result.get("source_url")
     if not isinstance(source_url, str):
@@ -386,6 +394,10 @@ def _looks_like_meridian_template_result(result: dict[str, object]) -> bool:
             isinstance(licensing_notes, str)
             and (
                 _has_meridian_placeholder_marker(licensing_notes)
+                or (
+                    MERIDIAN_WORKFLOW_TEMPLATE_MARKER in licensing_notes
+                    and bool(_saved_licensing_notes(licensing_notes))
+                )
                 or MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX in licensing_notes
             )
         )
@@ -630,7 +642,8 @@ def _validate_completed_meridian_placeholder(
     if _is_meridian_placeholder_title(result.title) and generated_source_url is None:
         raise ResearchImportError(
             f"Research result {index} uses a generated Meridian placeholder title, so "
-            "licensing_notes must keep the generated placeholder marker until import."
+            "licensing_notes must keep the generated placeholder marker and generated "
+            "source URL marker until import."
         )
     if generated_source_url is not None:
         try:
@@ -925,6 +938,32 @@ def _saved_licensing_notes(licensing_notes: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _meridian_document_ids_by_source(store: EvidenceStore) -> dict[str, str]:
+    document_ids: dict[str, str] = {}
+    for evidence in store.evidence:
+        source_reference = _canonical_meridian_source_reference(evidence)
+        if source_reference is None:
+            continue
+        document_ids.setdefault(source_reference, evidence.document_id)
+    return document_ids
+
+
+def _evidence_with_existing_meridian_document_id(
+    evidence: EvidenceRecord,
+    existing_document_ids: dict[str, str],
+) -> EvidenceRecord:
+    source_reference = _canonical_meridian_source_reference(evidence)
+    if source_reference is None:
+        return evidence
+    document_id = existing_document_ids.get(source_reference)
+    if document_id is None:
+        existing_document_ids[source_reference] = evidence.document_id
+        return evidence
+    if evidence.document_id == document_id:
+        return evidence
+    return evidence.model_copy(update={"document_id": document_id})
+
+
 def _duplicate_ids_for_existing_evidence(
     evidence: EvidenceRecord,
     *,
@@ -942,17 +981,10 @@ def _canonical_meridian_evidence_id(
     *,
     deal_id: str,
 ) -> str | None:
-    provider_id = evidence.provider_id
-    if provider_id != "meridian":
+    source_reference = _canonical_meridian_source_reference(evidence)
+    if source_reference is None:
         return None
-    if evidence.source_kind != SourceKind.MERIDIAN:
-        return None
-    if evidence.source_url is None:
-        return None
-    try:
-        source_reference = clean_meridian_url(evidence.source_url)
-    except MeridianWorkflowError:
-        return None
+    provider_id = "meridian"
     digest = _research_result_digest(
         deal_id=deal_id,
         provider_id=provider_id,
@@ -961,6 +993,19 @@ def _canonical_meridian_evidence_id(
         text=evidence.text,
     )
     return _external_evidence_id(provider_id, digest)
+
+
+def _canonical_meridian_source_reference(evidence: EvidenceRecord) -> str | None:
+    if evidence.provider_id != "meridian":
+        return None
+    if evidence.source_kind != SourceKind.MERIDIAN:
+        return None
+    if evidence.source_url is None:
+        return None
+    try:
+        return clean_meridian_url(evidence.source_url)
+    except MeridianWorkflowError:
+        return None
 
 
 def _result_digest(result: ResearchResultInput, *, deal_id: str) -> str:
