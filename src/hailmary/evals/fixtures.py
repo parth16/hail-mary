@@ -2655,7 +2655,7 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
                             "enterprise usage, and retention. Lead investor committed "
                             "and seed round is active."
                         ),
-                        "retrieved_at": "2024-01-01T12:00:00Z",
+                        "retrieved_at": "2025-12-31T12:00:00Z",
                         "source_url": "https://example.com/synthetic-goldenco/traction",
                         "confidence": "high: exact synthetic company match",
                         "licensing_notes": "Synthetic public page fixture.",
@@ -2800,6 +2800,27 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "Expected evaluate-deal to persist parseable model-output artifacts for every role.",
         missing_roles=", ".join(missing_output_roles),
     )
+    product_output = next(
+        (
+            output
+            for output in parsed_outputs
+            if output.agent_role == AgentRole.PRODUCT_CUSTOMER_TRACTION
+        ),
+        None,
+    )
+    _expect(
+        product_output is not None,
+        "Expected a parseable Product Customer Traction model-output artifact.",
+    )
+    if product_output is None:
+        raise EvalFixtureFailure("Expected product traction model output.")
+    product_output_evidence_ids = _agent_output_evidence_ids(product_output)
+    _expect(
+        bool(research_evidence_ids & product_output_evidence_ids),
+        "Expected Product Customer Traction output to cite imported research evidence.",
+        research_evidence_ids=", ".join(sorted(research_evidence_ids)),
+        product_output_evidence_ids=", ".join(sorted(product_output_evidence_ids)),
+    )
     final_contexts = client.committee_contexts_by_role.get(AgentRole.FINAL_DECISION, [])
     _expect(
         bool(final_contexts) and "supported_specialist_findings" in final_contexts[-1],
@@ -2809,9 +2830,41 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         bool(final_contexts) and "Source-linked synthetic review" in final_contexts[-1],
         "Expected specialist findings to reach the final model-review context.",
     )
+    final_payloads = client.request_payloads_by_role.get(AgentRole.FINAL_DECISION, [])
+    _expect(
+        bool(final_payloads) and "supported_specialist_findings" in final_payloads[-1],
+        "Expected final-decision model messages to include specialist committee context.",
+    )
+    _expect(
+        bool(final_payloads) and "Source-linked synthetic review" in final_payloads[-1],
+        "Expected specialist findings to reach final-decision model messages.",
+    )
     _expect(
         result.evidence_review is not None,
         "Expected evaluate-deal to run the evidence health review.",
+    )
+    if result.evidence_review is None:
+        raise EvalFixtureFailure("Expected evaluate-deal to run the evidence health review.")
+    reviewed_evidence_ids = {
+        evidence.id for evidence in result.evidence_review.evidence_records
+    }
+    _expect(
+        research_evidence_ids <= reviewed_evidence_ids,
+        "Expected evidence health to include imported research cited by scoring or final review.",
+        research_evidence_ids=", ".join(sorted(research_evidence_ids)),
+        reviewed_evidence_ids=", ".join(sorted(reviewed_evidence_ids)),
+    )
+    missing_evidence_issue = next(
+        (
+            issue
+            for issue in result.evidence_review.issues
+            if issue.code == "missing_evidence"
+        ),
+        None,
+    )
+    _expect(
+        missing_evidence_issue is None or missing_evidence_issue.count == 0,
+        "Expected evidence health not to report missing cited score or final evidence.",
     )
 
     memo = result.final_memo_path.read_text(encoding="utf-8")
@@ -3435,8 +3488,27 @@ def _golden_agent_output(packet: AgentInputPacket) -> AgentReviewOutput:
 
 
 def _golden_reference_evidence(packet: AgentInputPacket) -> AgentEvidenceItem:
-    if packet.agent_role == AgentRole.FINAL_DECISION:
+    if packet.agent_role in {
+        AgentRole.FINAL_DECISION,
+        AgentRole.PRODUCT_CUSTOMER_TRACTION,
+        AgentRole.FINANCING_NEXT_ROUND_RISK,
+    }:
         for evidence in packet.evidence:
             if "Synthetic GoldenCo public site reports" in evidence.text:
                 return evidence
     return packet.evidence[0]
+
+
+def _agent_output_evidence_ids(output: AgentReviewOutput) -> set[str]:
+    evidence_ids: set[str] = set()
+    for summary in output.summary:
+        evidence_ids.update(reference.evidence_id for reference in summary.evidence)
+    for finding in output.findings:
+        evidence_ids.update(reference.evidence_id for reference in finding.evidence)
+    for question in output.diligence_questions:
+        evidence_ids.update(reference.evidence_id for reference in question.evidence)
+    if output.recommendation is not None:
+        evidence_ids.update(
+            reference.evidence_id for reference in output.recommendation.evidence
+        )
+    return evidence_ids
