@@ -135,7 +135,14 @@ def import_research_results(
         deal_id: list(store.evidence) for deal_id, store in stores.items()
     }
     existing_ids_by_deal_id = {
-        deal_id: {evidence.id for evidence in store.evidence}
+        deal_id: {
+            evidence_id
+            for evidence in store.evidence
+            for evidence_id in _duplicate_ids_for_existing_evidence(
+                evidence,
+                deal_id=deal_id,
+            )
+        }
         for deal_id, store in stores.items()
     }
     imported_counts: dict[str, int] = {}
@@ -147,7 +154,9 @@ def import_research_results(
             duplicate_counts[deal_id] = duplicate_counts.get(deal_id, 0) + 1
             continue
         evidence_by_deal_id[deal_id].append(match.evidence)
-        existing_ids_by_deal_id[deal_id].add(match.evidence.id)
+        existing_ids_by_deal_id[deal_id].update(
+            _duplicate_ids_for_existing_evidence(match.evidence, deal_id=deal_id)
+        )
         imported_counts[deal_id] = imported_counts.get(deal_id, 0) + 1
 
     if not dry_run:
@@ -310,6 +319,12 @@ def _preflight_meridian_template_result(result: object, *, index: int) -> None:
             )
     if not _looks_like_meridian_template_result(result):
         return
+    if not _is_blank_template_value(result.get("source_api")):
+        raise ResearchImportError(
+            f"Research result row {index} uses a generated Meridian placeholder, so "
+            "source_api must be blank. Clear source_api and keep the safe Meridian "
+            "deal page URL in source_url."
+        )
     missing_fields = _missing_completed_meridian_template_fields(result)
     if missing_fields:
         field_list = ", ".join(missing_fields)
@@ -332,6 +347,12 @@ def _preflight_meridian_template_result(result: object, *, index: int) -> None:
         return
     try:
         cleaned_source_url = clean_meridian_url(source_url)
+    except MeridianWorkflowError as exc:
+        raise ResearchImportError(
+            f"Research result row {index} source_url is not a safe Meridian deal page URL: "
+            f"{exc}"
+        ) from exc
+    try:
         cleaned_generated_source_url = clean_meridian_url(generated_source_url)
     except MeridianWorkflowError as exc:
         raise ResearchImportError(
@@ -386,8 +407,6 @@ def _missing_completed_meridian_template_fields(
         ]
         if _is_blank_template_value(result.get(field))
     ]
-    if not _is_blank_template_value(result.get("source_api")):
-        missing_fields.append("blank source_api")
     return missing_fields
 
 
@@ -863,7 +882,7 @@ def _evidence_record_for_result(
         document_type = DocumentType.PLATFORM_DEAL_PAGE
 
     return EvidenceRecord(
-        id=f"ev_external_{slugify(result.provider_id)}_{digest[:16]}",
+        id=_external_evidence_id(result.provider_id, digest),
         deal_id=deal.id,
         document_id=_external_document_id(result, deal_id=deal.id),
         document_path=Path("external-research")
@@ -906,18 +925,77 @@ def _saved_licensing_notes(licensing_notes: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _duplicate_ids_for_existing_evidence(
+    evidence: EvidenceRecord,
+    *,
+    deal_id: str,
+) -> set[str]:
+    duplicate_ids = {evidence.id}
+    meridian_id = _canonical_meridian_evidence_id(evidence, deal_id=deal_id)
+    if meridian_id is not None:
+        duplicate_ids.add(meridian_id)
+    return duplicate_ids
+
+
+def _canonical_meridian_evidence_id(
+    evidence: EvidenceRecord,
+    *,
+    deal_id: str,
+) -> str | None:
+    provider_id = evidence.provider_id
+    if provider_id != "meridian":
+        return None
+    if evidence.source_kind != SourceKind.MERIDIAN:
+        return None
+    if evidence.source_url is None:
+        return None
+    try:
+        source_reference = clean_meridian_url(evidence.source_url)
+    except MeridianWorkflowError:
+        return None
+    digest = _research_result_digest(
+        deal_id=deal_id,
+        provider_id=provider_id,
+        source_kind=evidence.source_kind,
+        source_reference=source_reference,
+        text=evidence.text,
+    )
+    return _external_evidence_id(provider_id, digest)
+
+
 def _result_digest(result: ResearchResultInput, *, deal_id: str) -> str:
     source_reference = result.source_url or result.source_api or ""
+    return _research_result_digest(
+        deal_id=deal_id,
+        provider_id=result.provider_id,
+        source_kind=result.source_kind,
+        source_reference=source_reference,
+        text=result.text,
+    )
+
+
+def _research_result_digest(
+    *,
+    deal_id: str,
+    provider_id: str,
+    source_kind: SourceKind,
+    source_reference: str,
+    text: str,
+) -> str:
     payload = "\0".join(
         [
             deal_id,
-            result.provider_id,
-            result.source_kind.value,
+            provider_id,
+            source_kind.value,
             source_reference,
-            result.text,
+            text,
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _external_evidence_id(provider_id: str, digest: str) -> str:
+    return f"ev_external_{slugify(provider_id)}_{digest[:16]}"
 
 
 def _external_document_id(result: ResearchResultInput, *, deal_id: str) -> str:

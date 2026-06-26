@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 import socket
@@ -5192,6 +5193,85 @@ def test_import_research_results_rejects_completed_meridian_placeholder_url_edit
         )
 
 
+def test_import_research_results_reports_unsafe_completed_meridian_placeholder_source_url(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+            "source_url": "https://portal.angellist.com/m/example/invest?debug=1",
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError) as exc_info:
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+    message = str(exc_info.value)
+    assert "row 1 source_url is not a safe Meridian deal page URL" in message
+    assert "generated Meridian source URL" not in message
+
+
+def test_import_research_results_rejects_completed_meridian_placeholder_source_api(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0].update(
+        {
+            "text": "Acme AI reports a $2,500 minimum investment.",
+            "retrieved_at": "2026-01-01T12:00:00Z",
+            "confidence": "high: exact page text",
+            "source_api": "https://portal.angellist.com/m/example/invest?debug=1",
+        }
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ResearchImportError) as exc_info:
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+    message = str(exc_info.value)
+    assert "source_api must be blank" in message
+    assert "Clear source_api" in message
+    assert "partly completed Meridian placeholder" not in message
+
+
 def test_import_research_results_rejects_completed_meridian_placeholder_missing_marker(
     tmp_path: Path,
 ) -> None:
@@ -5743,6 +5823,87 @@ def test_import_research_results_skips_duplicate_records(tmp_path: Path) -> None
         deal.evidence_store_path.read_text(encoding="utf-8")
     )
     assert len([evidence for evidence in saved_store.evidence if evidence.provider_id]) == 1
+
+
+def test_import_research_results_skips_legacy_meridian_duplicate_after_canonicalizing_url(
+    tmp_path: Path,
+) -> None:
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    meridian_results_path = tmp_path / "research-results-meridian.json"
+    meridian_source_url = "https://PORTAL.ANGELLIST.com/m/example/invest"
+    _write_results(
+        meridian_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian deal page excerpt",
+                source_url=meridian_source_url,
+                source_api=None,
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                licensing_notes="Authenticated source.",
+            )
+        ],
+    )
+    import_research_results(
+        config=config,
+        results_path=meridian_results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence = next(
+        evidence for evidence in saved_store.evidence if evidence.provider_id == "meridian"
+    )
+    legacy_payload = "\0".join(
+        [
+            deal.id,
+            "meridian",
+            SourceKind.MERIDIAN.value,
+            meridian_source_url,
+            meridian_evidence.text,
+        ]
+    )
+    legacy_digest = hashlib.sha256(legacy_payload.encode("utf-8")).hexdigest()
+    legacy_evidence = meridian_evidence.model_copy(
+        update={
+            "id": f"ev_external_meridian_{legacy_digest[:16]}",
+            "source_url": meridian_source_url,
+        }
+    )
+    legacy_store = saved_store.model_copy(
+        update={
+            "evidence": [
+                legacy_evidence if evidence.id == meridian_evidence.id else evidence
+                for evidence in saved_store.evidence
+            ]
+        }
+    )
+    deal.evidence_store_path.write_text(
+        legacy_store.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=meridian_results_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 0
+    assert result.skipped_duplicate_count == 1
+    saved_again = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    meridian_evidence_records = [
+        evidence for evidence in saved_again.evidence if evidence.provider_id == "meridian"
+    ]
+    assert len(meridian_evidence_records) == 1
+    assert meridian_evidence_records[0].source_url == meridian_source_url
 
 
 def test_import_research_results_dry_run_reports_duplicates_without_writing(
