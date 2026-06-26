@@ -88,12 +88,12 @@ class PortfolioStatus:
 
 
 def portfolio_ledger_path(config: AppConfig) -> Path:
-    config = validate_local_state(config)
+    config = validate_local_state(config, update_git_exclude=False)
     return config.data_dir / "portfolio" / "ledger.json"
 
 
 def load_portfolio_ledger(config: AppConfig) -> PortfolioLedger:
-    config = validate_local_state(config)
+    config = validate_local_state(config, update_git_exclude=False)
     ledger_path = config.data_dir / "portfolio" / "ledger.json"
     _validate_private_directory(ledger_path.parent, private_root=config.data_dir)
     if ledger_path.is_symlink():
@@ -174,7 +174,7 @@ def add_portfolio_investment(
 
 
 def portfolio_status(config: AppConfig) -> PortfolioStatus:
-    config = validate_local_state(config)
+    config = validate_local_state(config, update_git_exclude=False)
     ledger_path = config.data_dir / "portfolio" / "ledger.json"
     ledger = load_portfolio_ledger(config)
     scenario = portfolio_scenario(config)

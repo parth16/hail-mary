@@ -129,3 +129,4 @@ Rules for all future Codex runs:
 - PR #55 loop 1: evaluate-deal must block all error-level research workflow issues before scoring, normalize home-relative result paths before matching failed imports, and avoid labeling live-research mock-model runs as local-only.
 - PR #55 loop 2: evaluate-deal memos and warnings must include live collector warnings from research collections, not only top-level research workflow issues.
 - PR #56 loop 1: Portfolio ledger failures must be wrapped in workflow-specific plain-English errors, ledger reads must validate the parent portfolio folder before treating missing ledgers as empty, and whole-dollar formatting should preserve arbitrary-size integers without float conversion.
+- PR #56 loop 2: Read-only portfolio status and plan paths must avoid mutating local Git exclude state or depending on writable `.git/info/exclude`; keep Git-exclude updates limited to init and write flows.

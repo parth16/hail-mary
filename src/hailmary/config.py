@@ -294,7 +294,11 @@ def validate_investment_settings(config: AppConfig) -> AppConfig:
     return config
 
 
-def validate_local_state(config: AppConfig) -> AppConfig:
+def validate_local_state(
+    config: AppConfig,
+    *,
+    update_git_exclude: bool = True,
+) -> AppConfig:
     """Validate generated-output paths without creating local folders."""
 
     config = _expand_config_paths(config)
@@ -312,11 +316,12 @@ def validate_local_state(config: AppConfig) -> AppConfig:
     _ensure_folder_path(config.meridian_profile_dir)
     _ensure_folder_path(config.config_dir)
     _ensure_config_file_path(config.config_path)
-    _ensure_repo_local_path_ignored(config.data_dir, purpose="data directory")
-    _ensure_repo_local_path_ignored(config.config_dir, purpose="local config directory")
-    _ensure_repo_local_path_ignored(
-        config.meridian_profile_dir, purpose="Meridian browser profile directory"
-    )
+    if update_git_exclude:
+        _ensure_repo_local_path_ignored(config.data_dir, purpose="data directory")
+        _ensure_repo_local_path_ignored(config.config_dir, purpose="local config directory")
+        _ensure_repo_local_path_ignored(
+            config.meridian_profile_dir, purpose="Meridian browser profile directory"
+        )
     return config
 
 

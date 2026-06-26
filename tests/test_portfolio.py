@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -54,6 +55,40 @@ def test_portfolio_status_handles_missing_ledger(tmp_path: Path) -> None:
 
     assert status.investment_count == 0
     assert status.invested_amount == 0
+    assert status.available_capital == 100_000
+
+
+def test_portfolio_status_does_not_update_git_exclude_for_read_only_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    exclude_path = tmp_path / ".git" / "info" / "exclude"
+    original_exclude_text = "# local excludes\n"
+    exclude_path.write_text(original_exclude_text, encoding="utf-8")
+
+    status = portfolio_status(AppConfig(data_dir=Path("local-data")))
+
+    assert status.investment_count == 0
+    assert status.available_capital == 100_000
+    assert exclude_path.read_text(encoding="utf-8") == original_exclude_text
+    assert not (tmp_path / "local-data").exists()
+
+
+def test_portfolio_status_ignores_unusable_git_exclude_for_read_only_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    exclude_path = tmp_path / ".git" / "info" / "exclude"
+    exclude_path.unlink()
+    exclude_path.mkdir()
+
+    status = portfolio_status(AppConfig(data_dir=Path("local-data")))
+
+    assert status.investment_count == 0
     assert status.available_capital == 100_000
 
 
