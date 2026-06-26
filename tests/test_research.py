@@ -4570,6 +4570,45 @@ def test_prepare_public_research_results_writes_private_importable_file(
     assert dry_run.updated_store_paths == []
 
 
+def test_prepare_public_research_results_preserves_suffix_distinct_requested_companies(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme LLC",
+                "title": "Acme LLC Form D",
+                "text": "Acme LLC filed a Form D for a synthetic offering.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme-llc/form-d",
+            }
+        ],
+    )
+
+    result = prepare_public_research_results(
+        config=config,
+        company_names=["Acme LLC", "Acme LP"],
+        sec_form_d_results_path=sec_results_path,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.deal_count == 2
+    assert result.result_count == 1
+    assert {
+        (summary.company_name, summary.result_count) for summary in result.deals
+    } == {
+        ("Acme LLC", 1),
+        ("Acme LP", 0),
+    }
+    assert result.skipped_non_exact_company_names == []
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert [item["company_name"] for item in saved["results"]] == ["Acme LLC"]
+
+
 def test_prepare_public_research_results_combines_free_public_source_files(
     tmp_path: Path,
 ) -> None:
