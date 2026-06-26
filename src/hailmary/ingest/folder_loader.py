@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,6 +31,49 @@ class IngestionError(RuntimeError):
     """The scan could not safely write generated ingestion output."""
 
 
+@dataclass(frozen=True)
+class DealFolderInspection:
+    root_path: Path
+    deal_names: tuple[str, ...]
+    readable_document_count: int
+    skipped_files: tuple[str, ...]
+    unreadable_paths: tuple[str, ...]
+
+
+def inspect_deal_folder(root_path: Path, *, config: AppConfig) -> DealFolderInspection:
+    """Inspect local input using the same document-selection rules as ingestion."""
+
+    resolved_root = _resolve_scan_root(root_path)
+    candidate_files, skipped_files, unreadable_paths = _candidate_documents(
+        resolved_root,
+        config=config,
+    )
+    is_private_raw_collection_root = _is_private_raw_collection_root(
+        resolved_root,
+        config,
+    )
+    use_collection_subfolders = _uses_collection_subfolders(
+        resolved_root,
+        is_private_raw_collection_root=is_private_raw_collection_root,
+    )
+    deal_names_set = {deal_name for _, deal_name in candidate_files}
+    deal_names_set.update(
+        _unreadable_deal_names(
+            unreadable_paths,
+            root_path=resolved_root,
+            use_collection_subfolders=use_collection_subfolders,
+        )
+    )
+    deal_names = tuple(sorted(deal_names_set))
+    return DealFolderInspection(
+        root_path=resolved_root,
+        deal_names=deal_names,
+        readable_document_count=len(candidate_files),
+        skipped_files=tuple(skipped_files),
+        unreadable_paths=tuple(unreadable_paths),
+    )
+
+
 def ingest_folder(
     root_path: Path,
     *,
@@ -42,46 +86,12 @@ def ingest_folder(
     active_ocr_engine = ocr_engine
     if active_ocr_engine is None and config.enable_ocr:
         active_ocr_engine = SubprocessLocalOcrEngine()
-    allow_private_raw_root = _is_private_raw_root(root_path, config)
-    is_private_raw_collection_root = _is_private_raw_collection_root(root_path, config)
-    use_collection_subfolders = _uses_collection_subfolders(
-        root_path,
-        is_private_raw_collection_root=is_private_raw_collection_root,
-    )
     run_started_at = datetime.now(UTC)
     deals_by_id: dict[str, IngestedDeal] = {}
-    skipped_files: list[str] = []
-    unreadable_paths: list[str] = []
-    candidate_files: list[tuple[Path, str]] = []
-
-    scan_paths, unreadable_dirs = _scan_input_paths(root_path)
-    unreadable_paths.extend(_relative_display_path(path, root_path) for path in unreadable_dirs)
-
-    for path in scan_paths:
-        relative_path = path.relative_to(root_path)
-        if path.is_symlink():
-            skipped_files.append(str(relative_path))
-            continue
-        if not path.is_file():
-            continue
-        if (
-            is_ignored_path(relative_path)
-            or _is_generated_output_path(
-                path,
-                config,
-                allow_private_raw=allow_private_raw_root,
-            )
-            or path.suffix.lower() not in SUPPORTED_SUFFIXES
-        ):
-            skipped_files.append(str(relative_path))
-            continue
-
-        deal_name = _deal_name_for_path(
-            relative_path,
-            root_path=root_path,
-            use_collection_subfolders=use_collection_subfolders,
-        )
-        candidate_files.append((path, deal_name))
+    candidate_files, skipped_files, unreadable_paths = _candidate_documents(
+        root_path,
+        config=config,
+    )
 
     deal_ids_by_name = {
         deal_name: _deal_id_for_name(deal_name)
@@ -132,6 +142,107 @@ def ingest_folder(
     )
     _write_summary(summary)
     return summary
+
+
+def _candidate_documents(
+    root_path: Path,
+    *,
+    config: AppConfig,
+) -> tuple[list[tuple[Path, str]], list[str], list[str]]:
+    allow_private_raw_root = _is_private_raw_root(root_path, config)
+    is_private_raw_collection_root = _is_private_raw_collection_root(root_path, config)
+    use_collection_subfolders = _uses_collection_subfolders(
+        root_path,
+        is_private_raw_collection_root=is_private_raw_collection_root,
+    )
+    skipped_files: list[str] = []
+    unreadable_paths: list[str] = []
+    candidate_files: list[tuple[Path, str]] = []
+
+    scan_paths, unreadable_dirs = _scan_input_paths(root_path)
+    for path in unreadable_dirs:
+        try:
+            relative_path = path.relative_to(root_path)
+        except ValueError:
+            unreadable_paths.append(_relative_display_path(path, root_path))
+            continue
+        if is_ignored_path(relative_path) or _is_generated_output_path(
+            path,
+            config,
+            allow_private_raw=allow_private_raw_root,
+        ):
+            continue
+        unreadable_paths.append(str(relative_path))
+
+    for path in scan_paths:
+        relative_path = path.relative_to(root_path)
+        if path.is_symlink():
+            skipped_files.append(str(relative_path))
+            continue
+        if not path.is_file():
+            continue
+        if (
+            is_ignored_path(relative_path)
+            or _is_generated_output_path(
+                path,
+                config,
+                allow_private_raw=allow_private_raw_root,
+            )
+            or path.suffix.lower() not in SUPPORTED_SUFFIXES
+        ):
+            skipped_files.append(str(relative_path))
+            continue
+        if not os.access(path, os.R_OK):
+            unreadable_paths.append(str(relative_path))
+            continue
+
+        deal_name = _deal_name_for_path(
+            relative_path,
+            root_path=root_path,
+            use_collection_subfolders=use_collection_subfolders,
+        )
+        candidate_files.append((path, deal_name))
+
+    return candidate_files, skipped_files, unreadable_paths
+
+
+def _unreadable_deal_names(
+    unreadable_paths: list[str],
+    *,
+    root_path: Path,
+    use_collection_subfolders: bool,
+) -> list[str]:
+    deal_names: list[str] = []
+    for display_path in unreadable_paths:
+        relative_path = Path(display_path)
+        if relative_path.is_absolute() or not relative_path.parts:
+            continue
+        deal_name = _deal_name_for_unreadable_path(
+            relative_path,
+            root_path=root_path,
+            use_collection_subfolders=use_collection_subfolders,
+        )
+        if deal_name not in deal_names:
+            deal_names.append(deal_name)
+    return deal_names
+
+
+def _deal_name_for_unreadable_path(
+    relative_path: Path,
+    *,
+    root_path: Path,
+    use_collection_subfolders: bool,
+) -> str:
+    if use_collection_subfolders:
+        if len(relative_path.parts) > 1:
+            return relative_path.parts[0]
+        if (root_path / relative_path).is_dir():
+            return relative_path.parts[0]
+    return _deal_name_for_path(
+        relative_path,
+        root_path=root_path,
+        use_collection_subfolders=use_collection_subfolders,
+    )
 
 
 def _scan_input_paths(root_path: Path) -> tuple[list[Path], list[Path]]:

@@ -683,3 +683,35 @@ def test_unreadable_scan_folders_are_reported(
     assert summary.document_count == 1
     assert summary.skipped_files == []
     assert summary.unreadable_paths == ["HiddenCo/Secret"]
+
+
+def test_ignored_unreadable_scan_folders_are_not_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "HiddenCo"
+    ignored_dir = company / ".git"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Memo about HiddenCo.", encoding="utf-8")
+
+    def fake_walk(
+        top: Path,
+        topdown: bool,
+        onerror: Callable[[OSError], None] | None,
+        followlinks: bool,
+    ) -> Iterator[tuple[Path, list[str], list[str]]]:
+        assert top == root
+        assert topdown is True
+        assert followlinks is False
+        yield root, ["HiddenCo"], []
+        if callable(onerror):
+            onerror(PermissionError(13, "Permission denied", str(ignored_dir)))
+        yield company, [".git"], ["memo.txt"]
+
+    monkeypatch.setattr(os, "walk", fake_walk)
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    assert summary.document_count == 1
+    assert summary.skipped_files == []
+    assert summary.unreadable_paths == []
