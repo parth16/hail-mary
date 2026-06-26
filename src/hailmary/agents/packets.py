@@ -10,22 +10,25 @@ from pydantic import ValidationError
 from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.agents import (
     AgentClaimItem,
+    AgentConflictItem,
     AgentEvidenceItem,
     AgentInputPacket,
+    AgentKillGateItem,
     AgentPacketFile,
     AgentPacketRunSummary,
     AgentReviewOutput,
     AgentRole,
+    AgentScoreFactorItem,
     AgentScoreSnapshot,
 )
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import (
     NetReturnEstimate,
-    Recommendation,
     ScoredDeal,
     ScoreSupportStatus,
 )
+from hailmary.scoring.portfolio import portfolio_rank_key, portfolio_scenario
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -34,25 +37,10 @@ from hailmary.scoring.scorer import (
 from hailmary.utils.slug import slugify
 
 DEFAULT_AGENT_ROLES: tuple[AgentRole, ...] = (
-    AgentRole.EXTRACTION,
-    AgentRole.STAGE_NORMALIZER,
-    AgentRole.DEAL_TERMS,
-    AgentRole.TEAM,
-    AgentRole.MARKET,
-    AgentRole.PRODUCT_TECHNICAL,
-    AgentRole.PRODUCT_MARKET_FIT,
-    AgentRole.CUSTOMER_SALES,
-    AgentRole.COMPETITION,
-    AgentRole.BUSINESS_MODEL,
-    AgentRole.RETURN_MATH,
-    AgentRole.LEGAL_FUND_WRAPPER,
-    AgentRole.REGULATORY_ETHICS,
-    AgentRole.FUNDABILITY,
-    AgentRole.BULL,
-    AgentRole.BEAR,
-    AgentRole.RISKS,
-    AgentRole.PORTFOLIO,
-    AgentRole.GROUNDING_AUDITOR,
+    AgentRole.PRODUCT_CUSTOMER_TRACTION,
+    AgentRole.MARKET_COMPETITION,
+    AgentRole.TEAM_EXECUTION,
+    AgentRole.FINANCING_NEXT_ROUND_RISK,
     AgentRole.FINAL_DECISION,
 )
 MAX_PACKET_EVIDENCE_RECORDS = 50
@@ -65,12 +53,36 @@ BASE_INSTRUCTIONS = (
     "Every factual finding must cite one or more allowed evidence IDs.",
     "If the packet does not support a statement, make it a diligence question or "
     "limitation instead of presenting it as fact.",
+    "Unsupported findings must be marked unsupported, use score_delta 0, and must not "
+    "change the recommendation.",
+    "Specialist roles must leave recommendation null. Only the final_decision role may "
+    "return an INVEST or PASS recommendation.",
     "Return JSON that matches AgentReviewOutput. Do not add prose outside the JSON.",
     "Final recommendations must be INVEST or PASS. Check sizes must be $0, $1K, "
     "$2.5K, $5K, $7.5K, or $10K.",
 )
 
 ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
+    AgentRole.PRODUCT_CUSTOMER_TRACTION: (
+        "Focus on product substance and customer traction: customer demand, paid usage, "
+        "revenue, retention, pilots, implementation status, and gaps in proof. Cite "
+        "evidence for each claim and turn missing support into diligence questions."
+    ),
+    AgentRole.MARKET_COMPETITION: (
+        "Focus on market and competition: buyer urgency, budget owner, market timing, "
+        "substitutes, direct competitors, wedge, and defensibility. Do not infer market "
+        "size or competitive strength without cited packet evidence."
+    ),
+    AgentRole.TEAM_EXECUTION: (
+        "Focus on team and execution: founder-market fit, relevant prior work, hiring "
+        "gaps, execution pace, and whether the available evidence supports the team's "
+        "ability to deliver."
+    ),
+    AgentRole.FINANCING_NEXT_ROUND_RISK: (
+        "Focus on financing and next-round risk: current terms, valuation, minimum "
+        "check, lead investor status, runway, burn, capital needs, and risk that the "
+        "company cannot raise the next financing."
+    ),
     AgentRole.EXTRACTION: (
         "Focus on extraction quality, missing readable text, source lineage, and "
         "whether the packet is usable for analysis."
@@ -128,8 +140,10 @@ ROLE_INSTRUCTIONS: dict[AgentRole, str] = {
         "unsupported claims are clearly marked."
     ),
     AgentRole.FINAL_DECISION: (
-        "Use the packet to prepare a constrained INVEST or PASS view, a fixed check "
-        "size, what must be true, and why this is probably a pass."
+        "Use the deterministic score context, supported committee findings, conflicts, "
+        "limitations, and packet evidence to prepare a constrained INVEST or PASS view. "
+        "Cite evidence for the rationale when evidence exists. Do not override "
+        "deterministic kill gates or check-size limits."
     ),
     AgentRole.OVERALL: "Give a concise overall diligence view using the packet evidence.",
 }
@@ -161,6 +175,7 @@ def prepare_agent_packets(
     output_dir = config.data_dir / "agent-packets"
     _ensure_private_directory(output_dir, private_root=config.data_dir)
     packet_created_at = created_at or datetime.now(UTC)
+    scenario = portfolio_scenario(config)
     packet_files: list[AgentPacketFile] = []
     packet_inputs: list[tuple[IngestedDeal, EvidenceStore, ScoredDeal]] = []
 
@@ -184,7 +199,7 @@ def prepare_agent_packets(
         ranking_scored_deal = score_evidence_store(
             store,
             config=config,
-            capital_remaining=max(config.capital_budget, config.max_check),
+            capital_remaining=max(scenario.allocatable_capital, config.max_check),
         )
         packet_inputs.append((deal, store, ranking_scored_deal))
 
@@ -223,15 +238,11 @@ def _score_with_ranked_capital_allocation(
     *,
     config: AppConfig,
 ) -> dict[int, ScoredDeal]:
-    remaining_capital = config.capital_budget
+    remaining_capital = portfolio_scenario(config).allocatable_capital
     scored_by_index: dict[int, ScoredDeal] = {}
     ranked_inputs = sorted(
         enumerate(packet_inputs),
-        key=lambda item: (
-            item[1][2].recommendation == Recommendation.INVEST,
-            item[1][2].total_score,
-        ),
-        reverse=True,
+        key=lambda item: portfolio_rank_key(item[1][2]),
     )
     for index, (_, store, _) in ranked_inputs:
         scored_deal = score_evidence_store(
@@ -305,6 +316,17 @@ def build_agent_input_packet(
             valuation_risk=scored_deal.valuation_risk,
             net_return=packet_net_return,
         ),
+        score_factors=_score_factor_items(
+            scored_deal,
+            allowed_evidence_ids=allowed_evidence_ids,
+        ),
+        triggered_kill_gates=_triggered_kill_gate_items(scored_deal),
+        conflicts=_conflict_items(store, allowed_evidence_ids=allowed_evidence_ids),
+        packet_limitations=_packet_limitations(
+            store,
+            selected_evidence,
+            max_evidence_chars=max_evidence_chars,
+        ),
         evidence=evidence_items,
         verified_claims=selected_claims,
         diligence_questions=[
@@ -366,6 +388,118 @@ def _has_packet_entry_valuation_support(selected_claim_labels: set[str]) -> bool
         "pre-money valuation",
         "round size",
     }.issubset(selected_claim_labels)
+
+
+def _score_factor_items(
+    scored_deal: ScoredDeal,
+    *,
+    allowed_evidence_ids: set[str],
+) -> list[AgentScoreFactorItem]:
+    return [
+        AgentScoreFactorItem(
+            name=factor.name,
+            score=factor.score,
+            max_score=factor.max_score,
+            explanation=factor.explanation,
+            evidence_ids=_allowed_ids(
+                factor.evidence_ids,
+                allowed_evidence_ids=allowed_evidence_ids,
+            ),
+        )
+        for factor in scored_deal.score_factors
+    ]
+
+
+def _triggered_kill_gate_items(scored_deal: ScoredDeal) -> list[AgentKillGateItem]:
+    return [
+        AgentKillGateItem(
+            name=gate.name,
+            triggered=gate.triggered,
+            reason=gate.reason,
+        )
+        for gate in scored_deal.kill_gates
+        if gate.triggered
+    ]
+
+
+def _conflict_items(
+    store: EvidenceStore,
+    *,
+    allowed_evidence_ids: set[str],
+) -> list[AgentConflictItem]:
+    claims_by_id = {claim.id: claim for claim in store.claims}
+    items: list[AgentConflictItem] = []
+    for conflict in validated_conflicts(store):
+        evidence_ids: list[str] = []
+        complete_conflict = True
+        for claim_id in conflict.claim_ids:
+            claim = claims_by_id.get(claim_id)
+            if claim is None or not claim.citations:
+                complete_conflict = False
+                continue
+            for citation in claim.citations:
+                if citation.evidence_id not in allowed_evidence_ids:
+                    complete_conflict = False
+                    continue
+                if citation.evidence_id not in evidence_ids:
+                    evidence_ids.append(citation.evidence_id)
+        if not complete_conflict or not evidence_ids:
+            continue
+        items.append(
+            AgentConflictItem(
+                id=conflict.id,
+                claim_type=conflict.claim_type,
+                label=conflict.label,
+                normalized_values=list(conflict.normalized_values),
+                evidence_ids=evidence_ids,
+            )
+        )
+    return items
+
+
+def _packet_limitations(
+    store: EvidenceStore,
+    selected_evidence: Sequence[EvidenceRecord],
+    *,
+    max_evidence_chars: int,
+) -> list[str]:
+    limitations: list[str] = []
+    if not selected_evidence:
+        limitations.append(
+            "No usable source-linked evidence was available in this packet. Treat "
+            "material claims as NEEDS_DILIGENCE."
+        )
+        return limitations
+
+    if len(selected_evidence) < len(store.evidence):
+        limitations.append(
+            f"Packet includes {len(selected_evidence)} of {len(store.evidence)} evidence "
+            "records to keep model input limited. Omitted records are not available to "
+            "the model."
+        )
+
+    truncated_count = sum(
+        1 for evidence in selected_evidence if len(evidence.text) > max_evidence_chars
+    )
+    if truncated_count:
+        evidence_word = "excerpt" if truncated_count == 1 else "excerpts"
+        limitations.append(
+            f"Packet shortened {truncated_count} evidence {evidence_word}. Cite only "
+            "the visible excerpt text."
+        )
+    return limitations
+
+
+def _allowed_ids(
+    evidence_ids: Sequence[str],
+    *,
+    allowed_evidence_ids: set[str],
+) -> list[str]:
+    allowed_ids: list[str] = []
+    for evidence_id in evidence_ids:
+        if evidence_id in allowed_evidence_ids and evidence_id not in allowed_ids:
+            allowed_ids.append(evidence_id)
+    return allowed_ids
 
 
 def load_agent_input_packet(path: Path) -> AgentInputPacket:
