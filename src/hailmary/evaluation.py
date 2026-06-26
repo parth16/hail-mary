@@ -23,6 +23,19 @@ from hailmary.ingest.folder_loader import (
     ingest_folder,
     inspect_deal_folder,
 )
+from hailmary.research import (
+    GitHubRepositorySearchClient,
+    ResearchImportError,
+    ResearchImportRunSummary,
+    ResearchWorkflowError,
+    ResearchWorkflowRunSummary,
+    SbirAwardsClient,
+    SecFormDFilingsClient,
+    UsaspendingAwardsClient,
+    import_research_results,
+    run_research_workflow,
+)
+from hailmary.research.web import WebResearchClient
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
     AgentFinding,
@@ -109,6 +122,20 @@ class DeterministicEvidenceSelection:
 
 
 @dataclass(frozen=True)
+class EvaluationResearchRun:
+    workflow: ResearchWorkflowRunSummary
+    imports: list[ResearchImportRunSummary]
+
+    @property
+    def imported_count(self) -> int:
+        return sum(result.imported_count for result in self.imports)
+
+    @property
+    def skipped_duplicate_count(self) -> int:
+        return sum(result.skipped_duplicate_count for result in self.imports)
+
+
+@dataclass(frozen=True)
 class EvaluationMode:
     name: str
     model_backed: bool
@@ -134,6 +161,8 @@ class DealEvaluationResult:
     final_memo_path: Path
     agent_output_dir: Path
     ocr_status: str
+    research_run: EvaluationResearchRun | None = None
+    research_imported_count: int = 0
     operator_limitations: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -222,7 +251,23 @@ def evaluate_deal_folder(
     *,
     config: AppConfig,
     max_concurrency: int = DEFAULT_EVALUATION_MAX_CONCURRENCY,
+    run_research: bool = True,
+    website_url: str | None = None,
+    meridian_url: str | None = None,
+    include_paid_research: bool = False,
+    sec_form_d_results_path: Path | None = None,
+    sam_gov_results_path: Path | None = None,
+    usaspending_results_path: Path | None = None,
+    sbir_results_path: Path | None = None,
+    uspto_results_path: Path | None = None,
+    github_results_path: Path | None = None,
+    research_results_files: Sequence[Path] = (),
     model_client: AgentReviewClient | None = None,
+    web_client: WebResearchClient | None = None,
+    usaspending_client: UsaspendingAwardsClient | None = None,
+    sbir_client: SbirAwardsClient | None = None,
+    sec_form_d_client: SecFormDFilingsClient | None = None,
+    github_client: GitHubRepositorySearchClient | None = None,
     stage_callback: Callable[[str], None] | None = None,
     created_at: datetime | None = None,
 ) -> DealEvaluationResult:
@@ -256,6 +301,31 @@ def evaluate_deal_folder(
         raise EvaluationError(str(exc)) from exc
     deal = _single_ingested_deal(ingestion_summary)
     store = _load_evidence_store_for_deal(deal, config=config)
+
+    research_run: EvaluationResearchRun | None = None
+    if run_research:
+        _stage(stage_callback, "external research workflow")
+        research_run = _run_and_import_research(
+            config=config,
+            created_at=created_at or datetime.now(UTC),
+            website_url=website_url,
+            meridian_url=meridian_url,
+            include_paid=include_paid_research,
+            sec_form_d_results_path=sec_form_d_results_path,
+            sam_gov_results_path=sam_gov_results_path,
+            usaspending_results_path=usaspending_results_path,
+            sbir_results_path=sbir_results_path,
+            uspto_results_path=uspto_results_path,
+            github_results_path=github_results_path,
+            results_files=research_results_files,
+            web_client=web_client,
+            usaspending_client=usaspending_client,
+            sbir_client=sbir_client,
+            sec_form_d_client=sec_form_d_client,
+            github_client=github_client,
+        )
+        if research_run.imported_count:
+            store = _load_evidence_store_for_deal(deal, config=config)
 
     _stage(stage_callback, "rule-based scoring")
     scored_deal = score_evidence_store(
@@ -319,7 +389,7 @@ def evaluate_deal_folder(
             final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
             final_review_was_model = False
     else:
-        _stage(stage_callback, "local-only final decision")
+        _stage(stage_callback, f"{mode.name} final decision")
         specialist_results = []
         if store.evidence_count:
             final_output, guarded_decision = _rule_based_final_decision(
@@ -345,6 +415,7 @@ def evaluate_deal_folder(
             [*inspection.unreadable_paths, *ingestion_summary.unreadable_paths]
         ),
         *_ingestion_ocr_warnings(deal),
+        *_research_warnings(research_run),
         *_evaluation_warnings(specialist_results, guarded_decision),
     ]
     failed_specialist_roles = [
@@ -366,6 +437,7 @@ def evaluate_deal_folder(
             final_recommendation=guarded_decision.recommendation,
             warnings=warnings,
             final_review_was_model=final_review_was_model,
+            research_run=research_run,
         ),
         description="final evaluation memo",
     )
@@ -387,9 +459,140 @@ def evaluate_deal_folder(
         final_memo_path=final_memo_path,
         agent_output_dir=output_dir,
         ocr_status=_ocr_status(config, deal),
+        research_run=research_run,
+        research_imported_count=research_run.imported_count if research_run else 0,
         operator_limitations=operator_limitations,
         warnings=warnings,
     )
+
+
+def _run_and_import_research(
+    *,
+    config: AppConfig,
+    created_at: datetime,
+    website_url: str | None,
+    meridian_url: str | None,
+    include_paid: bool,
+    sec_form_d_results_path: Path | None,
+    sam_gov_results_path: Path | None,
+    usaspending_results_path: Path | None,
+    sbir_results_path: Path | None,
+    uspto_results_path: Path | None,
+    github_results_path: Path | None,
+    results_files: Sequence[Path],
+    web_client: WebResearchClient | None,
+    usaspending_client: UsaspendingAwardsClient | None,
+    sbir_client: SbirAwardsClient | None,
+    sec_form_d_client: SecFormDFilingsClient | None,
+    github_client: GitHubRepositorySearchClient | None,
+) -> EvaluationResearchRun:
+    try:
+        workflow = run_research_workflow(
+            config=config,
+            website_url=website_url,
+            meridian_url=meridian_url,
+            include_paid=include_paid,
+            sec_form_d_results_path=sec_form_d_results_path,
+            sam_gov_results_path=sam_gov_results_path,
+            usaspending_results_path=usaspending_results_path,
+            sbir_results_path=sbir_results_path,
+            uspto_results_path=uspto_results_path,
+            github_results_path=github_results_path,
+            results_files=list(results_files),
+            created_at=created_at,
+            web_client=web_client,
+            usaspending_client=usaspending_client,
+            sbir_client=sbir_client,
+            sec_form_d_client=sec_form_d_client,
+            github_client=github_client,
+        )
+    except ResearchWorkflowError as exc:
+        raise EvaluationError(f"External research workflow failed: {exc}") from exc
+
+    local_public_results_requested = any(
+        (
+            sec_form_d_results_path,
+            sam_gov_results_path,
+            usaspending_results_path,
+            sbir_results_path,
+            uspto_results_path,
+            github_results_path,
+        )
+    )
+    if local_public_results_requested:
+        for issue in workflow.issues:
+            if issue.severity == "error" and issue.source == "local public sources":
+                raise EvaluationError(
+                    "A local public-source results file passed to evaluate-deal "
+                    f"could not be prepared: {issue.message}"
+                )
+    if meridian_url is not None:
+        for issue in workflow.issues:
+            if issue.severity == "error" and issue.source == "meridian":
+                raise EvaluationError(
+                    "The Meridian manual research workflow could not be prepared: "
+                    f"{issue.message}"
+                )
+
+    supplied_result_paths = {
+        _normalized_research_result_path(path) for path in results_files
+    }
+    generated_result_paths = {
+        _normalized_research_result_path(path)
+        for path in (
+            collection.output_path
+            for collection in workflow.collections
+            if collection.output_path is not None
+        )
+    }
+    for preview in workflow.import_previews:
+        if preview.error is None:
+            continue
+        preview_path = _normalized_research_result_path(preview.input_path)
+        if preview_path in supplied_result_paths:
+            raise EvaluationError(
+                "A research results file passed to evaluate-deal could not be imported: "
+                f"{preview.error}"
+            )
+        if preview_path in generated_result_paths:
+            raise EvaluationError(
+                "External research results were collected but could not be imported: "
+                f"{preview.error}"
+            )
+
+    for issue in workflow.issues:
+        if issue.severity == "error":
+            raise EvaluationError(
+                "External research failed before scoring: "
+                f"{issue.source}: {issue.message}"
+            )
+
+    imports: list[ResearchImportRunSummary] = []
+    for preview in workflow.import_previews:
+        if preview.error is not None or preview.imported_count <= 0:
+            continue
+        try:
+            imports.append(
+                import_research_results(
+                    config=config,
+                    results_path=preview.input_path,
+                    imported_at=created_at,
+                    dry_run=False,
+                )
+            )
+        except ResearchImportError as exc:
+            raise EvaluationError(
+                "External research passed the dry run but could not be imported: "
+                f"{exc}"
+            ) from exc
+
+    return EvaluationResearchRun(workflow=workflow, imports=imports)
+
+
+def _normalized_research_result_path(path: Path) -> Path:
+    expanded_path = path.expanduser()
+    absolute_path = expanded_path if expanded_path.is_absolute() else Path.cwd() / expanded_path
+    return absolute_path.resolve(strict=False)
 
 
 def load_llm_settings(
@@ -497,16 +700,26 @@ def _evaluation_mode(config: AppConfig) -> EvaluationMode:
             "recommendation comes from rule-based scoring, which means fixed checks over "
             "source-linked evidence."
         )
-    else:
-        limitation = (
-            "Model review was skipped because HAILMARY_MOCK_LLM is true. The final "
-            "recommendation comes from rule-based scoring, which means fixed checks over "
-            "source-linked evidence."
+        return EvaluationMode(
+            name="local-only",
+            model_backed=False,
+            explanation=limitation,
+            limitation=limitation,
         )
+
+    limitation = (
+        "Model review was skipped because HAILMARY_MOCK_LLM is true. The final "
+        "recommendation comes from rule-based scoring, which means fixed checks over "
+        "source-linked evidence."
+    )
     return EvaluationMode(
-        name="local-only",
+        name="rule-based",
         model_backed=False,
-        explanation=limitation,
+        explanation=(
+            "Rule-based mode is on because HAILMARY_MOCK_LLM is true. Hail Mary "
+            "will ingest local documents, run any enabled external research, then "
+            "make the final recommendation with rule-based scoring."
+        ),
         limitation=limitation,
     )
 
@@ -620,6 +833,7 @@ def render_final_evaluation_memo(
     final_recommendation: AgentRecommendationRationale,
     warnings: Sequence[str] = (),
     final_review_was_model: bool = True,
+    research_run: EvaluationResearchRun | None = None,
 ) -> str:
     verified_claims = validated_verified_claims(store)
     lines = [
@@ -665,6 +879,9 @@ def render_final_evaluation_memo(
             f"{_missing_input_text(factor.missing_inputs)}"
             f"{_evidence_reference_text(factor.evidence_ids)}"
         )
+
+    lines.extend(["", "## External Research"])
+    lines.extend(_research_memo_lines(research_run))
 
     lines.extend(["", "## Model Committee Findings"])
     successful_results = [result for result in specialist_results if result.output is not None]
@@ -1346,6 +1563,96 @@ def _reference_quote(text: str) -> str:
     if sentence:
         return sentence[:240].rstrip()
     return stripped[:240].rstrip()
+
+
+def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str]:
+    if research_run is None:
+        return ["- External research workflow was skipped for this run."]
+
+    workflow = research_run.workflow
+    imported_record_word = "record" if research_run.imported_count == 1 else "records"
+    lines = [
+        f"- Planned {workflow.plan.task_count} external source tasks.",
+        (
+            "- Live public collection ran because web research was enabled."
+            if workflow.live_collection_enabled
+            else (
+                "- Live public collection did not run because local-only mode is on "
+                "or web research is disabled."
+            )
+        ),
+        (
+            f"- Imported {research_run.imported_count} external research evidence "
+            f"{imported_record_word} before scoring."
+        ),
+    ]
+    if research_run.skipped_duplicate_count:
+        lines.append(
+            f"- Skipped {research_run.skipped_duplicate_count} duplicate external research records."
+        )
+    if workflow.manual_task_count:
+        lines.append(
+            f"- {workflow.manual_task_count} planned source tasks still need manual "
+            "or local-file work."
+        )
+    if workflow.no_prepared_result_companies:
+        lines.append(
+            "- No prepared external research results yet for: "
+            f"{_memo_text(', '.join(workflow.no_prepared_result_companies))}."
+        )
+    collection_warnings = [
+        (collection.source_name, warning)
+        for collection in workflow.collections
+        for warning in collection.warnings
+    ]
+    if workflow.issues or collection_warnings:
+        lines.append("- Research issues and limitations:")
+        for issue in workflow.issues:
+            severity = "Error" if issue.severity == "error" else "Warning"
+            lines.append(
+                f"  - {severity}: {_memo_text(issue.source)}: {_memo_text(issue.message)}"
+            )
+        for source_name, warning in collection_warnings:
+            lines.append(
+                f"  - Warning: {_memo_text(source_name)}: {_memo_text(warning)}"
+            )
+    else:
+        lines.append("- No research workflow issues were recorded.")
+    return lines
+
+
+def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
+    if research_run is None:
+        return [
+            "External research was skipped, so the decision may miss web or "
+            "public-source diligence."
+        ]
+
+    workflow = research_run.workflow
+    warnings: list[str] = []
+    if not workflow.live_collection_enabled:
+        warnings.append(
+            "Live public research did not run. Set HAILMARY_LOCAL_ONLY=false and "
+            "HAILMARY_ENABLE_WEB_RESEARCH=true to let evaluate-deal collect allowed "
+            "public web and API sources."
+        )
+    if workflow.no_prepared_result_companies:
+        warnings.append(
+            "No prepared external research results were available for: "
+            f"{', '.join(workflow.no_prepared_result_companies)}."
+        )
+    for issue in workflow.issues:
+        prefix = "Research error" if issue.severity == "error" else "Research warning"
+        warnings.append(f"{prefix}: {issue.source}: {issue.message}")
+    for collection in workflow.collections:
+        for warning in collection.warnings:
+            warnings.append(f"Research warning: {collection.source_name}: {warning}")
+    if research_run.imported_count == 0:
+        warnings.append(
+            "No external research evidence was imported before scoring. The final decision "
+            "relies on local documents and any previously imported evidence."
+        )
+    return warnings
 
 
 def _evaluation_warnings(

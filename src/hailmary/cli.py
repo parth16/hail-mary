@@ -1026,6 +1026,95 @@ def evaluate_deal(
             show_default=False,
         ),
     ] = None,
+    skip_research: Annotated[
+        bool,
+        typer.Option(
+            "--skip-research",
+            help=(
+                "Skip external research planning, collection, and import. Use this only "
+                "for local debugging."
+            ),
+        ),
+    ] = False,
+    website: Annotated[
+        str | None,
+        typer.Option(
+            "--website",
+            help="Official company website to include in evaluate-deal research.",
+        ),
+    ] = None,
+    meridian_url: Annotated[
+        str | None,
+        typer.Option(
+            "--meridian-url",
+            help=(
+                "Authenticated Meridian deal URL for the manual research workflow. "
+                "Hail Mary records it for manual use and does not open it."
+            ),
+        ),
+    ] = None,
+    include_paid_research: Annotated[
+        bool,
+        typer.Option(
+            "--include-paid-research",
+            help=(
+                "Include optional paid sources as manual research tasks. "
+                "No paid source is contacted."
+            ),
+        ),
+    ] = False,
+    sec_form_d_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sec-form-d-results",
+            help="Local JSON file of SEC Form D search results to import before scoring.",
+        ),
+    ] = None,
+    sam_gov_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sam-gov-results",
+            help="Local JSON file of SAM.gov results to import before scoring.",
+        ),
+    ] = None,
+    usaspending_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--usaspending-results",
+            help="Local JSON file of USAspending results to import before scoring.",
+        ),
+    ] = None,
+    sbir_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sbir-results",
+            help="Local JSON file of SBIR/STTR award results to import before scoring.",
+        ),
+    ] = None,
+    uspto_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--uspto-results",
+            help="Local JSON file of USPTO results to import before scoring.",
+        ),
+    ] = None,
+    github_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--github-results",
+            help="Local JSON file of GitHub results to import before scoring.",
+        ),
+    ] = None,
+    results_file: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--results-file",
+            help=(
+                "Existing research results JSON to import before scoring. Use more "
+                "than once for multiple files."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Evaluate one deal end to end and write a final Markdown memo."""
 
@@ -1045,6 +1134,17 @@ def evaluate_deal(
             folder,
             config=config,
             max_concurrency=max_concurrency,
+            run_research=not skip_research,
+            website_url=website,
+            meridian_url=meridian_url,
+            include_paid_research=include_paid_research,
+            sec_form_d_results_path=sec_form_d_results,
+            sam_gov_results_path=sam_gov_results,
+            usaspending_results_path=usaspending_results,
+            sbir_results_path=sbir_results,
+            uspto_results_path=uspto_results,
+            github_results_path=github_results,
+            research_results_files=results_file or [],
             stage_callback=print_stage,
         )
     except EvaluationError as exc:
@@ -1058,6 +1158,10 @@ def evaluate_deal(
     summary.add_row(_plain("Evidence records"), _plain(str(result.evidence_count)))
     summary.add_row(_plain("Claims found"), _plain(str(result.claim_count)))
     summary.add_row(_plain("Conflicts found"), _plain(str(result.conflict_count)))
+    summary.add_row(
+        _plain("External research imported"),
+        _plain(str(result.research_imported_count)),
+    )
     summary.add_row(
         _plain("Rule-based recommendation"),
         _plain(str(result.deterministic_score.recommendation)),
@@ -1085,6 +1189,30 @@ def evaluate_deal(
         summary,
         _plain(result.ocr_status),
     ]
+    if result.research_run is not None:
+        research_workflow = result.research_run.workflow
+        research_record_word = (
+            "record" if result.research_imported_count == 1 else "records"
+        )
+        renderables.append(
+            _plain(
+                "External research planned "
+                f"{research_workflow.plan.task_count} source tasks and imported "
+                f"{result.research_imported_count} evidence {research_record_word} "
+                "before scoring."
+            )
+        )
+        if research_workflow.live_collection_enabled:
+            renderables.append(_plain("Live public research ran because web research is enabled."))
+        else:
+            renderables.append(
+                _plain(
+                    "Live public research did not run. Set HAILMARY_LOCAL_ONLY=false "
+                    "and HAILMARY_ENABLE_WEB_RESEARCH=true to enable it."
+                )
+            )
+    else:
+        renderables.append(_plain("External research was skipped for this run."))
     if result.warnings:
         warning_table = _two_column_table("Warning", "Detail")
         for index, warning in enumerate(result.warnings, start=1):
