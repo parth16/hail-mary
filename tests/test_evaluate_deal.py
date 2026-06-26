@@ -18,6 +18,7 @@ from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
 from hailmary.research import (
     ResearchDealInput,
     ResearchPlan,
+    ResearchWorkflowCollectionSummary,
     ResearchWorkflowIssue,
     ResearchWorkflowRunSummary,
 )
@@ -460,6 +461,51 @@ def test_evaluate_deal_rule_based_web_mode_is_not_labeled_local_only(
     assert "Local-only mode was used" not in result.mode_explanation
     memo_lines = result.final_memo_path.read_text(encoding="utf-8").splitlines()
     assert any("Live public collection ran" in line for line in memo_lines)
+
+
+def test_evaluate_deal_includes_live_collection_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="WarnedResearchCo")
+
+    def fake_run_research_workflow(**_: object) -> ResearchWorkflowRunSummary:
+        return _research_workflow_summary(
+            tmp_path,
+            company_name="WarnedResearchCo",
+            live_collection_enabled=True,
+            collections=[
+                ResearchWorkflowCollectionSummary(
+                    kind="live_public",
+                    source_id="github",
+                    source_name="GitHub",
+                    warnings=["GitHub search returned incomplete results."],
+                )
+            ],
+        )
+
+    monkeypatch.setattr(evaluation, "run_research_workflow", fake_run_research_workflow)
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            enable_web_research=True,
+            mock_llm=True,
+        ),
+        max_concurrency=1,
+    )
+
+    assert any(
+        "Research warning: GitHub: GitHub search returned incomplete results."
+        in warning
+        for warning in result.warnings
+    )
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Warning: GitHub: GitHub search returned incomplete results." in memo_text
+    assert "No research workflow issues were recorded." not in memo_text
 
 
 def test_evaluate_deal_local_only_filters_instruction_citations(
@@ -1722,6 +1768,7 @@ def _research_workflow_summary(
     *,
     company_name: str,
     live_collection_enabled: bool,
+    collections: list[ResearchWorkflowCollectionSummary] | None = None,
     issues: list[ResearchWorkflowIssue] | None = None,
 ) -> ResearchWorkflowRunSummary:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
@@ -1740,6 +1787,7 @@ def _research_workflow_summary(
         ),
         plan_path=root / "data" / "research-plans" / "synthetic-plan.json",
         result_template_path=root / "data" / "research-results" / "synthetic-template.json",
+        collections=collections or [],
         issues=issues or [],
         live_collection_enabled=live_collection_enabled,
     )

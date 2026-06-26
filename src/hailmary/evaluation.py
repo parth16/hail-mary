@@ -1600,12 +1600,21 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
             "- No prepared external research results yet for: "
             f"{_memo_text(', '.join(workflow.no_prepared_result_companies))}."
         )
-    if workflow.issues:
+    collection_warnings = [
+        (collection.source_name, warning)
+        for collection in workflow.collections
+        for warning in collection.warnings
+    ]
+    if workflow.issues or collection_warnings:
         lines.append("- Research issues and limitations:")
         for issue in workflow.issues:
             severity = "Error" if issue.severity == "error" else "Warning"
             lines.append(
                 f"  - {severity}: {_memo_text(issue.source)}: {_memo_text(issue.message)}"
+            )
+        for source_name, warning in collection_warnings:
+            lines.append(
+                f"  - Warning: {_memo_text(source_name)}: {_memo_text(warning)}"
             )
     else:
         lines.append("- No research workflow issues were recorded.")
@@ -1635,6 +1644,9 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
     for issue in workflow.issues:
         prefix = "Research error" if issue.severity == "error" else "Research warning"
         warnings.append(f"{prefix}: {issue.source}: {issue.message}")
+    for collection in workflow.collections:
+        for warning in collection.warnings:
+            warnings.append(f"Research warning: {collection.source_name}: {warning}")
     if research_run.imported_count == 0:
         warnings.append(
             "No external research evidence was imported before scoring. The final decision "
