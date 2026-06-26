@@ -241,6 +241,17 @@ def run_research_workflow(
             )
             meridian_workflow_path = meridian_result.output_path
             meridian_result_template_path = meridian_result.result_template_path
+            issues.append(
+                ResearchWorkflowIssue(
+                    severity="warning",
+                    source="meridian",
+                    message=(
+                        "Meridian is a manual authenticated workflow. Complete the "
+                        "Meridian results template with short source-backed facts and "
+                        "run the import dry run before relying on Meridian evidence."
+                    ),
+                )
+            )
         except Exception as exc:
             issues.append(
                 ResearchWorkflowIssue(
