@@ -49,6 +49,10 @@ from hailmary.research import (
     ResearchProviderCategory,
     ResearchTaskStatus,
     ResearchTemplateError,
+    ResearchWorkflowCollectionSummary,
+    ResearchWorkflowError,
+    ResearchWorkflowImportPreview,
+    ResearchWorkflowRunSummary,
     WebResearchError,
     builtin_research_providers,
     collect_github_repositories,
@@ -61,6 +65,7 @@ from hailmary.research import (
     prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
+    run_research_workflow,
 )
 from hailmary.schemas.documents import SourceKind
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
@@ -1289,6 +1294,291 @@ def list_research_providers_command(
     _print_panel("Research providers", renderables, border_style="cyan")
 
 
+@app.command("research-workflow")
+def research_workflow_command(
+    company: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--company",
+            help=(
+                "Company to run the research workflow for. Use more than once for "
+                "multiple companies. If omitted, Hail Mary uses the latest ingestion summary."
+            ),
+        ),
+    ] = None,
+    website: Annotated[
+        str | None,
+        typer.Option(
+            "--website",
+            help="Official company website. Use only when planning for one company.",
+        ),
+    ] = None,
+    meridian_url: Annotated[
+        str | None,
+        typer.Option(
+            "--meridian-url",
+            help=(
+                "Authenticated Meridian deal URL. Hail Mary records it for manual use "
+                "and does not open it."
+            ),
+        ),
+    ] = None,
+    include_paid: Annotated[
+        bool,
+        typer.Option(
+            "--include-paid",
+            help="Include optional paid sources as manual tasks. No paid source is contacted.",
+        ),
+    ] = False,
+    sec_form_d_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sec-form-d-results",
+            help="Local JSON file of SEC Form D search results.",
+        ),
+    ] = None,
+    sam_gov_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sam-gov-results",
+            help="Local JSON file of SAM.gov results.",
+        ),
+    ] = None,
+    usaspending_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--usaspending-results",
+            help="Local JSON file of USAspending results.",
+        ),
+    ] = None,
+    sbir_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--sbir-results",
+            help="Local JSON file of SBIR/STTR award results.",
+        ),
+    ] = None,
+    uspto_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--uspto-results",
+            help="Local JSON file of USPTO results.",
+        ),
+    ] = None,
+    github_results: Annotated[
+        Path | None,
+        typer.Option(
+            "--github-results",
+            help="Local JSON file of GitHub results.",
+        ),
+    ] = None,
+    results_file: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--results-file",
+            help=(
+                "Existing research results JSON to validate with import-research-results "
+                "--dry-run. Use more than once for multiple files."
+            ),
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read and write private workflow files.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print the research workflow summary as JSON.",
+        ),
+    ] = False,
+) -> None:
+    """Create and summarize the plan -> collect/manual-fill -> import loop."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = run_research_workflow(
+            config=config,
+            company_names=company or [],
+            website_url=website,
+            meridian_url=meridian_url,
+            include_paid=include_paid,
+            sec_form_d_results_path=sec_form_d_results,
+            sam_gov_results_path=sam_gov_results,
+            usaspending_results_path=usaspending_results,
+            sbir_results_path=sbir_results,
+            uspto_results_path=uspto_results,
+            github_results_path=github_results,
+            results_files=results_file or [],
+        )
+    except ResearchWorkflowError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    if json_output:
+        payload = result.model_dump(mode="json")
+        payload.update(
+            {
+                "planned_source_count": result.planned_source_count,
+                "manual_task_count": result.manual_task_count,
+                "live_collectable_task_count": result.live_collectable_task_count,
+                "ready_to_import_count": result.ready_to_import_count,
+                "blocking_issue_count": result.blocking_issue_count,
+                "no_prepared_result_companies": result.no_prepared_result_companies,
+                "artifacts": [
+                    artifact.model_dump(mode="json") for artifact in result.artifacts
+                ],
+            }
+        )
+        _print_json(json.dumps(payload, indent=2))
+    else:
+        _print_panel(
+            "Research workflow",
+            _research_workflow_lines(result),
+            border_style="red" if result.blocking_issue_count else "green",
+        )
+
+    if result.blocking_issue_count:
+        raise typer.Exit(1)
+
+
+def _research_workflow_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
+    deal_word = "company" if len(result.plan.deals) == 1 else "companies"
+    lines = [
+        _plain(
+            f"Prepared a research workflow for {len(result.plan.deals)} {deal_word} "
+            f"with {result.plan.task_count} planned source tasks."
+        ),
+        _plain(f"Saved the private research plan to {result.plan_path}."),
+        _plain(f"Saved the fillable results template to {result.result_template_path}."),
+    ]
+    if result.meridian_workflow_path is not None:
+        lines.append(_plain(f"Saved the Meridian workflow to {result.meridian_workflow_path}."))
+    if result.meridian_result_template_path is not None:
+        lines.append(
+            _plain(
+                "Saved the Meridian placeholder template to "
+                f"{result.meridian_result_template_path}."
+            )
+        )
+
+    lines.append(
+        _plain(
+            f"Sources: {result.planned_source_count} planned, "
+            f"{result.manual_task_count} need manual or local-file work, "
+            f"{result.live_collectable_task_count} can be collected live."
+        )
+    )
+    if result.live_collection_enabled:
+        lines.append(_plain("Live public collection ran because web research is enabled."))
+    else:
+        lines.append(
+            _plain(
+                "Live public collection did not run. Set HAILMARY_LOCAL_ONLY=false "
+                "and HAILMARY_ENABLE_WEB_RESEARCH=true to enable it."
+            )
+        )
+
+    for collection in result.collections:
+        lines.extend(_research_workflow_collection_lines(collection))
+
+    if result.import_previews:
+        lines.append(_plain("Import dry-run previews:"))
+        for preview in result.import_previews:
+            lines.extend(_research_workflow_import_lines(preview))
+    else:
+        lines.append(_plain("Ready to import: no completed result files were found yet."))
+
+    if result.no_prepared_result_companies:
+        lines.append(
+            _plain(
+                "No prepared results yet for: "
+                f"{', '.join(result.no_prepared_result_companies)}."
+            )
+        )
+
+    needs_diligence = [
+        issue for issue in result.issues if issue.severity in {"warning", "error"}
+    ]
+    if needs_diligence:
+        lines.append(_plain("Needs diligence:"))
+        for issue in needs_diligence:
+            prefix = "Error" if issue.severity == "error" else "Warning"
+            lines.append(_plain(f"- {prefix}: {issue.source}: {issue.message}"))
+
+    for privacy_note in result.privacy_notes:
+        lines.append(_plain(privacy_note))
+    return lines
+
+
+def _research_workflow_collection_lines(
+    collection: ResearchWorkflowCollectionSummary,
+) -> list[Text]:
+    source_name = collection.source_name
+    error = collection.error
+    result_count = collection.result_count
+    output_path = collection.output_path
+    lines: list[Text] = []
+    if error is not None:
+        lines.append(_plain(f"{source_name}: needs attention: {error}"))
+        return lines
+    result_word = "result" if result_count == 1 else "results"
+    if output_path is not None:
+        lines.append(
+            _plain(f"{source_name}: prepared {result_count} {result_word} at {output_path}.")
+        )
+    else:
+        lines.append(_plain(f"{source_name}: no import-ready results were prepared."))
+    no_result_companies = collection.no_result_companies
+    if no_result_companies:
+        lines.append(
+            _plain(f"{source_name}: no prepared results for {', '.join(no_result_companies)}.")
+        )
+    skipped_non_exact = collection.skipped_non_exact_company_names
+    if skipped_non_exact:
+        lines.append(
+            _plain(
+                f"{source_name}: skipped non-exact company matches: "
+                f"{', '.join(skipped_non_exact)}."
+            )
+        )
+    for warning in collection.warnings:
+        lines.append(_plain(f"{source_name} warning: {warning}"))
+    return lines
+
+
+def _research_workflow_import_lines(preview: ResearchWorkflowImportPreview) -> list[Text]:
+    input_path = preview.input_path
+    error = preview.error
+    if error is not None:
+        return [_plain(f"- {input_path}: dry run blocked: {error}")]
+    imported_count = preview.imported_count
+    record_word = "record" if imported_count == 1 else "records"
+    lines = [_plain(f"- {input_path}: would import {imported_count} {record_word}.")]
+    skipped_duplicates = preview.skipped_duplicate_count
+    if skipped_duplicates:
+        duplicate_word = "record" if skipped_duplicates == 1 else "records"
+        lines.append(_plain(f"  Skipped {skipped_duplicates} duplicate {duplicate_word}."))
+    skipped_rows = preview.skipped_blank_template_row_count
+    if skipped_rows:
+        row_word = "row" if skipped_rows == 1 else "rows"
+        lines.append(_plain(f"  Skipped {skipped_rows} untouched template {row_word}."))
+    for deal in preview.deals:
+        if deal.imported_count:
+            deal_record_word = "record" if deal.imported_count == 1 else "records"
+            lines.append(
+                _plain(
+                    f"  {deal.company_name}: would add {deal.imported_count} "
+                    f"{deal_record_word}."
+                )
+            )
+    return lines
+
+
 @app.command("prepare-research-plan")
 def prepare_research_plan_command(
     company: Annotated[
@@ -1639,16 +1929,24 @@ def prepare_public_research_results_command(
     result_word = "result" if result.result_count == 1 else "results"
     company_word = "company" if result.deal_count == 1 else "companies"
     if result.output_path is None:
+        no_file_lines = [
+            _plain(
+                f"No matching public research {result_word} were found for "
+                f"{result.deal_count} {company_word}."
+            ),
+            _plain("No results file was saved."),
+            _plain("No websites or software data feeds were contacted."),
+        ]
+        if result.skipped_non_exact_company_names:
+            no_file_lines.append(
+                _plain(
+                    "Skipped non-exact public-source company matches: "
+                    f"{', '.join(result.skipped_non_exact_company_names)}."
+                )
+            )
         _print_section(
             "Public research results",
-            [
-                _plain(
-                    f"No matching public research {result_word} were found for "
-                    f"{result.deal_count} {company_word}."
-                ),
-                _plain("No results file was saved."),
-                _plain("No websites or software data feeds were contacted."),
-            ],
+            no_file_lines,
             style="yellow",
         )
         return
@@ -1664,6 +1962,13 @@ def prepare_public_research_results_command(
         result_lines.append(
             _plain(
                 f"No public research results were prepared for: {', '.join(zero_result_companies)}."
+            )
+        )
+    if result.skipped_non_exact_company_names:
+        result_lines.append(
+            _plain(
+                "Skipped non-exact public-source company matches: "
+                f"{', '.join(result.skipped_non_exact_company_names)}."
             )
         )
     result_lines.extend(

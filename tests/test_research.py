@@ -59,6 +59,7 @@ from hailmary.research import (
     prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
+    run_research_workflow,
 )
 from hailmary.research.meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
@@ -216,6 +217,310 @@ def test_prepare_research_plan_includes_paid_as_manual_tasks(tmp_path: Path) -> 
     assert {task.provider_id for task in paid_tasks} >= {"crunchbase", "pitchbook"}
     assert all(task.status == ResearchTaskStatus.NEEDS_OPERATOR for task in paid_tasks)
     assert all("Paid optional source" in task.licensing_notes for task in paid_tasks)
+
+
+def test_research_workflow_command_creates_artifacts_and_reports_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+
+    result = runner.invoke(
+        app,
+        [
+            "research-workflow",
+            "--company",
+            "Acme AI",
+            "--website",
+            "https://example.com/acme",
+            "--meridian-url",
+            "https://portal.angellist.com/m/example/invest",
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Research workflow" in result.output
+    assert "Saved the private research plan" in result.output
+    assert "Saved the fillable results template" in result.output
+    assert "Saved the Meridian workflow" in result.output
+    assert "need manual or local-file work" in result.output
+    assert "Live public collection did not run" in result.output
+    assert "Ready to import: no completed result files were found yet" in result.output
+    assert "No screenshots, cookies, browser profiles" in result.output
+    assert len(list((data_dir / "research-plans").glob("research-plan-*.json"))) == 1
+    assert len(list((data_dir / "research-results-templates").glob("*.json"))) == 2
+    assert len(list((data_dir / "meridian-workflows").glob("*.json"))) == 1
+
+
+def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+
+    result = runner.invoke(
+        app,
+        [
+            "research-workflow",
+            "--company",
+            "Acme AI",
+            "--meridian-url",
+            "https://portal.angellist.com/m/example/invest?token=secret",
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+    output = _plain_cli_output(result.output)
+    assert "Meridian URL cannot include extra text" in output
+    assert not (data_dir / "research-plans").exists()
+    assert "token=secret" not in output
+
+
+@pytest.mark.parametrize(
+    "website_url",
+    [
+        "https://example.com/acme?token=secret#details",
+        "https://example.com/acme;token=secret/details",
+        "https://example.com/acme%3Ftoken=secret",
+        "https://example.com/acme%3Btoken=secret/details",
+        "https://example.com/acme%23token=secret",
+        "https://example.com/acme%253Ftoken=secret",
+        "https://example.com/acme%2525253Ftoken=secret",
+    ],
+)
+def test_research_workflow_rejects_tokenized_website_url_before_writing_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    website_url: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+
+    result = runner.invoke(
+        app,
+        [
+            "research-workflow",
+            "--company",
+            "Acme AI",
+            "--website",
+            website_url,
+            "--data-dir",
+            str(data_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+    output = _plain_cli_output(result.output)
+    assert "website URL cannot include query strings" in output
+    assert not (data_dir / "research-plans").exists()
+    assert "token=secret" not in output
+
+
+def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    summary = ingest_folder(root, config=config)
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    before_store = deal.evidence_store_path.read_text(encoding="utf-8")
+
+    web_client = _FakeWebResearchClient(
+        {
+            "https://example.com/acme": WebFetchResponse(
+                final_url="https://example.com/acme",
+                content_type="text/html",
+                text="<html><title>Acme AI</title><body>Acme AI has customers.</body></html>",
+            )
+        }
+    )
+    sec_client = _FakeSecFormDFilingsClient(
+        {
+            ("Acme AI", 0): _sec_form_d_response(
+                [_sec_form_d_filing(issuer_name="Acme AI")]
+            )
+        }
+    )
+    usaspending_client = _FakeUsaspendingAwardsClient(
+        {("Acme AI", 1): _usaspending_response([_usaspending_award(recipient_name="Acme AI")])}
+    )
+    sbir_client = _FakeSbirAwardsClient(
+        {("Acme AI", 0): _sbir_response([_sbir_award(firm="Acme AI", award_title="Acme AI Award")])}
+    )
+    github_client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai",
+                        full_name="acme-ai/product",
+                        owner_login="acme-ai",
+                    )
+                ]
+            )
+        }
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com/acme",
+        created_at=BUILT_AT,
+        web_client=web_client,
+        sec_form_d_client=sec_client,
+        usaspending_client=usaspending_client,
+        sbir_client=sbir_client,
+        github_client=github_client,
+    )
+
+    assert result.live_collection_enabled is True
+    assert web_client.calls == ["https://example.com/acme"]
+    assert sec_client.calls == [("Acme AI", 10, 0)]
+    assert usaspending_client.calls == [("Acme AI", 10, 1)]
+    assert sbir_client.calls == [("Acme AI", 10, 0)]
+    assert github_client.calls == [("Acme AI", 10, 1)]
+    collection_ids = {collection.source_id for collection in result.collections}
+    assert collection_ids >= {
+        "public_web_pages",
+        "sec_form_d",
+        "usaspending",
+        "sbir",
+        "github",
+    }
+    assert result.ready_to_import_count == 5
+    assert result.blocking_issue_count == 0
+    assert result.no_prepared_result_companies == []
+    assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
+
+
+def test_run_research_workflow_treats_corrupt_import_state_as_blocking(
+    tmp_path: Path,
+) -> None:
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    assert deal.evidence_store_path is not None
+    deal.evidence_store_path.unlink()
+    sec_results_path = tmp_path / "sec-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        sec_form_d_results_path=sec_results_path,
+        created_at=BUILT_AT,
+    )
+
+    assert result.blocking_issue_count == 1
+    assert any(
+        issue.severity == "error" and "evidence store" in issue.message
+        for issue in result.issues
+    )
+
+
+def test_run_research_workflow_treats_live_collection_failures_as_blocking(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    web_client = _FailingWebResearchClient("Could not fetch the public page.")
+    sec_client = _FakeSecFormDFilingsClient(
+        {},
+        error=SecFormDApiError("SEC User-Agent must include a contact email."),
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com/acme",
+        created_at=BUILT_AT,
+        web_client=web_client,
+        sec_form_d_client=sec_client,
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    assert web_client.calls == ["https://example.com/acme"]
+    assert result.blocking_issue_count == 2
+    error_messages = [issue.message for issue in result.issues if issue.severity == "error"]
+    assert any("Could not fetch the public page." in message for message in error_messages)
+    assert any("SEC User-Agent" in message for message in error_messages)
+
+
+def test_run_research_workflow_reports_local_public_skips_and_no_results(
+    tmp_path: Path,
+) -> None:
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    assert deal.evidence_store_path is not None
+    before_store = deal.evidence_store_path.read_text(encoding="utf-8")
+    sec_results_path = tmp_path / "sec-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            },
+            {
+                "company_name": "Acme AI Holdings",
+                "title": "Acme AI Holdings Form D",
+                "text": "A related entity that must not be imported.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/holdings/form-d",
+            },
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI", "MissingCo"],
+        sec_form_d_results_path=sec_results_path,
+        created_at=BUILT_AT,
+    )
+
+    local_public = next(
+        collection for collection in result.collections if collection.source_id == "local_public"
+    )
+    assert local_public.result_count == 1
+    assert local_public.skipped_non_exact_company_names == ["Acme AI Holdings"]
+    assert "MissingCo" in local_public.no_result_companies
+    assert result.ready_to_import_count == 1
+    assert result.no_prepared_result_companies == ["MissingCo"]
+    assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
 def test_prepare_research_plan_rejects_meridian_url_for_multiple_companies(
@@ -3976,6 +4281,10 @@ def test_prepare_public_research_results_writes_private_importable_file(
     assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
     assert result.deal_count == 1
     assert result.result_count == 1
+    assert result.skipped_non_exact_company_names == [
+        "Acme AI Holdings",
+        "Unrelated Robotics",
+    ]
     saved = json.loads(result.output_path.read_text(encoding="utf-8"))
     assert {item["title"] for item in saved["results"]} == {"Acme AI Form D"}
     assert saved["results"][0]["provider_id"] == "sec_form_d"
@@ -4529,9 +4838,48 @@ def test_prepare_public_research_results_command_requires_retrieved_at(
     )
 
     assert result.exit_code != 0
-    assert "retrieved_at" in result.output
-    assert "Field" in result.output
-    assert "required" in result.output
+    output = _plain_cli_output(result.output)
+    assert "retrieved_at" in output
+    assert "time the source was retrieved or viewed" in output
+    assert "Traceback" not in result.output
+
+
+def test_prepare_public_research_results_command_reports_malformed_retrieved_at_as_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sec_results_path = tmp_path / "bad-retrieved-at.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a Form D.",
+                "retrieved_at": "not a timestamp",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            }
+        ],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "prepare-public-research-results",
+            "--company",
+            "Acme AI",
+            "--sec-form-d-results",
+            str(sec_results_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    output = _plain_cli_output(result.output)
+    assert "retrieved_at is invalid" in output
+    assert "retrieved_at is required" not in output
     assert "Traceback" not in result.output
 
 
@@ -5153,6 +5501,33 @@ def test_import_research_results_reports_original_template_row_number(
         )
 
 
+def test_import_research_results_reports_malformed_retrieved_at_as_invalid(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "malformed-retrieved-at-results.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                retrieved_at="not a timestamp",
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError) as exc_info:
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=True,
+        )
+
+    message = str(exc_info.value)
+    assert "retrieved_at is invalid" in message
+    assert "retrieved_at is required" not in message
+
+
 def test_import_research_results_does_not_skip_incomplete_handwritten_rows(
     tmp_path: Path,
 ) -> None:
@@ -5500,6 +5875,31 @@ def test_import_research_results_requires_source_url_or_api(tmp_path: Path) -> N
     )
 
     with pytest.raises(ResearchImportError, match="source_url or source_api"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_requires_plain_english_licensing_notes(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-missing-licensing.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                licensing_notes="",
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ResearchImportError,
+        match="licensing_notes is required",
+    ):
         import_research_results(
             config=config,
             results_path=bad_results_path,
@@ -5927,6 +6327,24 @@ class _FakeWebResearchClient:
         _ = (provider_id, timeout_seconds, max_bytes)
         self.calls.append(url)
         return self.responses[url]
+
+
+class _FailingWebResearchClient:
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls: list[str] = []
+
+    def fetch(
+        self,
+        url: str,
+        *,
+        provider_id: str,
+        timeout_seconds: float,
+        max_bytes: int,
+    ) -> WebFetchResponse:
+        _ = (provider_id, timeout_seconds, max_bytes)
+        self.calls.append(url)
+        raise WebResearchFetchError(self.message)
 
 
 class _FakeHeaders:

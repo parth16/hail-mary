@@ -76,6 +76,16 @@ from hailmary.research.web import (
     WebResearchTaskSummary,
     collect_web_research,
 )
+from hailmary.research.workflow import (
+    ResearchWorkflowArtifact,
+    ResearchWorkflowCollectionSummary,
+    ResearchWorkflowError,
+    ResearchWorkflowImportPreview,
+    ResearchWorkflowIssue,
+    ResearchWorkflowRunSummary,
+    ResearchWorkflowSourceSummary,
+    run_research_workflow,
+)
 
 __all__ = [
     "ResearchAccessMode",
@@ -104,6 +114,13 @@ __all__ = [
     "ResearchTask",
     "ResearchTaskStatus",
     "ResearchTemplateError",
+    "ResearchWorkflowArtifact",
+    "ResearchWorkflowCollectionSummary",
+    "ResearchWorkflowError",
+    "ResearchWorkflowImportPreview",
+    "ResearchWorkflowIssue",
+    "ResearchWorkflowRunSummary",
+    "ResearchWorkflowSourceSummary",
     "GitHubApiError",
     "GitHubRepositoryCollectionRunSummary",
     "GitHubRepositoryRecord",
@@ -146,4 +163,5 @@ __all__ = [
     "prepare_public_research_results",
     "prepare_research_plan",
     "prepare_research_results_template",
+    "run_research_workflow",
 ]

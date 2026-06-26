@@ -218,6 +218,19 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="research-workflow-v2",
+                category=EvalCategory.RESEARCH_IMPORT,
+                name="Research workflow V2 loop",
+                description=(
+                    "Checks workflow artifact generation, local public-source exact "
+                    "matching, related-entity skip reporting, no-result summaries, "
+                    "and import dry-run behavior."
+                ),
+            ),
+            run=fixtures.run_research_workflow_v2_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="public-collectors-source-guards",
                 category=EvalCategory.PUBLIC_COLLECTORS,
                 name="Public collector exact-match and source guards",
