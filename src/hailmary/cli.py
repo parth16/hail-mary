@@ -1779,6 +1779,7 @@ def research_workflow_command(
                 "ready_to_import_count": result.ready_to_import_count,
                 "blocking_issue_count": result.blocking_issue_count,
                 "no_prepared_result_companies": result.no_prepared_result_companies,
+                "summary": result.summary.model_dump(mode="json"),
                 "artifacts": [
                     artifact.model_dump(mode="json") for artifact in result.artifacts
                 ],

@@ -290,6 +290,37 @@ def test_research_workflow_command_creates_artifacts_and_reports_status(
     assert len(list((data_dir / "meridian-workflows").glob("*.json"))) == 1
 
 
+def test_research_workflow_command_json_includes_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+
+    result = runner.invoke(
+        app,
+        [
+            "research-workflow",
+            "--company",
+            "Acme AI",
+            "--data-dir",
+            str(data_dir),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["summary"]["planned_task_count"] == len(payload["plan"]["tasks"])
+    assert payload["summary"]["failed_provider_count"] == 0
+    assert payload["summary"]["incomplete_search_count"] == 0
+    assert payload["summary"]["provider_statuses"]
+    assert any(
+        status["provider_id"] == "sec_form_d"
+        for status in payload["summary"]["provider_statuses"]
+    )
+
+
 def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -444,8 +475,23 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
         for status in result.summary.provider_statuses
         if status.provider_id == "company_website"
     )
-    assert company_website_status.status == ResearchProviderRunStatus.COLLECTED
+    assert company_website_status.status == ResearchProviderRunStatus.IMPORTED
     assert company_website_status.collected_count == 1
+    assert company_website_status.imported_count == 1
+    sam_status = next(
+        status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "sam_gov"
+    )
+    assert sam_status.status == ResearchProviderRunStatus.SKIPPED
+    assert sam_status.no_exact_result_companies == []
+    uspto_status = next(
+        status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "uspto"
+    )
+    assert uspto_status.status == ResearchProviderRunStatus.SKIPPED
+    assert uspto_status.no_exact_result_companies == []
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
@@ -6143,6 +6189,10 @@ def test_import_research_results_requires_plain_english_licensing_notes(
             "token, signature, credential",
         ),
         (
+            "https://www.sec.gov/example/acme-ai?api-key=secret",
+            "token, signature, credential",
+        ),
+        (
             "https://www.sec.gov/example/acme-ai?redirect_url=https%3A%2F%2Fexample.com",
             "credential, redirect",
         ),
@@ -6198,6 +6248,10 @@ def test_import_research_results_rejects_unsafe_source_urls(
         ),
         (
             "https://api.example.com/result?x%252Damz%252Dsignature=secret",
+            "source_api cannot include token, signature, credential",
+        ),
+        (
+            "https://api.example.com/result?access-token=secret",
             "source_api cannot include token, signature, credential",
         ),
         (

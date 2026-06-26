@@ -549,22 +549,25 @@ def _run_web_collection(
             status=ResearchProviderRunStatus.FAILED,
             error=str(exc),
         )
-    fetched_by_company: dict[str, int] = {}
-    for task in result.tasks:
-        if task.status == "fetched":
-            fetched_by_company[task.company_name] = (
-                fetched_by_company.get(task.company_name, 0) + 1
-            )
-    no_result_companies = [
-        company_name
-        for company_name in {task.company_name for task in result.tasks}
-        if fetched_by_company.get(company_name, 0) == 0
-    ]
     warnings = [
         f"{task.company_name} / {task.provider_id}: {task.reason}"
         for task in result.tasks
         if task.status == "failed"
     ]
+    fetched_by_company = {
+        task.company_name for task in result.tasks if task.status == "fetched"
+    }
+    no_result_companies = (
+        sorted(
+            {
+                task.company_name
+                for task in result.tasks
+                if task.company_name not in fetched_by_company
+            }
+        )
+        if fetched_by_company
+        else []
+    )
     status = (
         ResearchProviderRunStatus.FAILED
         if warnings
@@ -709,28 +712,24 @@ def _web_provider_statuses(
     for provider_id, provider_tasks in by_provider.items():
         provider_name = provider_tasks[0].provider_name
         fetched_count = sum(1 for task in provider_tasks if task.status == "fetched")
+        planned_count = sum(1 for task in provider_tasks if task.status == "planned")
+        skipped_count = sum(1 for task in provider_tasks if task.status == "skipped")
         warnings = [
             f"{task.company_name}: {task.reason}"
             for task in provider_tasks
             if task.status == "failed"
         ]
-        no_result_companies = sorted(
-            {
-                task.company_name
-                for task in provider_tasks
-                if task.status != "fetched"
-            }
-        )
-        status = (
-            ResearchProviderRunStatus.FAILED
-            if warnings
-            else _collection_status(
-                result_count=fetched_count,
-                no_result_companies=no_result_companies,
-                warnings=warnings,
-                error=None,
-            )
-        )
+        no_result_companies: list[str] = []
+        if warnings:
+            status = ResearchProviderRunStatus.FAILED
+        elif fetched_count > 0:
+            status = ResearchProviderRunStatus.COLLECTED
+        elif planned_count > 0:
+            status = ResearchProviderRunStatus.PLANNED
+        elif skipped_count > 0:
+            status = ResearchProviderRunStatus.SKIPPED
+        else:
+            status = ResearchProviderRunStatus.SKIPPED
         statuses.append(
             ResearchProviderStatusSummary(
                 provider_id=provider_id,
@@ -744,6 +743,17 @@ def _web_provider_statuses(
             )
         )
     return statuses
+
+
+def _collection_import_source_id(collection: ResearchWorkflowCollectionSummary) -> str:
+    provider_ids_with_results = [
+        provider_status.provider_id
+        for provider_status in collection.provider_statuses
+        if provider_status.collected_count > 0
+    ]
+    if len(provider_ids_with_results) == 1:
+        return provider_ids_with_results[0]
+    return collection.source_id
 
 
 def _warnings_indicate_incomplete_search(warnings: list[str]) -> bool:
@@ -772,7 +782,9 @@ def _research_workflow_summary(
         for source in workflow.source_summaries
     }
     path_to_source_id = {
-        collection.output_path.resolve(strict=False): collection.source_id
+        collection.output_path.resolve(strict=False): _collection_import_source_id(
+            collection
+        )
         for collection in workflow.collections
         if collection.output_path is not None
     }
@@ -890,8 +902,8 @@ def _merge_provider_status(
         ResearchProviderRunStatus.IMPORTED: 2,
         ResearchProviderRunStatus.COLLECTED: 3,
         ResearchProviderRunStatus.NO_EXACT_RESULTS: 4,
-        ResearchProviderRunStatus.PLANNED: 5,
-        ResearchProviderRunStatus.SKIPPED: 6,
+        ResearchProviderRunStatus.SKIPPED: 5,
+        ResearchProviderRunStatus.PLANNED: 6,
     }
     return existing if rank[existing] <= rank[incoming] else incoming
 

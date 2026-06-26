@@ -137,11 +137,20 @@ def _query_contains_sensitive_access(query: str) -> bool:
         if decoded_key is None or "%" in decoded_key:
             return True
         normalized_key = decoded_key.strip().casefold()
-        if normalized_key in SENSITIVE_QUERY_KEYS:
+        canonical_key = normalized_key.replace("-", "_")
+        if (
+            normalized_key in SENSITIVE_QUERY_KEYS
+            or canonical_key in SENSITIVE_QUERY_KEYS
+        ):
             return True
-        if normalized_key.startswith(("x-amz-", "x-goog-")):
+        if normalized_key.startswith(("x-amz-", "x-goog-")) or canonical_key.startswith(
+            ("x_amz_", "x_goog_")
+        ):
             return True
-        if normalized_key in REDIRECT_QUERY_KEYS:
+        if (
+            normalized_key in REDIRECT_QUERY_KEYS
+            or canonical_key in REDIRECT_QUERY_KEYS
+        ):
             return True
     return False
 
