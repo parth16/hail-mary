@@ -202,18 +202,21 @@ def test_evidence_health_external_lineage_uses_exact_url_or_api_source() -> None
         "Synthetic public filing exists.",
         source_kind=SourceKind.WEB,
         source_url="https://www.sec.gov/Archives/example",
+        page_number=None,
     )
     api_evidence = _evidence(
         "ev_api",
         "Synthetic public award exists.",
         source_kind=SourceKind.WEB,
         source_api="https://api.usaspending.gov/api/v2/search/spending_by_award/",
+        page_number=None,
     )
     missing_reference = _evidence(
         "ev_missing_external",
         "Synthetic external source without lineage.",
         source_kind=SourceKind.WEB,
         external_confidence="medium: synthetic source",
+        page_number=None,
     )
 
     health = build_evidence_health(
@@ -226,6 +229,11 @@ def test_evidence_health_external_lineage_uses_exact_url_or_api_source() -> None
     assert issue.severity == ReviewIssueSeverity.BLOCKING
     assert issue.count == 1
     assert "exact source URL or data service source" in issue.guidance
+    assert "missing_location" not in _issue_codes(health.issues)
+    assert _metric_counts(health.source_lineage) == {
+        "complete source lineage": 2,
+        "missing external URL or data service source": 1,
+    }
 
 
 def test_deal_evidence_review_filters_record_table_without_hiding_health() -> None:
@@ -262,6 +270,10 @@ def _issue_by_code(
         if issue.code == code:
             return issue
     raise AssertionError(f"Missing review issue {code}")
+
+
+def _issue_codes(issues: Sequence[ReviewIssueSummary]) -> set[str]:
+    return {issue.code for issue in issues}
 
 
 def _store(

@@ -938,6 +938,8 @@ def _missing_source_span(evidence: EvidenceRecord) -> bool:
 
 
 def _missing_location(evidence: EvidenceRecord) -> bool:
+    if evidence.source_kind != SourceKind.LOCAL_FILE:
+        return False
     return evidence.page_number is None and evidence.table_index is None
 
 

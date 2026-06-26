@@ -1054,6 +1054,11 @@ def test_review_evidence_shows_exact_external_source_reference(tmp_path: Path) -
         document_path=Path("external-research/sec/example.json"),
         source_kind=SourceKind.WEB,
         source_url=source_url,
+    ).model_copy(
+        update={
+            "page_number": None,
+            "table_index": None,
+        }
     )
     store = _review_store(
         deal_id="deal_external_lineage",
@@ -1067,6 +1072,7 @@ def test_review_evidence_shows_exact_external_source_reference(tmp_path: Path) -
     assert result.exit_code == 0, result.output
     assert "Exact source" in result.output
     assert source_url in result.output
+    assert "missing page/table location" not in result.output
 
 
 def _review_evidence_record(

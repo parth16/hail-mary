@@ -1095,7 +1095,8 @@ def _evidence_flags(evidence: object) -> str:
     ):
         flags.append("missing source span")
     if (
-        getattr(evidence, "page_number", None) is None
+        getattr(evidence, "source_kind", None) == SourceKind.LOCAL_FILE
+        and getattr(evidence, "page_number", None) is None
         and getattr(evidence, "table_index", None) is None
     ):
         flags.append("missing page/table location")
