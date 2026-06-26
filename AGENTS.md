@@ -134,3 +134,4 @@ Rules for all future Codex runs:
 - PR #59 loop 1: Evidence review location warnings should apply only to source formats that can provide page or table coordinates; external URL or API evidence can have complete lineage without page or table locations.
 - PR #59 loop 2: Evidence review location warnings should also exempt local text-like evidence that cannot provide page or table coordinates, and citation health checks must detect missing evidence IDs before trusting a saved non-verified citation status.
 - PR #59 loop 3: Shared source-instruction detection must catch direct instruction phrases joined to evidence by punctuation such as commas or colons, while preserving explicit prompt-example context as benign.
+- PR #59 loop 4: Shared source-instruction detection must cover combined instruction qualifiers such as all previous or any previous so unsafe OCR-joined evidence cannot bypass review health or agent-output validation.

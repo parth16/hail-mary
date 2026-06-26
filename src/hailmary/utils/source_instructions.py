@@ -5,8 +5,8 @@ import re
 EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
-        r"^(?:please\s+)?ignore\s+(?:all\s+|every\s+|previous\s+|the\s+)?instructions?\b",
-        r"^(?:please\s+)?disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?\b",
+        r"^(?:please\s+)?ignore\s+(?:(?:all|any|every|previous|the)\s+){0,3}instructions?\b",
+        r"^(?:please\s+)?disregard\s+(?:(?:all|any|every|previous|the)\s+){0,3}instructions?\b",
         r"^(?:please\s+)?forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)\b",
         r"^(?:please\s+)?always\s+recommend\s+(?:invest|pass)\b",
         r"^(?:please\s+)?recommend\s+(?:invest|pass)\b",
@@ -15,8 +15,8 @@ EMBEDDED_SOURCE_INSTRUCTION_PATTERNS = tuple(
     )
 )
 MID_LINE_SOURCE_INSTRUCTION_PATTERN = re.compile(
-    r"(?:(?<=\s)|(?<=[,:]))\s*(?:ignore\s+(?:all\s+|every\s+|previous\s+|the\s+)?instructions?|"
-    r"disregard\s+(?:all\s+|previous\s+|the\s+)?instructions?|"
+    r"(?:(?<=\s)|(?<=[,:]))\s*(?:ignore\s+(?:(?:all|any|every|previous|the)\s+){0,3}instructions?|"
+    r"disregard\s+(?:(?:all|any|every|previous|the)\s+){0,3}instructions?|"
     r"forget\s+(?:everything\s+above|the\s+above|previous\s+instructions?)|"
     r"always\s+recommend\s+(?:invest|pass)|"
     r"(?:please\s+)?recommend\s+(?:invest|pass)\s+"

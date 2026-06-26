@@ -32,7 +32,7 @@ The implementation prompt is in `hail-mary-codex-prompt.md`. It defines:
 - GitHub branch and PR workflow
 - optional future data-provider adapters
 
-## Current Commands
+## Operator Commands
 
 For direct terminal use from any directory, add the wrapper to `~/.zshrc` before
 running Hail Mary commands:
@@ -46,122 +46,40 @@ Then sync the project environment and run commands directly:
 
 ```bash
 uv sync
-hailmary init
 hailmary evaluate-deal ./pitch-decks/ExampleCo
-hailmary portfolio status
-hailmary portfolio add-investment --company "ExampleCo" --amount 5000 --date 2026-06-23
-hailmary portfolio plan
-hailmary ingest-folder ./pitch-decks
-hailmary ingest-folder ./pitch-decks --enable-ocr
+hailmary evaluate-deal ./pitch-decks/ExampleCo --enable-ocr
 hailmary review-evidence
-hailmary score-deals
-hailmary prepare-agent-packets
-hailmary validate-agent-output output.json packet.json
-hailmary run-evals
-hailmary list-research-providers
-hailmary research-workflow --company "ExampleCo"
-HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
-HAILMARY_SEC_USER_AGENT="Hail Mary research operator@example.com" \
-  hailmary research-workflow --company "ExampleCo" --website "https://example.com"
-hailmary prepare-research-plan --company "ExampleCo"
-HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
-  hailmary collect-web-research --dry-run
-hailmary prepare-research-results-template
-hailmary prepare-public-research-results \
-  --company "ExampleCo" \
-  --sec-form-d-results sec-form-d-results.json \
-  --sam-gov-results sam-gov-results.json
-HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
-  hailmary collect-usaspending-awards --company "ExampleCo" --dry-run
-HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
-  hailmary collect-sbir-awards --company "ExampleCo" --dry-run
-HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
-  hailmary collect-sec-form-d-filings --company "ExampleCo" --dry-run
-HAILMARY_LOCAL_ONLY=false HAILMARY_ENABLE_WEB_RESEARCH=true \
-  hailmary collect-github-repositories --company "ExampleCo" --dry-run
-hailmary prepare-meridian-workflow \
-  --company "ExampleCo" \
-  --meridian-url "https://portal.angellist.com/m/example/invest"
-hailmary import-research-results research-results.json --dry-run
-hailmary import-research-results research-results.json
 ```
 
-`evaluate-deal` is the main operator-facing command. It evaluates one company folder end to end: local privacy checks, ingestion, optional external research workflow, evidence import, deterministic scoring, optional model review, final guardrails, and a final memo. Deterministic scoring means fixed rules applied to source-linked evidence. Guardrails mean Hail Mary keeps the final decision inside the allowed `INVEST` or `PASS` choices and the allowed check sizes.
+`evaluate-deal` is the main operator-facing command. It evaluates one company folder
+end to end: local privacy checks, ingestion, optional external research workflow,
+evidence import, deterministic scoring, optional model review, final guardrails, and
+a final memo. Deterministic scoring means fixed rules applied to source-linked
+evidence. Guardrails mean Hail Mary keeps the final decision inside the allowed
+`INVEST` or `PASS` choices and the allowed check sizes.
 
-`init` creates ignored local folders for generated files. `portfolio status`, `portfolio add-investment`, and `portfolio plan` manage a private local investment ledger at `data/portfolio/ledger.json`. The ledger stores only manually entered company names, whole-dollar amounts, and investment dates. Recorded investments are subtracted before `evaluate-deal`, `score-deals`, or `prepare-agent-packets` sizes a new check.
+`evaluate-deal --enable-ocr` turns on local image-based text reading. OCR means
+reading text from images. This can extract text from standalone PNG/JPG files and
+from PDF pages that look empty or image-backed. Hail Mary uses local `tesseract` and
+Poppler `pdftoppm` commands when they are available on `PATH`; it does not call cloud
+OCR services.
 
-`ingest-folder` scans local deal folders, groups documents by company folder, extracts text and tables when supported, writes per-document JSON, builds a source-linked evidence store, extracts basic deal-term claims, and saves a JSON summary under `data/processed/`. `review-evidence` reads those ignored local evidence stores and shows plain-English evidence health summaries by source document, source kind, claim status, source freshness, materiality, confidence, source lineage, conflicts, image-based text reading, source spans, and citation gaps without printing confidential evidence text by default. Health issues are labeled as `blocking`, `warning`, or `info` so operators know what must be fixed before trusting a memo. The command is read-only; evidence exclusion and correction workflows are a future step. Use `--show-text` or `--quote-limit` only when you intentionally want short local excerpts. `score-deals` reads the local evidence stores and writes deterministic Markdown memos and a portfolio comparison report under `data/reports/`.
+`review-evidence` reads ignored local evidence stores and shows plain-English
+evidence health summaries by source document, source kind, claim status, source
+freshness, materiality, confidence, source lineage, conflicts, image-based text
+reading, source spans, and citation gaps without printing confidential evidence text
+by default. Health issues are labeled as `blocking`, `warning`, or `info` so
+operators know what must be fixed before trusting a memo. The command is read-only;
+evidence exclusion and correction workflows are a future step. Use `--show-text` or
+`--quote-limit` only when you intentionally want short local excerpts.
 
-`score-deals` supports run-only portfolio scenario inputs for allocation and net-return math: `--capital-budget`, `--min-check`, `--max-check`, `--reserve-percent`, `--reserve-dollars`, `--estimated-dilution-percent`, `--platform-fee-percent`, `--carry-percent`, and `--gross-return-multiple`. The same values can be saved in `.hailmary/config.yaml` or supplied through `HAILMARY_...` environment variables. Carry means the share of profits paid to the fund manager or platform. Dilution means ownership reduction from future fundraising.
+### Internal Commands
 
-`ingest-folder --enable-ocr` turns on local image-based text reading (OCR). OCR means reading text from images. This can extract text from standalone PNG/JPG files and from PDF pages that look empty or image-backed. Hail Mary uses local `tesseract` and Poppler `pdftoppm` commands when they are available on `PATH`; it does not call cloud OCR services. If those commands are missing or a page cannot be read, ingestion keeps the current OCR-needed warning, saves plain-English notes in the private generated metadata, and continues without crashing. You can also set `HAILMARY_ENABLE_OCR=true` or `enable_ocr: true` in `.hailmary/config.yaml`.
-
-`prepare-agent-packets` writes local JSON packets under `data/agent-packets/` for structured model review. The default committee uses focused product/customer traction, market/competition, team/execution, financing/next-round risk, and final-decision roles. Packets include selected evidence excerpts, allowed evidence IDs, verified claims, deterministic score context, conflicts, limitations, and the required output schema. `validate-agent-output` checks a model's JSON output against the packet, rejecting invented evidence IDs, specialist recommendations, unsupported findings that are not marked unsupported, and quotes that do not appear in the cited evidence record.
-
-`run-evals` runs local synthetic correctness checks. The built-in evals cover text extraction and ingestion, citation span validation, conflicting deal terms, prompt-injection safeguards, missing evidence, score calibration, and Markdown memo snapshot checks. They do not use real deal documents.
-
-`list-research-providers` shows free public, authenticated, and optional paid sources that Hail Mary can plan around. `research-workflow` is the higher-level plan → collect/manual-fill → import-preview loop. It writes a private research plan and fillable results template, prepares local public-source result files when you pass them, creates a Meridian manual workflow when you pass `--meridian-url`, runs `import-research-results --dry-run` on completed result files, and names sources or companies that still need diligence. When `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`, it also runs available free live public collectors; SEC Form D collection also requires `HAILMARY_SEC_USER_AGENT` with an application or company name and contact email. It does not run paid sources, scrape Meridian, save screenshots, save cookies, save browser profiles, save raw portal HTML, save hidden authenticated data, or save signed URLs.
-
-`prepare-research-plan` writes a private JSON checklist under `data/research-plans/` from either the latest ingestion summary or manually supplied `--company` values. It does not contact websites, APIs, paid databases, or Meridian. Any external fact imported later must record the provider, timestamp, exact URL or API source, confidence, and licensing notes.
-
-`collect-web-research` can fetch direct public web-page tasks from a research plan after you explicitly turn off local-only mode and enable web research with `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run` to see which public URLs would be fetched. The command skips paid, authenticated, Meridian, local-only, missing-URL, generated search-result, localhost, and private-network sources. It writes exact source pages to a private JSON file under `data/research-results/`; run `import-research-results --dry-run` before adding that text to evidence stores.
-
-`prepare-research-results-template` turns a private research plan into a fillable JSON file under `data/research-results-templates/`. It copies company names, provider IDs, source kinds, licensing notes, and ingested deal IDs when available, but leaves fact fields and citation URLs blank so the file cannot be mistaken for validated evidence.
-
-`prepare-public-research-results` normalizes local public-source JSON files into an import-ready results file under `data/research-results/`. It supports local files for SEC Form D, SAM.gov, USAspending, SBIR/STTR, USPTO, and GitHub. It only imports exact company-name matches and checks that each result URL or URL-like API source belongs to the expected source. It does not fetch websites, browse pages, call software data feeds, or use paid data. A minimal input file for any supported source looks like:
-
-```json
-{
-  "results": [
-    {
-      "company_name": "ExampleCo",
-      "title": "ExampleCo Form D",
-      "text": "ExampleCo filed a Form D for a $1,000,000 offering.",
-      "retrieved_at": "2026-01-01T12:00:00Z",
-      "source_url": "https://www.sec.gov/example"
-    }
-  ]
-}
-```
-
-Use the matching option for each local source file: `--sec-form-d-results`, `--sam-gov-results`, `--usaspending-results`, `--sbir-results`, `--uspto-results`, or `--github-results`.
-
-`collect-sec-form-d-filings` is an optional live public collector for SEC EDGAR Form D filings. It requires `HAILMARY_LOCAL_ONLY=false`, `HAILMARY_ENABLE_WEB_RESEARCH=true`, and `HAILMARY_SEC_USER_AGENT` set to an application or company name plus a contact email address. Start with `--dry-run`; a real run sends only the `--company` values you provide to SEC EDGAR, keeps only exact issuer-name matches for Form D or amended Form D filings, saves parsed filing metadata, and writes a private JSON results file under `data/research-results/`. Hail Mary does not save raw SEC filings, contact people, phone numbers, email addresses, or addresses.
-
-`collect-github-repositories` is an optional live public API collector for GitHub repository metadata. It requires `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run`; a real run sends only the `--company` values you provide to the GitHub public repository search API, searches repository names plus exact user and organization owner scopes, keeps only repositories where the owner slug or repository slug exactly matches the requested company slug, and writes a private JSON results file under `data/research-results/`. Hail Mary does not clone repositories, fetch code, or fetch README files.
-
-`collect-usaspending-awards` is an optional live public API collector for USAspending award records. It requires `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run`; a real run sends only the `--company` values you provide to the USAspending public API, keeps only exact recipient-name matches, and writes a private JSON results file under `data/research-results/`.
-
-SAM.gov and USPTO stay in the manual or local-file workflow in this phase because their official public API documentation requires API keys. Use `prepare-public-research-results` with local JSON files after you manually confirm exact source URLs and licensing notes.
-
-`prepare-meridian-workflow` writes a private Meridian manual workflow under `data/meridian-workflows/` and a fillable Meridian results template under `data/research-results-templates/`. It does not open Meridian, sign in, scrape pages, bypass access controls, save browser profiles, save cookies, save tokens, save signed URLs, save screenshots, save hidden page data, save unrelated account data, or save raw portal pages. Use normal authenticated access in your own browser, manually copy only short allowed facts or excerpts into the generated placeholder rows, and keep the safe Meridian deal URL in `source_url`. The workflow groups required-when-visible facts such as deal terms, customer traction, revenue, team, risks, deadlines, and allocation, plus optional product, market, and use-of-funds facts. It also includes a before-import checklist and a shell-quoted `import-research-results --dry-run` command. The workflow includes plain-English reminders for terms such as SAFE, convertible note, ARR, MRR, allocation, valuation cap, pre-money valuation, discount, minimum investment, target raise, lead investor, and closing date. Use the exact base Meridian deal URL without extra path text, extra slashes, usernames, passwords, unsafe ports, encoded delimiters, `?`, or `#`.
-
-`collect-sbir-awards` is an optional live public API collector for SBIR/STTR award records. It requires `HAILMARY_LOCAL_ONLY=false` and `HAILMARY_ENABLE_WEB_RESEARCH=true`. Start with `--dry-run`; a real run sends only the `--company` values you provide to the SBIR/STTR public API, keeps only exact firm-name matches, saves the API request URL as the source, and writes a private JSON results file under `data/research-results/`. Hail Mary does not save SBIR/STTR contact phone or email fields into generated evidence text.
-
-`import-research-results` reads a local JSON file of manually collected external research and appends validated records to the ignored evidence stores under `data/processed/`. Use `--dry-run` first to validate the file and preview new or duplicate records without writing anything. The command does not fetch websites or call APIs. Each imported result must name the deal by `deal_id` or exact `company_name`, include provider details, `retrieved_at`, either `source_url` or `source_api`, confidence, licensing notes, and the evidence text to cite later. For known public providers such as SEC, SAM.gov, USAspending, SBIR/STTR, USPTO, and GitHub, Hail Mary checks that URL-like source references use that provider's website host. A minimal file looks like:
-
-```json
-{
-  "results": [
-    {
-      "company_name": "ExampleCo",
-      "provider_id": "sec_form_d",
-      "provider_name": "SEC EDGAR Form D search",
-      "title": "ExampleCo Form D",
-      "text": "ExampleCo filed a Form D for a $1,000,000 offering.",
-      "retrieved_at": "2026-01-01T12:00:00Z",
-      "source_url": "https://www.sec.gov/example",
-      "confidence": "high: exact company match",
-      "licensing_notes": "Public government source."
-    }
-  ]
-}
-```
-
-For built-in provider IDs, Hail Mary uses the provider's source kind automatically. If
-you provide `source_kind`, it must match the built-in provider. `source_api` may be a
-plain provider source label or an `http://` or `https://` endpoint, but endpoint URLs
-cannot include an inline username or password.
+Hail Mary also keeps internal maintenance commands for testing individual pipeline
+stages, portfolio ledger maintenance, research fixtures, synthetic evals, and model
+packet debugging. They are hidden from top-level help and are not the normal operator
+workflow, but they remain callable by exact command name for development and recovery
+work.
 
 ## GitHub Workflow
 
