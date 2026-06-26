@@ -33,6 +33,7 @@ from hailmary.schemas.agents import (
     AgentRole,
     AgentSummaryPoint,
     AgentValidationIssue,
+    AgentValidationResult,
 )
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
@@ -1211,26 +1212,20 @@ def _validated_deterministic_recommendation_references(
     packet = _full_evidence_validation_packet(store, scored_deal)
     safe_references: list[AgentEvidenceReference] = []
     for reference in references:
-        recommendation = AgentRecommendationRationale(
-            recommendation=scored_deal.recommendation,
-            check_size=scored_deal.check_size,
-            reason="INFERRED: Rule-based recommendation citation validation.",
-            evidence=[reference],
-        )
-        validation = validate_agent_output(
-            AgentReviewOutput(
-                deal_id=scored_deal.deal_id,
-                company_name=scored_deal.company_name,
-                agent_role=AgentRole.FINAL_DECISION,
-                summary=[
-                    AgentSummaryPoint(
-                        summary="UNVERIFIED: Citation validation placeholder.",
-                        unsupported=True,
-                    )
-                ],
-                recommendation=recommendation,
-            ),
+        record_validation = _validate_deterministic_recommendation_reference(
+            AgentEvidenceReference(evidence_id=reference.evidence_id),
             packet,
+            scored_deal,
+        )
+        if any(
+            issue.location.startswith("recommendation.evidence")
+            for issue in record_validation.issues
+        ):
+            continue
+        validation = _validate_deterministic_recommendation_reference(
+            reference,
+            packet,
+            scored_deal,
         )
         if not any(
             issue.location.startswith("recommendation.evidence")
@@ -1239,6 +1234,33 @@ def _validated_deterministic_recommendation_references(
             safe_references.append(reference)
     return safe_references
 
+
+def _validate_deterministic_recommendation_reference(
+    reference: AgentEvidenceReference,
+    packet: AgentInputPacket,
+    scored_deal: ScoredDeal,
+) -> AgentValidationResult:
+    recommendation = AgentRecommendationRationale(
+        recommendation=scored_deal.recommendation,
+        check_size=scored_deal.check_size,
+        reason="INFERRED: Rule-based recommendation citation validation.",
+        evidence=[reference],
+    )
+    return validate_agent_output(
+        AgentReviewOutput(
+            deal_id=scored_deal.deal_id,
+            company_name=scored_deal.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            summary=[
+                AgentSummaryPoint(
+                    summary="UNVERIFIED: Citation validation placeholder.",
+                    unsupported=True,
+                )
+            ],
+            recommendation=recommendation,
+        ),
+        packet,
+    )
 
 def _full_evidence_validation_packet(
     store: EvidenceStore,
