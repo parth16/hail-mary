@@ -23,7 +23,8 @@ from hailmary.schemas.agents import (
 )
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
-from hailmary.schemas.scoring import Recommendation, ScoredDeal
+from hailmary.schemas.scoring import ScoredDeal
+from hailmary.scoring.portfolio import portfolio_rank_key, portfolio_scenario
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -170,6 +171,7 @@ def prepare_agent_packets(
     output_dir = config.data_dir / "agent-packets"
     _ensure_private_directory(output_dir, private_root=config.data_dir)
     packet_created_at = created_at or datetime.now(UTC)
+    scenario = portfolio_scenario(config)
     packet_files: list[AgentPacketFile] = []
     packet_inputs: list[tuple[IngestedDeal, EvidenceStore, ScoredDeal]] = []
 
@@ -193,7 +195,7 @@ def prepare_agent_packets(
         ranking_scored_deal = score_evidence_store(
             store,
             config=config,
-            capital_remaining=max(config.capital_budget, config.max_check),
+            capital_remaining=max(scenario.allocatable_capital, config.max_check),
         )
         packet_inputs.append((deal, store, ranking_scored_deal))
 
@@ -232,15 +234,11 @@ def _score_with_ranked_capital_allocation(
     *,
     config: AppConfig,
 ) -> dict[int, ScoredDeal]:
-    remaining_capital = config.capital_budget
+    remaining_capital = portfolio_scenario(config).allocatable_capital
     scored_by_index: dict[int, ScoredDeal] = {}
     ranked_inputs = sorted(
         enumerate(packet_inputs),
-        key=lambda item: (
-            item[1][2].recommendation == Recommendation.INVEST,
-            item[1][2].total_score,
-        ),
-        reverse=True,
+        key=lambda item: portfolio_rank_key(item[1][2]),
     )
     for index, (_, store, _) in ranked_inputs:
         scored_deal = score_evidence_store(

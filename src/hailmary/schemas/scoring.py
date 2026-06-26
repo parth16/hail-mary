@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from hailmary.config import CHECK_SIZE_TIERS
 
 
 class Recommendation(StrEnum):
@@ -69,6 +72,18 @@ class ScoredDeal(BaseModel):
     capital_remaining_after: int | None = None
     memo_path: Path | None = None
     portfolio_rank: int | None = None
+
+    @model_validator(mode="after")
+    def check_size_matches_recommendation(self) -> Self:
+        if self.check_size not in CHECK_SIZE_TIERS:
+            raise ValueError(
+                "check_size must be one of $0, $1K, $2.5K, $5K, $7.5K, or $10K."
+            )
+        if self.recommendation == Recommendation.PASS and self.check_size != 0:
+            raise ValueError("PASS recommendations must use a $0 check size.")
+        if self.recommendation == Recommendation.INVEST and self.check_size == 0:
+            raise ValueError("INVEST recommendations must use a nonzero check size.")
+        return self
 
     @property
     def triggered_kill_gates(self) -> list[KillGate]:
