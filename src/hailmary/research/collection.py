@@ -20,6 +20,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from hailmary.config import AppConfig, ConfigError, validate_local_state
 
+from .matching import (
+    CompanyMatch,
+    CompanyMatchKind,
+    best_company_match,
+    classify_company_match,
+    normalize_company_name,
+    normalize_company_slug,
+)
 from .providers import builtin_research_providers
 from .schemas import ResearchProvider, ResearchResultInput, ResearchResultsFile
 from .source_urls import (
@@ -642,6 +650,7 @@ class ResearchCollectionRunSummary(BaseModel):
     provider_ids: list[str]
     deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
     skipped_non_exact_company_names: list[str] = Field(default_factory=list)
+    match_details: list[CompanyMatch] = Field(default_factory=list)
 
     @property
     def deal_count(self) -> int:
@@ -663,6 +672,7 @@ class UsaspendingCollectionRunSummary(BaseModel):
     endpoint: str = USASPENDING_AWARDS_ENDPOINT
     deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    match_details: list[CompanyMatch] = Field(default_factory=list)
 
     @property
     def deal_count(self) -> int:
@@ -680,6 +690,7 @@ class SbirCollectionRunSummary(BaseModel):
     endpoint: str = SBIR_AWARDS_ENDPOINT
     deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    match_details: list[CompanyMatch] = Field(default_factory=list)
 
     @property
     def deal_count(self) -> int:
@@ -697,6 +708,7 @@ class SecFormDCollectionRunSummary(BaseModel):
     endpoint: str = SEC_FORM_D_ATOM_ENDPOINT
     deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    match_details: list[CompanyMatch] = Field(default_factory=list)
 
     @property
     def deal_count(self) -> int:
@@ -714,6 +726,7 @@ class GitHubRepositoryCollectionRunSummary(BaseModel):
     endpoint: str = GITHUB_REPOSITORY_SEARCH_ENDPOINT
     deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    match_details: list[CompanyMatch] = Field(default_factory=list)
 
     @property
     def deal_count(self) -> int:
@@ -1385,6 +1398,14 @@ def prepare_public_research_results(
             for result in results_file.results
         ],
     )
+    match_details = _source_result_match_details(
+        requested_company_names=companies,
+        source_results=[
+            result
+            for _source_file, results_file in source_results
+            for result in results_file.results
+        ],
+    )
     results: list[ResearchResultInput] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
@@ -1408,6 +1429,7 @@ def prepare_public_research_results(
             provider_ids=provider_ids,
             deals=deal_summaries,
             skipped_non_exact_company_names=skipped_non_exact_company_names,
+            match_details=match_details,
         )
 
     try:
@@ -1438,6 +1460,7 @@ def prepare_public_research_results(
         provider_ids=provider_ids,
         deals=deal_summaries,
         skipped_non_exact_company_names=skipped_non_exact_company_names,
+        match_details=match_details,
     )
 
 
@@ -1479,6 +1502,7 @@ def collect_usaspending_awards(
     awards_client = client or UrlLibUsaspendingAwardsClient()
     results: list[ResearchResultInput] = []
     run_warnings: list[str] = []
+    match_details: list[CompanyMatch] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
         deal_results: list[ResearchResultInput] = []
@@ -1496,7 +1520,9 @@ def collect_usaspending_awards(
                     recipient_name = _usaspending_raw_recipient_name(raw_award)
                     if recipient_name is None:
                         continue
-                    if not _exact_company_name_match(deal.company_name, recipient_name):
+                    match = classify_company_match(deal.company_name, recipient_name)
+                    match_details.append(match)
+                    if not match.import_ready:
                         continue
                     award = _validate_usaspending_exact_award(raw_award, deal=deal)
                     dedupe_key = award.generated_internal_id or award.award_id
@@ -1553,6 +1579,7 @@ def collect_usaspending_awards(
             collected_at=collected_at,
             deals=deal_summaries,
             warnings=run_warnings,
+            match_details=match_details,
         )
 
     try:
@@ -1582,6 +1609,7 @@ def collect_usaspending_awards(
         collected_at=collected_at,
         deals=deal_summaries,
         warnings=run_warnings,
+        match_details=match_details,
     )
 
 
@@ -1623,6 +1651,7 @@ def collect_sbir_awards(
     awards_client = client or UrlLibSbirAwardsClient()
     results: list[ResearchResultInput] = []
     run_warnings: list[str] = []
+    match_details: list[CompanyMatch] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
         deal_results: list[ResearchResultInput] = []
@@ -1646,7 +1675,9 @@ def collect_sbir_awards(
                     firm = _sbir_raw_firm(raw_award)
                     if firm is None:
                         continue
-                    if not _exact_company_name_match(deal.company_name, firm):
+                    match = classify_company_match(deal.company_name, firm)
+                    match_details.append(match)
+                    if not match.import_ready:
                         continue
                     award = _validate_sbir_exact_award(raw_award, deal=deal)
                     dedupe_key = _sbir_award_dedupe_key(award)
@@ -1703,6 +1734,7 @@ def collect_sbir_awards(
             collected_at=collected_at,
             deals=deal_summaries,
             warnings=run_warnings,
+            match_details=match_details,
         )
 
     try:
@@ -1732,6 +1764,7 @@ def collect_sbir_awards(
         collected_at=collected_at,
         deals=deal_summaries,
         warnings=run_warnings,
+        match_details=match_details,
     )
 
 
@@ -1775,6 +1808,7 @@ def collect_sec_form_d_filings(
     )
     results: list[ResearchResultInput] = []
     run_warnings: list[str] = []
+    match_details: list[CompanyMatch] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
         deal_results: list[ResearchResultInput] = []
@@ -1794,7 +1828,9 @@ def collect_sec_form_d_filings(
                     issuer_name = _sec_form_d_raw_issuer_name(raw_filing)
                     if issuer_name is None:
                         continue
-                    if not _exact_company_name_match(deal.company_name, issuer_name):
+                    match = classify_company_match(deal.company_name, issuer_name)
+                    match_details.append(match)
+                    if not match.import_ready:
                         continue
                     filing = _validate_sec_form_d_exact_filing(raw_filing, deal=deal)
                     dedupe_key = filing.accession_number
@@ -1850,6 +1886,7 @@ def collect_sec_form_d_filings(
             collected_at=collected_at,
             deals=deal_summaries,
             warnings=run_warnings,
+            match_details=match_details,
         )
 
     try:
@@ -1879,6 +1916,7 @@ def collect_sec_form_d_filings(
         collected_at=collected_at,
         deals=deal_summaries,
         warnings=run_warnings,
+        match_details=match_details,
     )
 
 
@@ -1920,6 +1958,7 @@ def collect_github_repositories(
     repository_client = client or UrlLibGitHubRepositorySearchClient()
     results: list[ResearchResultInput] = []
     run_warnings: list[str] = []
+    match_details: list[CompanyMatch] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
         deal_results: list[ResearchResultInput] = []
@@ -1937,10 +1976,12 @@ def collect_github_repositories(
                     repositories_response.results,
                     deal.company_name,
                 ):
-                    if not _github_raw_repository_matches_company(
+                    match = _github_repository_company_match(
                         raw_repository,
                         deal.company_name,
-                    ):
+                    )
+                    match_details.append(match)
+                    if not match.import_ready:
                         continue
                     repository = _validate_github_exact_repository(
                         raw_repository,
@@ -2004,6 +2045,7 @@ def collect_github_repositories(
             collected_at=collected_at,
             deals=deal_summaries,
             warnings=run_warnings,
+            match_details=match_details,
         )
 
     try:
@@ -2033,6 +2075,7 @@ def collect_github_repositories(
         collected_at=collected_at,
         deals=deal_summaries,
         warnings=run_warnings,
+        match_details=match_details,
     )
 
 
@@ -2478,7 +2521,7 @@ def _github_raw_repository_matches_company(
     raw_repository: dict[str, Any],
     company_name: str,
 ) -> bool:
-    return _github_repository_match_priority(raw_repository, company_name) < 2
+    return _github_repository_company_match(raw_repository, company_name).import_ready
 
 
 def _prioritize_github_repository_matches(
@@ -2506,7 +2549,7 @@ def _github_repository_match_priority(
 ) -> int:
     requested_slug = _normalize_company_slug(company_name)
     if not requested_slug:
-        return 2
+        return 3
     owner = raw_repository.get("owner")
     if isinstance(owner, dict):
         owner_login = owner.get("login")
@@ -2524,7 +2567,63 @@ def _github_repository_match_priority(
     name = raw_repository.get("name")
     if isinstance(name, str) and _normalize_company_slug(name) == requested_slug:
         return 1
-    return 2
+    match = _github_repository_company_match(raw_repository, company_name)
+    if match.kind == CompanyMatchKind.RELATED:
+        return 2
+    return 3
+
+
+def _github_repository_company_match(
+    raw_repository: dict[str, Any],
+    company_name: str,
+) -> CompanyMatch:
+    requested_slug = _normalize_company_slug(company_name)
+    owner_login = _github_raw_owner_login(raw_repository)
+    if owner_login is not None and _normalize_company_slug(owner_login) == requested_slug:
+        return CompanyMatch(
+            requested_name=company_name,
+            candidate_name=owner_login,
+            kind=CompanyMatchKind.EXACT,
+            reason="GitHub owner slug matches the normalized company name exactly.",
+            normalized_requested=_normalize_company_name(company_name),
+            normalized_candidate=_normalize_company_name(owner_login),
+        )
+
+    repository_name = raw_repository.get("name")
+    if (
+        isinstance(repository_name, str)
+        and _normalize_company_slug(repository_name) == requested_slug
+    ):
+        full_name = raw_repository.get("full_name")
+        display_name = full_name if isinstance(full_name, str) and full_name else repository_name
+        return CompanyMatch(
+            requested_name=company_name,
+            candidate_name=display_name,
+            kind=CompanyMatchKind.LIKELY,
+            reason=(
+                "GitHub repository name matches, but the owner does not. Operator "
+                "validation is required before import."
+            ),
+            normalized_requested=_normalize_company_name(company_name),
+            normalized_candidate=_normalize_company_name(repository_name),
+        )
+
+    candidate_name = raw_repository.get("full_name")
+    if not isinstance(candidate_name, str) or not candidate_name.strip():
+        candidate_name = repository_name if isinstance(repository_name, str) else ""
+    return classify_company_match(company_name, candidate_name)
+
+
+def _github_raw_owner_login(raw_repository: dict[str, Any]) -> str | None:
+    owner = raw_repository.get("owner")
+    if isinstance(owner, dict):
+        owner_login = owner.get("login")
+        if isinstance(owner_login, str) and owner_login.strip():
+            return owner_login.strip()
+    owner_login = raw_repository.get("owner_login")
+    if isinstance(owner_login, str) and owner_login.strip():
+        return owner_login.strip()
+    return None
 
 
 def _validate_usaspending_exact_award(
@@ -3309,7 +3408,7 @@ def _clean_company_names(company_names: list[str]) -> list[str]:
     seen: set[str] = set()
     deduped: list[str] = []
     for company_name in cleaned:
-        normalized = _normalize_company_name(company_name)
+        normalized = company_name.casefold()
         if normalized in seen:
             continue
         seen.add(normalized)
@@ -3318,11 +3417,7 @@ def _clean_company_names(company_names: list[str]) -> list[str]:
 
 
 def _exact_company_name_match(query_company_name: str, result_company_name: str) -> bool:
-    query = _normalize_company_name(query_company_name)
-    result = _normalize_company_name(result_company_name)
-    if not query or not result:
-        return False
-    return query == result
+    return classify_company_match(query_company_name, result_company_name).import_ready
 
 
 def _skipped_non_exact_company_names(
@@ -3330,29 +3425,43 @@ def _skipped_non_exact_company_names(
     requested_company_names: list[str],
     source_results: list[PublicSourceSearchResult],
 ) -> list[str]:
-    requested = [_normalize_company_name(company_name) for company_name in requested_company_names]
     skipped: list[str] = []
     seen: set[str] = set()
     for result in source_results:
-        if any(
-            _exact_company_name_match(company_name, result.company_name)
-            for company_name in requested_company_names
-        ):
+        match = best_company_match(requested_company_names, result.company_name)
+        if match.import_ready:
             continue
         normalized = _normalize_company_name(result.company_name)
-        if not normalized or normalized in requested or normalized in seen:
+        if not normalized or normalized in seen:
             continue
         seen.add(normalized)
         skipped.append(result.company_name)
     return skipped
 
 
+def _source_result_match_details(
+    *,
+    requested_company_names: list[str],
+    source_results: list[PublicSourceSearchResult],
+) -> list[CompanyMatch]:
+    details: list[CompanyMatch] = []
+    seen: set[tuple[str, str, str]] = set()
+    for result in source_results:
+        match = best_company_match(requested_company_names, result.company_name)
+        key = (match.requested_name, match.candidate_name, match.kind.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        details.append(match)
+    return details
+
+
 def _normalize_company_name(value: str) -> str:
-    return re.sub(r"\s+", " ", value.casefold()).strip()
+    return normalize_company_name(value)
 
 
 def _normalize_company_slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    return normalize_company_slug(value)
 
 
 def _provider_by_id(provider_id: str) -> ResearchProvider:

@@ -54,6 +54,7 @@ from hailmary.portfolio import (
     portfolio_status as build_portfolio_status,
 )
 from hailmary.research import (
+    CompanyMatch,
     MeridianWorkflowError,
     ResearchCollectionError,
     ResearchImportError,
@@ -1493,6 +1494,12 @@ def evaluate_deal(
                 "before scoring."
             )
         )
+        renderables.append(
+            _plain(
+                "Research summary: "
+                f"{_research_summary_counts_text(research_workflow)}."
+            )
+        )
         if research_workflow.live_collection_enabled:
             renderables.append(_plain("Live public research ran because web research is enabled."))
         else:
@@ -1848,6 +1855,7 @@ def research_workflow_command(
                 "ready_to_import_count": result.ready_to_import_count,
                 "blocking_issue_count": result.blocking_issue_count,
                 "no_prepared_result_companies": result.no_prepared_result_companies,
+                "summary": result.summary.model_dump(mode="json"),
                 "artifacts": [
                     artifact.model_dump(mode="json") for artifact in result.artifacts
                 ],
@@ -1890,6 +1898,12 @@ def _research_workflow_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
             f"Sources: {result.planned_source_count} planned, "
             f"{result.manual_task_count} need manual or local-file work, "
             f"{result.live_collectable_task_count} can be collected live."
+        )
+    )
+    lines.append(
+        _plain(
+            "Summary: "
+            f"{_research_summary_counts_text(result)}."
         )
     )
     if result.live_collection_enabled:
@@ -1952,6 +1966,18 @@ def _research_workflow_collection_lines(
         )
     else:
         lines.append(_plain(f"{source_name}: no import-ready results were prepared."))
+    lines.append(
+        _plain(
+            f"{source_name}: status {_research_status_label(collection.status.value)}."
+        )
+    )
+    if collection.incomplete_search:
+        lines.append(
+            _plain(
+                f"{source_name}: search was incomplete, so do not treat this as "
+                "clean evidence that no public results exist."
+            )
+        )
     no_result_companies = collection.no_result_companies
     if no_result_companies:
         lines.append(
@@ -1965,8 +1991,82 @@ def _research_workflow_collection_lines(
                 f"{', '.join(skipped_non_exact)}."
             )
         )
+    match_counts = _research_match_counts(collection)
+    if match_counts:
+        lines.append(_plain(f"{source_name}: match details: {match_counts}."))
+    for skipped_match in _research_skipped_match_lines(collection):
+        lines.append(_plain(f"{source_name}: {skipped_match}"))
     for warning in collection.warnings:
         lines.append(_plain(f"{source_name} warning: {warning}"))
+    return lines
+
+
+def _research_status_label(status: str) -> str:
+    return status.replace("_", " ")
+
+
+def _research_summary_counts_text(result: ResearchWorkflowRunSummary) -> str:
+    summary = result.summary
+    failed_provider_count = _research_count_phrase(
+        summary.failed_provider_count,
+        "failed provider",
+    )
+    incomplete_search_count = _research_count_phrase(
+        summary.incomplete_search_count,
+        "incomplete search",
+        "incomplete searches",
+    )
+    warning_count = _research_count_phrase(summary.warning_count, "warning")
+    return (
+        f"{failed_provider_count}, {incomplete_search_count}, {warning_count}"
+    )
+
+
+def _research_count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+    label = singular if count == 1 else plural or f"{singular}s"
+    return f"{count} {label}"
+
+
+def _research_match_counts(collection: ResearchWorkflowCollectionSummary) -> str:
+    counts: dict[str, int] = {}
+    for match in collection.match_details:
+        counts[match.kind.value] = counts.get(match.kind.value, 0) + 1
+    return ", ".join(
+        f"{count} {_research_status_label(kind)}"
+        for kind, count in sorted(counts.items())
+    )
+
+
+def _research_skipped_match_lines(
+    collection: ResearchWorkflowCollectionSummary,
+) -> list[str]:
+    return _research_skipped_match_detail_lines(collection.match_details)
+
+
+def _research_skipped_match_detail_lines(
+    match_details: Sequence[CompanyMatch],
+) -> list[str]:
+    lines: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for match in match_details:
+        if match.import_ready:
+            continue
+        key = (match.kind.value, match.requested_name, match.candidate_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(
+            "skipped "
+            f"{_research_status_label(match.kind.value)} match "
+            f"{match.candidate_name} for {match.requested_name}: {match.reason}"
+        )
+        if len(lines) == 5:
+            remaining = sum(
+                1 for item in match_details if not item.import_ready
+            ) - len(seen)
+            if remaining > 0:
+                lines.append(f"skipped {remaining} additional non-exact matches.")
+            break
     return lines
 
 
@@ -2570,7 +2670,7 @@ def collect_github_repositories_command(
         ),
     ] = None,
 ) -> None:
-    """Collect public GitHub repository evidence for exact owner or repository matches."""
+    """Collect public GitHub repository evidence for exact owner matches."""
 
     config = _config_from_options(data_dir)
     try:
@@ -2598,7 +2698,11 @@ def collect_github_repositories_command(
                     f"A live run can make repository-name, user-owner, and "
                     f"organization-owner searches, requesting up to {limit} repository "
                     "records per page for up to 5 pages per company while looking for "
-                    "exact GitHub owner or repository-name matches."
+                    "exact GitHub owner matches."
+                ),
+                _plain(
+                    "Repository-name-only matches are reported as likely matches and "
+                    "skipped until an operator validates the entity."
                 ),
                 _plain("No GitHub API requests were sent and no results file was saved."),
             ],
@@ -2612,7 +2716,7 @@ def collect_github_repositories_command(
         ]
         lines = [
             _plain(
-                f"No exact GitHub owner or repository-name {result_word} were found "
+                f"No exact GitHub owner {result_word} were found "
                 f"for {result.deal_count} {company_word}."
             ),
             _plain(
@@ -2623,6 +2727,8 @@ def collect_github_repositories_command(
         ]
         for warning in result.warnings:
             lines.append(_plain(f"Warning: {warning}"))
+        for skipped_match in _research_skipped_match_detail_lines(result.match_details):
+            lines.append(_plain(skipped_match))
         _print_section("GitHub repository results", lines, style="yellow")
         return
 
@@ -2640,7 +2746,8 @@ def collect_github_repositories_command(
         ),
         _plain(f"Saved the private JSON results file to {result.output_path}."),
         _plain(
-            "Only exact GitHub owner or repository-name matches were prepared. "
+            "Only exact GitHub owner matches were prepared. "
+            "Repository-name-only matches are skipped until an operator validates the entity. "
             "Hail Mary saved repository metadata only and did not clone code or fetch "
             "README files."
         ),
@@ -2648,6 +2755,8 @@ def collect_github_repositories_command(
     ]
     for warning in result.warnings:
         lines.append(_plain(f"Warning: {warning}"))
+    for skipped_match in _research_skipped_match_detail_lines(result.match_details):
+        lines.append(_plain(skipped_match))
     zero_result_companies = [deal.company_name for deal in result.deals if deal.result_count == 0]
     if zero_result_companies:
         lines.append(
