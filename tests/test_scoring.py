@@ -506,7 +506,11 @@ def test_net_return_math_reports_missing_inputs_without_inventing_data() -> None
         "gross exit scenario",
     ]
     assert "did not invent a net return" in scored.net_return.explanation
-    assert _score_factor(scored, "Valuation and net return").evidence_ids == ["ev_terms"]
+    assert _score_factor(scored, "Valuation and net return").evidence_ids == [
+        "ev_terms",
+        "ev_funding",
+        "ev_traction",
+    ]
 
 
 def test_net_return_math_uses_cited_inputs_when_available() -> None:
@@ -621,6 +625,147 @@ def test_readable_pricing_is_required_before_clearing_key_terms() -> None:
     )
     assert missing_terms_gate.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
     assert scored.net_return.missing_inputs == ["machine-readable entry valuation"]
+
+
+def test_readable_pricing_skips_unreadable_higher_priority_candidates() -> None:
+    evidence = [
+        _evidence("ev_post_money", "Post-money valuation TBD."),
+        _evidence("ev_cap", "Valuation cap $8M."),
+        _evidence("ev_round", "Round size $1M."),
+        _evidence("ev_discount", "Discount 20%."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("post-money valuation", "TBD", "ev_post_money"),
+        _claim("valuation cap", "$8M", "ev_cap"),
+        _claim("round size", "$1M", "ev_round"),
+        _claim("discount", "20%", "ev_discount"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    missing_terms_gate = next(
+        gate
+        for gate in scored.kill_gates
+        if gate.name == "Missing key investment terms"
+    )
+    assert not missing_terms_gate.triggered
+    assert missing_terms_gate.support_status == ScoreSupportStatus.VERIFIED
+    assert missing_terms_gate.evidence_ids == ["ev_cap"]
+    assert scored.net_return.entry_valuation == 8_000_000
+    assert "machine-readable entry valuation" not in scored.net_return.missing_inputs
+
+
+def test_key_terms_gate_cites_readable_pricing_evidence_when_claims_are_crowded() -> None:
+    evidence = [
+        _evidence("ev_discount", "Discount 20%."),
+        _evidence("ev_minimum", "Minimum investment $1K."),
+        _evidence("ev_round", "Round size $1M."),
+        _evidence("ev_security", "Security is a SAFE."),
+        _evidence("ev_pro_rata", "Pro rata rights are included."),
+        _evidence("ev_cap", "Valuation cap $8M."),
+    ]
+    claims = [
+        _claim("discount", "20%", "ev_discount"),
+        _claim("minimum investment", "$1K", "ev_minimum"),
+        _claim("round size", "$1M", "ev_round"),
+        _claim("security", "SAFE", "ev_security"),
+        _claim("pro rata", "included", "ev_pro_rata"),
+        _claim("valuation cap", "$8M", "ev_cap"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    missing_terms_gate = next(
+        gate
+        for gate in scored.kill_gates
+        if gate.name == "Missing key investment terms"
+    )
+    assert not missing_terms_gate.triggered
+    assert missing_terms_gate.evidence_ids == ["ev_cap"]
+
+
+def test_valuation_factor_cites_stage_and_traction_evidence() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_stage", "Seed stage."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    valuation_factor = _score_factor(scored, "Valuation and net return")
+    assert valuation_factor.evidence_ids == ["ev_terms", "ev_stage", "ev_traction"]
+
+
+def test_non_positive_entry_valuation_does_not_clear_pricing_gate() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $0. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$0", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    missing_terms_gate = next(
+        gate
+        for gate in scored.triggered_kill_gates
+        if gate.name == "Missing key investment terms"
+    )
+    assert missing_terms_gate.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert scored.net_return.entry_valuation is None
+
+
+def test_does_not_have_customers_does_not_count_as_positive_pmf() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Pre-seed company does not have customers. Valuation cap $30M. "
+            "Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$30M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert scored.valuation_risk == ValuationRisk.HIGH
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in scored.triggered_kill_gates
+    )
 
 
 @pytest.mark.parametrize(

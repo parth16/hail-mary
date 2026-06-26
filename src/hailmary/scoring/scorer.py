@@ -166,6 +166,12 @@ NEGATED_TRACTION_PATTERNS = (
         r"(?:usage|retention|growth|pilots?|beta|lois?|waitlist)\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"\b(?:has|have|does|do|did)\s+not\s+have\s+"
+        rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)",
+        re.IGNORECASE,
+    ),
 )
 BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 NEGATED_FUNDING_PATTERNS = (
@@ -484,7 +490,11 @@ def _kill_gates(
                 if not has_pricing_term
                 else "A verified valuation or valuation-cap term is available."
             ),
-            evidence_ids=_claim_evidence_ids(verified_claims),
+            evidence_ids=(
+                _pricing_evidence_ids(verified_claims)
+                if has_pricing_term
+                else _claim_evidence_ids(verified_claims)
+            ),
             support_status=(
                 ScoreSupportStatus.VERIFIED
                 if has_pricing_term
@@ -558,7 +568,13 @@ def _score_factors(
         _deal_terms_factor(verified_claims, valid_conflicts),
         _stage_pmf_factor(store, company_stage, pmf_level),
         _fundability_factor(store, verified_claims, pmf_level, fundability_risk),
-        _valuation_net_return_factor(valuation_risk, net_return),
+        _valuation_net_return_factor(
+            store,
+            company_stage,
+            pmf_level,
+            valuation_risk,
+            net_return,
+        ),
         _missing_data_factor(
             store,
             verified_claims,
@@ -753,6 +769,9 @@ def _fundability_factor(
 
 
 def _valuation_net_return_factor(
+    store: EvidenceStore,
+    company_stage: CompanyStage,
+    pmf_level: PMFLevel,
     valuation_risk: ValuationRisk,
     net_return: NetReturnEstimate,
 ) -> ScoreFactor:
@@ -776,7 +795,12 @@ def _valuation_net_return_factor(
         score=score,
         max_score=20,
         explanation=f"Valuation risk is {valuation_risk}. {net_return.explanation}",
-        evidence_ids=net_return.evidence_ids,
+        evidence_ids=_valuation_factor_evidence_ids(
+            net_return,
+            store,
+            company_stage,
+            pmf_level,
+        ),
         support_status=net_return.support_status,
         missing_inputs=net_return.missing_inputs,
     )
@@ -1121,11 +1145,16 @@ def _float_text(raw_value: str) -> float | None:
 
 
 def _valuation_claim(verified_claims: list[ClaimRecord]) -> ClaimRecord | None:
+    fallback_claim: ClaimRecord | None = None
     for label in ("post-money valuation", "valuation cap", "pre-money valuation"):
         for claim in verified_claims:
-            if claim.label == label:
+            if claim.label != label:
+                continue
+            if fallback_claim is None:
+                fallback_claim = claim
+            if _entry_valuation(verified_claims, claim) is not None:
                 return claim
-    return None
+    return fallback_claim
 
 
 def _round_size_claim(verified_claims: list[ClaimRecord]) -> ClaimRecord | None:
@@ -1140,7 +1169,7 @@ def _entry_valuation(
     valuation_claim: ClaimRecord,
 ) -> int | None:
     valuation = _claim_money_value(valuation_claim)
-    if valuation is None:
+    if valuation is None or valuation <= 0:
         return None
     if valuation_claim.label != "pre-money valuation":
         return valuation
@@ -1150,7 +1179,8 @@ def _entry_valuation(
     round_size = _claim_money_value(round_size_claim)
     if round_size is None:
         return None
-    return valuation + round_size
+    entry_valuation = valuation + round_size
+    return entry_valuation if entry_valuation > 0 else None
 
 
 def _pmf_level(evidence: list[EvidenceRecord]) -> PMFLevel:
@@ -1553,6 +1583,30 @@ def _claim_evidence_ids(claims: list[ClaimRecord]) -> list[str]:
             if citation.evidence_id not in evidence_ids:
                 evidence_ids.append(citation.evidence_id)
     return evidence_ids[:5]
+
+
+def _pricing_evidence_ids(verified_claims: list[ClaimRecord]) -> list[str]:
+    valuation_claim = _valuation_claim(verified_claims)
+    if valuation_claim is None or _entry_valuation(verified_claims, valuation_claim) is None:
+        return []
+    evidence_ids = _claim_evidence_ids([valuation_claim])
+    if valuation_claim.label == "pre-money valuation":
+        round_size_claim = _round_size_claim(verified_claims)
+        if round_size_claim is not None and _claim_money_value(round_size_claim) is not None:
+            evidence_ids.extend(_claim_evidence_ids([round_size_claim]))
+    return list(dict.fromkeys(evidence_ids))
+
+
+def _valuation_factor_evidence_ids(
+    net_return: NetReturnEstimate,
+    store: EvidenceStore,
+    company_stage: CompanyStage,
+    pmf_level: PMFLevel,
+) -> list[str]:
+    evidence_ids = list(net_return.evidence_ids)
+    evidence_ids.extend(_dedupe_evidence_ids(_stage_evidence(store.evidence, company_stage)))
+    evidence_ids.extend(_dedupe_evidence_ids(_pmf_evidence(store.evidence, pmf_level)))
+    return list(dict.fromkeys(evidence_ids))
 
 
 def _valuation_gate_evidence_ids(
