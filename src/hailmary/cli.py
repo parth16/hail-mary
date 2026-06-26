@@ -1417,6 +1417,12 @@ def evaluate_deal(
                 "before scoring."
             )
         )
+        renderables.append(
+            _plain(
+                "Research summary: "
+                f"{_research_summary_counts_text(research_workflow)}."
+            )
+        )
         if research_workflow.live_collection_enabled:
             renderables.append(_plain("Live public research ran because web research is enabled."))
         else:
@@ -1816,6 +1822,12 @@ def _research_workflow_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
             f"{result.live_collectable_task_count} can be collected live."
         )
     )
+    lines.append(
+        _plain(
+            "Summary: "
+            f"{_research_summary_counts_text(result)}."
+        )
+    )
     if result.live_collection_enabled:
         lines.append(_plain("Live public collection ran because web research is enabled."))
     else:
@@ -1876,6 +1888,18 @@ def _research_workflow_collection_lines(
         )
     else:
         lines.append(_plain(f"{source_name}: no import-ready results were prepared."))
+    lines.append(
+        _plain(
+            f"{source_name}: status {_research_status_label(collection.status.value)}."
+        )
+    )
+    if collection.incomplete_search:
+        lines.append(
+            _plain(
+                f"{source_name}: search was incomplete, so do not treat this as "
+                "clean evidence that no public results exist."
+            )
+        )
     no_result_companies = collection.no_result_companies
     if no_result_companies:
         lines.append(
@@ -1889,8 +1913,76 @@ def _research_workflow_collection_lines(
                 f"{', '.join(skipped_non_exact)}."
             )
         )
+    match_counts = _research_match_counts(collection)
+    if match_counts:
+        lines.append(_plain(f"{source_name}: match details: {match_counts}."))
+    for skipped_match in _research_skipped_match_lines(collection):
+        lines.append(_plain(f"{source_name}: {skipped_match}"))
     for warning in collection.warnings:
         lines.append(_plain(f"{source_name} warning: {warning}"))
+    return lines
+
+
+def _research_status_label(status: str) -> str:
+    return status.replace("_", " ")
+
+
+def _research_summary_counts_text(result: ResearchWorkflowRunSummary) -> str:
+    summary = result.summary
+    failed_provider_count = _research_count_phrase(
+        summary.failed_provider_count,
+        "failed provider",
+    )
+    incomplete_search_count = _research_count_phrase(
+        summary.incomplete_search_count,
+        "incomplete search",
+        "incomplete searches",
+    )
+    warning_count = _research_count_phrase(summary.warning_count, "warning")
+    return (
+        f"{failed_provider_count}, {incomplete_search_count}, {warning_count}"
+    )
+
+
+def _research_count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+    label = singular if count == 1 else plural or f"{singular}s"
+    return f"{count} {label}"
+
+
+def _research_match_counts(collection: ResearchWorkflowCollectionSummary) -> str:
+    counts: dict[str, int] = {}
+    for match in collection.match_details:
+        counts[match.kind.value] = counts.get(match.kind.value, 0) + 1
+    return ", ".join(
+        f"{count} {_research_status_label(kind)}"
+        for kind, count in sorted(counts.items())
+    )
+
+
+def _research_skipped_match_lines(
+    collection: ResearchWorkflowCollectionSummary,
+) -> list[str]:
+    lines: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for match in collection.match_details:
+        if match.import_ready:
+            continue
+        key = (match.kind.value, match.requested_name, match.candidate_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(
+            "skipped "
+            f"{_research_status_label(match.kind.value)} match "
+            f"{match.candidate_name} for {match.requested_name}: {match.reason}"
+        )
+        if len(lines) == 5:
+            remaining = sum(
+                1 for item in collection.match_details if not item.import_ready
+            ) - len(seen)
+            if remaining > 0:
+                lines.append(f"skipped {remaining} additional non-exact matches.")
+            break
     return lines
 
 

@@ -9,7 +9,6 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
@@ -49,7 +48,11 @@ from .schemas import (
     ResearchResultInput,
     ResearchResultsFile,
 )
-from .source_urls import source_reference_looks_like_url, validate_provider_source_url
+from .source_urls import (
+    source_reference_looks_like_url,
+    validate_http_url,
+    validate_provider_source_url,
+)
 
 
 class ResearchImportError(RuntimeError):
@@ -405,16 +408,16 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
                 f"Research result {display_index} uses document type {result.document_type}. "
                 "Use web_page, platform_deal_page, or memo."
             )
-        if result.source_url is not None:
+        if result.source_kind == SourceKind.MERIDIAN:
+            _validate_meridian_result_source(result, index=display_index)
+            _validate_completed_meridian_placeholder(result, index=display_index)
+            _validate_saved_meridian_licensing_notes(result, index=display_index)
+        elif result.source_url is not None:
             _validate_url_reference(
                 result.source_url,
                 index=display_index,
                 field_name="source_url",
             )
-        if result.source_kind == SourceKind.MERIDIAN:
-            _validate_meridian_result_source(result, index=display_index)
-            _validate_completed_meridian_placeholder(result, index=display_index)
-            _validate_saved_meridian_licensing_notes(result, index=display_index)
         if result.source_api is not None:
             _validate_source_api(result.source_api, index=display_index)
         _validate_known_provider_source_kind(result, index=display_index)
@@ -429,39 +432,11 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
 
 def _validate_url_reference(source_url: str, *, index: int, field_name: str) -> None:
     try:
-        parsed = urlparse(source_url)
+        validate_http_url(source_url, field_name=field_name)
     except ValueError as exc:
         raise ResearchImportError(
-            f"Research result {index} has a {field_name} that is not a valid URL."
+            f"Research result {index} {exc}."
         ) from exc
-    if parsed.scheme not in {"http", "https"}:
-        raise ResearchImportError(
-            f"Research result {index} {field_name} must start with http:// or https://."
-        )
-    try:
-        host = parsed.hostname
-    except ValueError as exc:
-        raise ResearchImportError(
-            f"Research result {index} has a {field_name} that is not a valid URL."
-        ) from exc
-    if not parsed.netloc or host is None:
-        raise ResearchImportError(
-            f"Research result {index} {field_name} must include a website host."
-        )
-    try:
-        _port = parsed.port
-    except ValueError as exc:
-        raise ResearchImportError(
-            f"Research result {index} {field_name} has an invalid port."
-        ) from exc
-    if parsed.username is not None or parsed.password is not None:
-        raise ResearchImportError(
-            f"Research result {index} {field_name} cannot include a username or password."
-        )
-    if any(character.isspace() for character in source_url):
-        raise ResearchImportError(
-            f"Research result {index} {field_name} cannot contain spaces."
-        )
 
 
 def _validate_source_api(source_api: str, *, index: int) -> None:

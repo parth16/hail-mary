@@ -40,6 +40,14 @@ from hailmary.research.collection import (
     prepare_public_research_results,
 )
 from hailmary.research.importer import ResearchImportError, import_research_results
+from hailmary.research.matching import (
+    CompanyMatch,
+    CompanyMatchKind,
+    best_company_match,
+    classify_company_match,
+    normalize_company_name,
+    normalize_company_slug,
+)
 from hailmary.research.meridian import (
     MeridianWorkflow,
     MeridianWorkflowError,
@@ -77,6 +85,8 @@ from hailmary.research.web import (
     collect_web_research,
 )
 from hailmary.research.workflow import (
+    ResearchProviderRunStatus,
+    ResearchProviderStatusSummary,
     ResearchWorkflowArtifact,
     ResearchWorkflowCollectionSummary,
     ResearchWorkflowError,
@@ -84,6 +94,7 @@ from hailmary.research.workflow import (
     ResearchWorkflowIssue,
     ResearchWorkflowRunSummary,
     ResearchWorkflowSourceSummary,
+    ResearchWorkflowSummary,
     run_research_workflow,
 )
 
@@ -108,6 +119,8 @@ __all__ = [
     "ResearchPlanRunSummary",
     "ResearchProvider",
     "ResearchProviderCategory",
+    "ResearchProviderRunStatus",
+    "ResearchProviderStatusSummary",
     "ResearchResultInput",
     "ResearchResultsFile",
     "ResearchResultsTemplateRunSummary",
@@ -121,6 +134,9 @@ __all__ = [
     "ResearchWorkflowIssue",
     "ResearchWorkflowRunSummary",
     "ResearchWorkflowSourceSummary",
+    "ResearchWorkflowSummary",
+    "CompanyMatch",
+    "CompanyMatchKind",
     "GitHubApiError",
     "GitHubRepositoryCollectionRunSummary",
     "GitHubRepositoryRecord",
@@ -153,12 +169,16 @@ __all__ = [
     "UsaspendingPageMetadata",
     "builtin_provider_adapters",
     "builtin_research_providers",
+    "best_company_match",
+    "classify_company_match",
     "collect_github_repositories",
     "collect_sbir_awards",
     "collect_sec_form_d_filings",
     "collect_usaspending_awards",
     "collect_web_research",
     "import_research_results",
+    "normalize_company_name",
+    "normalize_company_slug",
     "prepare_meridian_workflow",
     "prepare_public_research_results",
     "prepare_research_plan",

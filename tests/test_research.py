@@ -20,6 +20,7 @@ from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.research import (
+    CompanyMatchKind,
     GitHubApiError,
     GitHubRepositoryCollectionRunSummary,
     GitHubRepositorySearchResponse,
@@ -29,6 +30,7 @@ from hailmary.research import (
     ResearchImportError,
     ResearchPlanError,
     ResearchProviderCategory,
+    ResearchProviderRunStatus,
     ResearchTaskStatus,
     ResearchTemplateError,
     SbirApiError,
@@ -49,6 +51,7 @@ from hailmary.research import (
     UsaspendingCollectionRunSummary,
     WebResearchError,
     builtin_research_providers,
+    classify_company_match,
     collect_github_repositories,
     collect_sbir_awards,
     collect_sec_form_d_filings,
@@ -124,6 +127,22 @@ def test_research_result_source_kind_defaults_match_builtin_registry() -> None:
         assert result.source_kind == provider.source_kind
 
 
+def test_company_match_classifies_exact_related_likely_and_rejected() -> None:
+    exact = classify_company_match("Acme AI", "Acme AI, Inc.")
+    likely = classify_company_match("Acme AI", "AcmeAI")
+    related = classify_company_match("Acme AI", "Acme AI Federal")
+    rejected = classify_company_match("Acme AI", "Unrelated Robotics")
+
+    assert exact.kind == CompanyMatchKind.EXACT
+    assert exact.import_ready is True
+    assert likely.kind == CompanyMatchKind.LIKELY
+    assert likely.import_ready is False
+    assert related.kind == CompanyMatchKind.RELATED
+    assert related.import_ready is False
+    assert rejected.kind == CompanyMatchKind.REJECTED
+    assert rejected.import_ready is False
+
+
 def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> None:
     result = prepare_research_plan(
         config=AppConfig(data_dir=tmp_path / "data"),
@@ -149,6 +168,12 @@ def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> Non
     assert saved["deals"][0]["company_name"] == "Acme AI"
     assert saved["tasks"][0]["confidence"] == "not_collected"
     assert "provider, timestamp, exact URL" in saved["tasks"][0]["evidence_policy"]
+    assert any(
+        "source_url or source_api" in item
+        for item in saved["tasks"][0]["required_metadata"]
+    )
+    assert any("Do not copy screenshots" in item for item in saved["tasks"][0]["do_not_copy"])
+    assert saved["tasks"][0]["what_to_look_for"]
 
 
 def test_prepare_research_plan_uses_company_website_for_one_deal(tmp_path: Path) -> None:
@@ -476,6 +501,63 @@ def test_run_research_workflow_treats_live_collection_failures_as_blocking(
     error_messages = [issue.message for issue in result.issues if issue.severity == "error"]
     assert any("Could not fetch the public page." in message for message in error_messages)
     assert any("SEC User-Agent" in message for message in error_messages)
+    assert result.summary.failed_provider_count == 2
+    assert any(
+        status.provider_id == "sec_form_d"
+        and status.status == ResearchProviderRunStatus.FAILED
+        for status in result.summary.provider_statuses
+    )
+
+
+def test_run_research_workflow_tracks_incomplete_paginated_search(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=_FakeWebResearchClient({}),
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {
+                ("Acme AI", page): _usaspending_response(
+                    [
+                        _usaspending_award(
+                            recipient_name="Acme AI Federal",
+                            award_id=f"FAKE-{page}",
+                            generated_internal_id=f"CONT_AWD_FAKE_{page}",
+                        )
+                    ],
+                    has_next=True,
+                )
+                for page in range(1, 21)
+            }
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    usaspending = next(
+        collection for collection in result.collections if collection.source_id == "usaspending"
+    )
+    assert usaspending.status == ResearchProviderRunStatus.INCOMPLETE_SEARCH
+    assert usaspending.incomplete_search is True
+    assert "Acme AI" in usaspending.no_result_companies
+    assert result.summary.incomplete_search_count == 1
+    assert any(
+        status.provider_id == "usaspending"
+        and status.status == ResearchProviderRunStatus.INCOMPLETE_SEARCH
+        for status in result.summary.provider_statuses
+    )
 
 
 def test_run_research_workflow_reports_local_public_skips_and_no_results(
@@ -517,9 +599,26 @@ def test_run_research_workflow_reports_local_public_skips_and_no_results(
     )
     assert local_public.result_count == 1
     assert local_public.skipped_non_exact_company_names == ["Acme AI Holdings"]
+    assert local_public.status == ResearchProviderRunStatus.COLLECTED
+    assert {match.kind for match in local_public.match_details} == {
+        CompanyMatchKind.EXACT,
+        CompanyMatchKind.RELATED,
+    }
     assert "MissingCo" in local_public.no_result_companies
     assert result.ready_to_import_count == 1
     assert result.no_prepared_result_companies == ["MissingCo"]
+    assert result.summary.imported_record_count == 1
+    assert result.summary.failed_provider_count == 0
+    assert any(
+        status.provider_id == "local_public"
+        and status.status == ResearchProviderRunStatus.IMPORTED
+        for status in result.summary.provider_statuses
+    )
+    operator_lines = " ".join(
+        line.plain for line in cli_module._research_workflow_collection_lines(local_public)
+    )
+    assert "skipped related match Acme AI Holdings for Acme AI" in operator_lines
+    assert "operator validates the entity" in operator_lines
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
@@ -2568,6 +2667,43 @@ def test_collect_sec_form_d_filings_no_exact_results_names_companies(
         "Acme AI",
         "Beta Robotics",
     ]
+    assert any(match.kind == CompanyMatchKind.RELATED for match in result.match_details)
+
+
+def test_collect_github_repositories_skips_likely_repository_name_match(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai",
+                        full_name="unrelated/acme-ai",
+                        owner_login="unrelated",
+                    )
+                ]
+            ),
+        }
+    )
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is None
+    assert result.result_count == 0
+    assert result.match_details[0].kind == CompanyMatchKind.LIKELY
+    assert result.match_details[0].import_ready is False
 
 
 def test_collect_sec_form_d_filings_dry_run_does_not_call_api(
@@ -2951,9 +3087,9 @@ def test_collect_github_repositories_writes_private_exact_matches(
             ("Acme AI", 1): _github_repository_response(
                 [
                     _github_repository(
-                        name="acme-ai",
-                        full_name="synthetic/acme-ai",
-                        owner_login="synthetic",
+                        name="product",
+                        full_name="acme-ai/product",
+                        owner_login="acme-ai",
                     ),
                     _github_repository(
                         name="acme-ai-related",
@@ -2984,10 +3120,10 @@ def test_collect_github_repositories_writes_private_exact_matches(
     assert prepared["company_name"] == "Acme AI"
     assert prepared["provider_id"] == "github"
     assert prepared["provider_name"] == "GitHub repository search"
-    assert prepared["title"] == "GitHub repository synthetic/acme-ai"
-    assert prepared["source_url"] == "https://github.com/synthetic/acme-ai"
-    assert prepared["source_api"] == "https://api.github.com/repos/synthetic/acme-ai"
-    assert "Repository: synthetic/acme-ai." in prepared["text"]
+    assert prepared["title"] == "GitHub repository acme-ai/product"
+    assert prepared["source_url"] == "https://github.com/acme-ai/product"
+    assert prepared["source_api"] == "https://api.github.com/repos/acme-ai/product"
+    assert "Repository: acme-ai/product." in prepared["text"]
     assert "acme-ai-related" not in prepared["text"]
     assert "did not clone code" in prepared["licensing_notes"]
 
@@ -3084,9 +3220,9 @@ def test_collect_github_repositories_paginates_when_response_has_next(
             ("Acme AI", 2): _github_repository_response(
                 [
                     _github_repository(
-                        name="acme-ai",
-                        full_name="synthetic/acme-ai",
-                        owner_login="synthetic",
+                        name="product",
+                        full_name="acme-ai/product",
+                        owner_login="acme-ai",
                     )
                 ]
             ),
@@ -3186,11 +3322,11 @@ def test_collect_github_repositories_rejects_bad_source_url(
                 [
                     {
                         **_github_repository(
-                            name="acme-ai",
-                            full_name="synthetic/acme-ai",
-                            owner_login="synthetic",
+                            name="product",
+                            full_name="acme-ai/product",
+                            owner_login="acme-ai",
                         ),
-                        "html_url": "https://example.com/synthetic/acme-ai",
+                        "html_url": "https://example.com/acme-ai/product",
                     }
                 ]
             )
@@ -4285,6 +4421,11 @@ def test_prepare_public_research_results_writes_private_importable_file(
         "Acme AI Holdings",
         "Unrelated Robotics",
     ]
+    assert {match.kind for match in result.match_details} == {
+        CompanyMatchKind.EXACT,
+        CompanyMatchKind.RELATED,
+        CompanyMatchKind.REJECTED,
+    }
     saved = json.loads(result.output_path.read_text(encoding="utf-8"))
     assert {item["title"] for item in saved["results"]} == {"Acme AI Form D"}
     assert saved["results"][0]["provider_id"] == "sec_form_d"
@@ -5913,6 +6054,18 @@ def test_import_research_results_requires_plain_english_licensing_notes(
         ("https://example.com:bad/path", "invalid port"),
         ("https://example.com:99999/path", "invalid port"),
         ("https://user:token@example.com/path", "username or password"),
+        (
+            "https://www.sec.gov/example/acme-ai?token=secret",
+            "token, signature, credential",
+        ),
+        (
+            "https://www.sec.gov/example/acme-ai?redirect_url=https%3A%2F%2Fexample.com",
+            "credential, redirect",
+        ),
+        (
+            "https://www.sec.gov/example/acme%3Ftoken=secret",
+            "encoded query, fragment, or parameter delimiters",
+        ),
     ],
 )
 def test_import_research_results_rejects_unsafe_source_urls(
@@ -5943,6 +6096,14 @@ def test_import_research_results_rejects_unsafe_source_urls(
     ("source_api", "message"),
     [
         ("https://api.example.com:bad/result", "source_api has an invalid port"),
+        (
+            "https://api.example.com/result?X-Amz-Signature=secret",
+            "source_api cannot include token, signature, credential",
+        ),
+        (
+            "https://api.example.com/result?next=https%3A%2F%2Fexample.com",
+            "source_api cannot include token, signature, credential, redirect",
+        ),
         (
             "https://user:token@api.example.com/result",
             "source_api cannot include a username or password",
