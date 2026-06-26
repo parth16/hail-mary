@@ -291,6 +291,7 @@ def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
         "https://example.com/acme%3Btoken=secret/details",
         "https://example.com/acme%23token=secret",
         "https://example.com/acme%253Ftoken=secret",
+        "https://example.com/acme%2525253Ftoken=secret",
     ],
 )
 def test_research_workflow_rejects_tokenized_website_url_before_writing_plan(

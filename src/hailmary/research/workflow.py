@@ -695,13 +695,15 @@ def _clean_workflow_website_url(url: str | None) -> str | None:
         raise ResearchWorkflowError("The website URL cannot contain spaces.")
     try:
         decoded_path = parsed.path
-        for _ in range(3):
+        for _ in range(len(parsed.path) + 1):
             next_decoded_path = unquote(decoded_path, errors="strict")
             if next_decoded_path == decoded_path:
                 break
             decoded_path = next_decoded_path
             if any(delimiter in decoded_path for delimiter in ("?", "#", ";")):
                 break
+        else:
+            raise ResearchWorkflowError("The website URL is not a valid URL.")
     except UnicodeDecodeError as exc:
         raise ResearchWorkflowError("The website URL is not a valid URL.") from exc
     if (
