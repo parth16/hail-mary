@@ -39,6 +39,7 @@ from hailmary.research import (
     run_research_workflow,
 )
 from hailmary.schemas.agents import (
+    AgentEvidenceItem,
     AgentEvidenceReference,
     AgentFinding,
     AgentInputPacket,
@@ -2597,6 +2598,8 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
     class FixtureReviewClient:
         def __init__(self) -> None:
             self.request_payloads: list[str] = []
+            self.request_payloads_by_role: dict[AgentRole, list[str]] = {}
+            self.committee_contexts_by_role: dict[AgentRole, list[str]] = {}
             self.roles: list[AgentRole] = []
 
         def create_review(
@@ -2607,15 +2610,18 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
             committee_context: str | None = None,
         ) -> str:
             self.roles.append(packet.agent_role)
-            self.request_payloads.append(
-                json.dumps(
-                    openai_review_messages(
-                        packet,
-                        repair_issues=repair_issues,
-                        committee_context=committee_context,
-                    ),
-                    sort_keys=True,
-                )
+            payload = json.dumps(
+                openai_review_messages(
+                    packet,
+                    repair_issues=repair_issues,
+                    committee_context=committee_context,
+                ),
+                sort_keys=True,
+            )
+            self.request_payloads.append(payload)
+            self.request_payloads_by_role.setdefault(packet.agent_role, []).append(payload)
+            self.committee_contexts_by_role.setdefault(packet.agent_role, []).append(
+                committee_context or ""
             )
             return _golden_agent_output(packet).model_dump_json()
 
@@ -2670,7 +2676,9 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         name: os.environ.get(name)
         for name in ("HAILMARY_LLM_PROVIDER", "HAILMARY_MODEL", "OPENAI_API_KEY")
     }
+    original_cwd = Path.cwd()
     try:
+        os.chdir(safe_work_dir)
         os.environ["HAILMARY_LLM_PROVIDER"] = "openai"
         os.environ["HAILMARY_MODEL"] = "gpt-eval-fixture"
         os.environ["OPENAI_API_KEY"] = "synthetic-eval-key"
@@ -2683,6 +2691,7 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
             created_at=BUILT_AT,
         )
     finally:
+        os.chdir(original_cwd)
         for name, value in original_env.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -2738,6 +2747,15 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         research_evidence_ids=", ".join(sorted(research_evidence_ids)),
         score_evidence_ids=", ".join(sorted(score_evidence_ids)),
     )
+    final_evidence_ids = {
+        reference.evidence_id for reference in result.final_recommendation.evidence
+    }
+    _expect(
+        bool(research_evidence_ids & final_evidence_ids),
+        "Expected the final recommendation to cite imported research evidence.",
+        research_evidence_ids=", ".join(sorted(research_evidence_ids)),
+        final_evidence_ids=", ".join(sorted(final_evidence_ids)),
+    )
     _expect(
         AgentRole.FINAL_DECISION in client.roles,
         "Expected evaluate-deal to run the final model-review role.",
@@ -2781,6 +2799,15 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         not missing_output_roles,
         "Expected evaluate-deal to persist parseable model-output artifacts for every role.",
         missing_roles=", ".join(missing_output_roles),
+    )
+    final_contexts = client.committee_contexts_by_role.get(AgentRole.FINAL_DECISION, [])
+    _expect(
+        bool(final_contexts) and "supported_specialist_findings" in final_contexts[-1],
+        "Expected the final model-review request to include specialist committee context.",
+    )
+    _expect(
+        bool(final_contexts) and "Source-linked synthetic review" in final_contexts[-1],
+        "Expected specialist findings to reach the final model-review context.",
     )
     _expect(
         result.evidence_review is not None,
@@ -2826,6 +2853,12 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         not missing_fragments,
         "Expected the final evaluate-deal memo to include current run details.",
         missing_fragments=", ".join(missing_fragments),
+    )
+    imported_research_id = sorted(research_evidence_ids)[0]
+    _expect(
+        imported_research_id in memo or imported_research_id.replace("_", "\\_") in memo,
+        "Expected the final memo to cite the imported research evidence ID.",
+        imported_research_id=imported_research_id,
     )
 
     serialized_payloads = "\n".join(client.request_payloads)
@@ -3355,7 +3388,7 @@ def _store(
 
 
 def _golden_agent_output(packet: AgentInputPacket) -> AgentReviewOutput:
-    evidence = packet.evidence[0]
+    evidence = _golden_reference_evidence(packet)
     quote = evidence.text.split(".", 1)[0].strip() or evidence.text[:120].strip()
     reference = AgentEvidenceReference(evidence_id=evidence.id, quote=quote)
     recommendation = None
@@ -3399,3 +3432,11 @@ def _golden_agent_output(packet: AgentInputPacket) -> AgentReviewOutput:
         limitations=["Synthetic eval fixture output."],
         recommendation=recommendation,
     )
+
+
+def _golden_reference_evidence(packet: AgentInputPacket) -> AgentEvidenceItem:
+    if packet.agent_role == AgentRole.FINAL_DECISION:
+        for evidence in packet.evidence:
+            if "Synthetic GoldenCo public site reports" in evidence.text:
+                return evidence
+    return packet.evidence[0]
