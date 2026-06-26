@@ -131,6 +131,7 @@ def test_company_match_classifies_exact_related_likely_and_rejected() -> None:
     exact = classify_company_match("Acme AI", "Acme AI, Inc.")
     likely = classify_company_match("Acme AI", "AcmeAI")
     related = classify_company_match("Acme AI", "Acme AI Federal")
+    suffix_variant = classify_company_match("Acme LLC", "Acme LP")
     rejected = classify_company_match("Acme AI", "Unrelated Robotics")
 
     assert exact.kind == CompanyMatchKind.EXACT
@@ -139,8 +140,16 @@ def test_company_match_classifies_exact_related_likely_and_rejected() -> None:
     assert likely.import_ready is False
     assert related.kind == CompanyMatchKind.RELATED
     assert related.import_ready is False
+    assert suffix_variant.kind == CompanyMatchKind.RELATED
+    assert suffix_variant.import_ready is False
     assert rejected.kind == CompanyMatchKind.REJECTED
     assert rejected.import_ready is False
+
+
+def test_collection_company_cleaning_preserves_suffix_distinct_requests() -> None:
+    assert collection_module._clean_company_names(
+        ["Acme", " Acme ", "Acme Inc.", "acme inc."]
+    ) == ["Acme", "Acme Inc."]
 
 
 def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> None:
@@ -6059,6 +6068,10 @@ def test_import_research_results_requires_plain_english_licensing_notes(
             "token, signature, credential",
         ),
         (
+            "https://www.sec.gov/example/acme-ai?access%255Ftoken=secret",
+            "token, signature, credential",
+        ),
+        (
             "https://www.sec.gov/example/acme-ai?redirect_url=https%3A%2F%2Fexample.com",
             "credential, redirect",
         ),
@@ -6102,6 +6115,10 @@ def test_import_research_results_rejects_unsafe_source_urls(
         ("https://api.example.com:bad/result", "source_api has an invalid port"),
         (
             "https://api.example.com/result?X-Amz-Signature=secret",
+            "source_api cannot include token, signature, credential",
+        ),
+        (
+            "https://api.example.com/result?x%252Damz%252Dsignature=secret",
             "source_api cannot include token, signature, credential",
         ),
         (

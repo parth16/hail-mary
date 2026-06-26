@@ -50,8 +50,6 @@ def normalize_company_name(value: str) -> str:
     lowered = lowered.replace("&", " and ")
     lowered = re.sub(r"[^a-z0-9.]+", " ", lowered)
     tokens = [token for token in lowered.split() if token]
-    while tokens and tokens[-1].rstrip(".") in LEGAL_SUFFIXES:
-        tokens.pop()
     return " ".join(token.rstrip(".") for token in tokens).strip()
 
 
@@ -85,6 +83,30 @@ def classify_company_match(
             normalized_candidate=candidate,
         )
 
+    requested_base, requested_suffix = _split_legal_suffix(requested)
+    candidate_base, candidate_suffix = _split_legal_suffix(candidate)
+    if requested_base and requested_base == candidate_base:
+        if requested_suffix and candidate_suffix and requested_suffix != candidate_suffix:
+            return CompanyMatch(
+                requested_name=requested_name,
+                candidate_name=candidate_name,
+                kind=CompanyMatchKind.RELATED,
+                reason=(
+                    "The base company name matches, but the legal-entity suffix differs. "
+                    "Treat this as a related-name match until an operator validates the entity."
+                ),
+                normalized_requested=requested,
+                normalized_candidate=candidate,
+            )
+        return CompanyMatch(
+            requested_name=requested_name,
+            candidate_name=candidate_name,
+            kind=CompanyMatchKind.EXACT,
+            reason="The base company name matches and the legal suffix does not conflict.",
+            normalized_requested=requested,
+            normalized_candidate=candidate,
+        )
+
     requested_compact = re.sub(r"[^a-z0-9]+", "", requested)
     candidate_compact = re.sub(r"[^a-z0-9]+", "", candidate)
     if requested_compact and requested_compact == candidate_compact:
@@ -94,6 +116,33 @@ def classify_company_match(
             kind=CompanyMatchKind.LIKELY,
             reason=(
                 "The names match after removing word breaks, but this still needs "
+                "operator validation before import."
+            ),
+            normalized_requested=requested,
+            normalized_candidate=candidate,
+        )
+
+    requested_base_compact = re.sub(r"[^a-z0-9]+", "", requested_base)
+    candidate_base_compact = re.sub(r"[^a-z0-9]+", "", candidate_base)
+    if requested_base_compact and requested_base_compact == candidate_base_compact:
+        if requested_suffix and candidate_suffix and requested_suffix != candidate_suffix:
+            return CompanyMatch(
+                requested_name=requested_name,
+                candidate_name=candidate_name,
+                kind=CompanyMatchKind.RELATED,
+                reason=(
+                    "The base company name matches after removing word breaks, but the "
+                    "legal-entity suffix differs. Operator validation is required before import."
+                ),
+                normalized_requested=requested,
+                normalized_candidate=candidate,
+            )
+        return CompanyMatch(
+            requested_name=requested_name,
+            candidate_name=candidate_name,
+            kind=CompanyMatchKind.LIKELY,
+            reason=(
+                "The base names match after removing word breaks, but this still needs "
                 "operator validation before import."
             ),
             normalized_requested=requested,
@@ -172,3 +221,11 @@ def _match_rank(kind: CompanyMatchKind) -> int:
         CompanyMatchKind.RELATED: 2,
         CompanyMatchKind.REJECTED: 3,
     }[kind]
+
+
+def _split_legal_suffix(value: str) -> tuple[str, str]:
+    tokens = value.split()
+    suffix_tokens: list[str] = []
+    while tokens and tokens[-1].rstrip(".") in LEGAL_SUFFIXES:
+        suffix_tokens.insert(0, tokens.pop().rstrip("."))
+    return " ".join(tokens), " ".join(suffix_tokens)

@@ -3408,7 +3408,7 @@ def _clean_company_names(company_names: list[str]) -> list[str]:
     seen: set[str] = set()
     deduped: list[str] = []
     for company_name in cleaned:
-        normalized = _normalize_company_name(company_name)
+        normalized = company_name.casefold()
         if normalized in seen:
             continue
         seen.add(normalized)

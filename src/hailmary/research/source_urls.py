@@ -108,6 +108,13 @@ def source_reference_looks_like_url(source_reference: str) -> bool:
 
 
 def _decoded_component_has_delimiter(value: str) -> bool:
+    decoded = _recursive_unquote(value)
+    if decoded is None:
+        return True
+    return any(delimiter in decoded for delimiter in ("?", "#", ";"))
+
+
+def _recursive_unquote(value: str) -> str | None:
     decoded = value
     try:
         for _ in range(len(value) + 1):
@@ -115,18 +122,19 @@ def _decoded_component_has_delimiter(value: str) -> bool:
             if next_decoded == decoded:
                 break
             decoded = next_decoded
-            if any(delimiter in decoded for delimiter in ("?", "#", ";")):
-                return True
     except UnicodeDecodeError:
-        return True
-    return any(delimiter in decoded for delimiter in ("?", "#", ";"))
+        return None
+    return decoded
 
 
 def _query_contains_sensitive_access(query: str) -> bool:
     if not query:
         return False
     for key, _value in parse_qsl(query, keep_blank_values=True):
-        normalized_key = key.strip().casefold()
+        decoded_key = _recursive_unquote(key)
+        if decoded_key is None or "%" in decoded_key:
+            return True
+        normalized_key = decoded_key.strip().casefold()
         if normalized_key in SENSITIVE_QUERY_KEYS:
             return True
         if normalized_key.startswith(("x-amz-", "x-goog-")):
