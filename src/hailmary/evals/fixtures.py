@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import zipfile
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,7 +13,11 @@ from docx import Document
 from hailmary.agents.packets import build_agent_input_packet
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig
-from hailmary.evaluation import render_final_evaluation_memo
+from hailmary.evaluation import (
+    evaluate_deal_folder,
+    openai_review_messages,
+    render_final_evaluation_memo,
+)
 from hailmary.ingest.extractors import extract_document
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.ingest.ocr import LocalOcrResult
@@ -34,11 +40,13 @@ from hailmary.research import (
 )
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
+    AgentFinding,
     AgentInputPacket,
     AgentRecommendationRationale,
     AgentReviewOutput,
     AgentRole,
     AgentSummaryPoint,
+    AgentValidationIssue,
 )
 from hailmary.schemas.documents import DocumentType, FileType, SourceKind
 from hailmary.schemas.evidence import (
@@ -2585,6 +2593,190 @@ def run_memo_snapshot_fixture() -> None:
     )
 
 
+def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
+    class FixtureReviewClient:
+        def __init__(self) -> None:
+            self.request_payloads: list[str] = []
+            self.roles: list[AgentRole] = []
+
+        def create_review(
+            self,
+            packet: AgentInputPacket,
+            *,
+            repair_issues: Sequence[AgentValidationIssue] = (),
+            committee_context: str | None = None,
+        ) -> str:
+            self.roles.append(packet.agent_role)
+            self.request_payloads.append(
+                json.dumps(
+                    openai_review_messages(
+                        packet,
+                        repair_issues=repair_issues,
+                        committee_context=committee_context,
+                    ),
+                    sort_keys=True,
+                )
+            )
+            return _golden_agent_output(packet).model_dump_json()
+
+    safe_work_dir = work_dir.resolve(strict=False)
+    root = safe_work_dir / "pitch-decks"
+    company = root / "Synthetic GoldenCo"
+    company.mkdir(parents=True)
+    private_tail_marker = "PRIVATE_FULL_TEXT_MARKER_AT_END"
+    (company / "memo.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M. "
+        "ARR revenue growth with paid customers and retention. "
+        "Lead investor committed and seed round is active. "
+        + ("filler " * 500)
+        + private_tail_marker,
+        encoding="utf-8",
+    )
+
+    results_path = safe_work_dir / "research-results.json"
+    results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Synthetic GoldenCo",
+                        "provider_id": "company_website",
+                        "provider_name": "Company website",
+                        "title": "Synthetic GoldenCo traction page",
+                        "text": (
+                            "Synthetic GoldenCo public site reports paid customer "
+                            "growth, retained pilots, and active enterprise usage."
+                        ),
+                        "retrieved_at": "2024-01-01T12:00:00Z",
+                        "source_url": "https://example.com/synthetic-goldenco/traction",
+                        "confidence": "high: exact synthetic company match",
+                        "licensing_notes": "Synthetic public page fixture.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = AppConfig(
+        data_dir=safe_work_dir / "data",
+        local_only=False,
+        mock_llm=False,
+    )
+    client = FixtureReviewClient()
+    original_env = {
+        name: os.environ.get(name)
+        for name in ("HAILMARY_LLM_PROVIDER", "HAILMARY_MODEL", "OPENAI_API_KEY")
+    }
+    try:
+        os.environ["HAILMARY_LLM_PROVIDER"] = "openai"
+        os.environ["HAILMARY_MODEL"] = "gpt-eval-fixture"
+        os.environ["OPENAI_API_KEY"] = "synthetic-eval-key"
+        result = evaluate_deal_folder(
+            company,
+            config=config,
+            model_client=client,
+            max_concurrency=1,
+            research_results_files=[results_path],
+            created_at=BUILT_AT,
+        )
+    finally:
+        for name, value in original_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    _expect_equal(
+        result.evaluation_mode,
+        "model-backed",
+        "Expected the golden workflow to exercise model-backed evaluate-deal mode.",
+    )
+    _expect_equal(
+        result.research_imported_count,
+        1,
+        "Expected evaluate-deal to import supplied research before scoring.",
+    )
+    _expect_equal(
+        result.deterministic_score.recommendation,
+        Recommendation.INVEST,
+        "Expected the strong synthetic deal to clear rule-based scoring.",
+    )
+    _expect_equal(
+        result.final_recommendation.recommendation,
+        Recommendation.INVEST,
+        "Expected the strong synthetic deal to keep an INVEST final recommendation.",
+    )
+    _expect(
+        result.final_recommendation.check_size in {1_000, 2_500, 5_000, 7_500, 10_000},
+        "Expected evaluate-deal to return an allowed nonzero check size.",
+        actual=str(result.final_recommendation.check_size),
+    )
+    _expect(
+        AgentRole.FINAL_DECISION in client.roles,
+        "Expected evaluate-deal to run the final model-review role.",
+    )
+    _expect(
+        result.evidence_review is not None,
+        "Expected evaluate-deal to run the evidence health review.",
+    )
+
+    memo = result.final_memo_path.read_text(encoding="utf-8")
+    expected_sections = [
+        "# Hail Mary Final Evaluation: Synthetic GoldenCo",
+        "## Decision",
+        "## Rule-Based Decision And Guardrails",
+        "## Score Factors",
+        "## External Research",
+        "## Evidence Health",
+        "## Model Committee Findings",
+        "## Final Recommendation",
+        "## Evidence Cited",
+        "## Limitations",
+        "## Diligence Questions",
+    ]
+    missing_sections = [section for section in expected_sections if section not in memo]
+    _expect(
+        not missing_sections,
+        "Expected the final evaluate-deal memo to keep every operator-facing section.",
+        missing_sections=", ".join(missing_sections),
+    )
+    expected_fragments = [
+        "**Recommendation:**",
+        "**Suggested check:**",
+        "**Score:**",
+        "Imported 1 external research evidence record before scoring.",
+        (
+            "Evidence health means whether saved source records are complete and safe "
+            "enough to rely on."
+        ),
+        "Model recommendation before guardrails:",
+        "This memo is a diligence aid, not legal, tax, financial, or investment advice.",
+    ]
+    missing_fragments = [fragment for fragment in expected_fragments if fragment not in memo]
+    _expect(
+        not missing_fragments,
+        "Expected the final evaluate-deal memo to include current run details.",
+        missing_fragments=", ".join(missing_fragments),
+    )
+
+    serialized_payloads = "\n".join(client.request_payloads)
+    _expect(
+        "Synthetic GoldenCo public site reports paid customer growth" in serialized_payloads,
+        "Expected imported research evidence to reach model-review packets.",
+    )
+    leaked_private_markers = [
+        marker
+        for marker in (private_tail_marker, str(company / "memo.txt"), "input_file")
+        if marker in serialized_payloads or marker in memo
+    ]
+    _expect(
+        not leaked_private_markers,
+        "Expected evaluate-deal outputs to avoid private long-tail text and local paths.",
+        leaked_private_markers=", ".join(leaked_private_markers),
+    )
+
+
 def run_memo_v2_score_evidence_fixture() -> None:
     store = _strong_store()
     scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
@@ -3091,4 +3283,51 @@ def _store(
         evidence=evidence,
         claims=claims,
         conflicts=conflicts or [],
+    )
+
+
+def _golden_agent_output(packet: AgentInputPacket) -> AgentReviewOutput:
+    evidence = packet.evidence[0]
+    quote = evidence.text.split(".", 1)[0].strip() or evidence.text[:120].strip()
+    reference = AgentEvidenceReference(evidence_id=evidence.id, quote=quote)
+    recommendation = None
+    if packet.agent_role == AgentRole.FINAL_DECISION:
+        if packet.score.recommendation == Recommendation.INVEST:
+            recommendation = AgentRecommendationRationale(
+                recommendation=Recommendation.INVEST,
+                check_size=packet.score.check_size,
+                reason=(
+                    "The synthetic packet has source-linked evidence for terms, "
+                    "traction, and funding."
+                ),
+                evidence=[reference],
+            )
+        else:
+            recommendation = AgentRecommendationRationale(
+                recommendation=Recommendation.PASS,
+                check_size=0,
+                reason="The rule-based score or guardrails require a pass.",
+                evidence=[reference],
+            )
+    return AgentReviewOutput(
+        deal_id=packet.deal_id,
+        company_name=packet.company_name,
+        agent_role=packet.agent_role,
+        summary=[
+            AgentSummaryPoint(
+                summary=f"{packet.agent_role} reviewed source-linked synthetic evidence.",
+                evidence=[reference],
+            )
+        ],
+        findings=[
+            AgentFinding(
+                title="Source-linked synthetic review",
+                finding="The review cited only allowed evidence from the packet.",
+                confidence=packet.score.confidence,
+                materiality="medium",
+                evidence=[reference],
+            )
+        ],
+        limitations=["Synthetic eval fixture output."],
+        recommendation=recommendation,
     )

@@ -1865,6 +1865,30 @@ def test_evaluate_deal_missing_provider_cli_error_has_no_traceback(
     assert "Traceback" not in result.output
 
 
+def test_evaluate_deal_cli_rejects_invalid_concurrency_in_plain_english(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-deal",
+            str(company_dir),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--max-concurrency",
+            "0",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--max-concurrency must be at least 1" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_evaluate_deal_cli_reports_specialist_failure_without_evidence_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

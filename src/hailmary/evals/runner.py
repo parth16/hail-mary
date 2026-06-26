@@ -423,6 +423,19 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="evaluate-deal-golden-workflow",
+                category=EvalCategory.MEMO_SNAPSHOT,
+                name="Evaluate-deal golden workflow",
+                description=(
+                    "Checks that evaluate-deal keeps ingestion, research import, "
+                    "scoring, model review, evidence health, final memo sections, "
+                    "and privacy guards wired together."
+                ),
+            ),
+            run=fixtures.run_evaluate_deal_golden_workflow_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="privacy-output-guards",
                 category=EvalCategory.PRIVACY,
                 name="Private output and ignored-folder guardrails",
