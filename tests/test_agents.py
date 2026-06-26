@@ -152,6 +152,25 @@ def test_build_agent_input_packet_carries_v2_context_without_provider_metadata()
     assert "Use SEC EDGAR public filings" not in packet_json
 
 
+def test_build_agent_input_packet_preserves_score_factor_support_metadata() -> None:
+    store = _store(evidence=[], claims=[])
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.GROUNDING_AUDITOR,
+    )
+
+    authority_factor = next(
+        factor
+        for factor in packet.score_factors
+        if factor.name == "Evidence authority and freshness"
+    )
+    assert authority_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert authority_factor.missing_inputs == ["source-linked evidence"]
+
+
 def test_build_agent_input_packet_omits_partial_conflicts_when_capped() -> None:
     evidence_a = _evidence("ev_cap_a", "Valuation cap $8M.")
     evidence_b = _evidence("ev_cap_b", "Valuation cap $10M.")
@@ -336,11 +355,15 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
             ),
             "score_factors": [
                 ScoreFactor(
-                    name="Return math support",
-                    score=1,
-                    max_score=1,
-                    explanation="Synthetic return math support.",
+                    name="Valuation and net return",
+                    score=20,
+                    max_score=20,
+                    explanation=(
+                        "Valuation risk is low. Estimated return is 95x using "
+                        "the hidden $1B exit value."
+                    ),
                     evidence_ids=["ev_return_0", "ev_return_1"],
+                    support_status=ScoreSupportStatus.VERIFIED,
                 )
             ],
         }
@@ -362,6 +385,13 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
     assert packet.score.net_return.net_return_multiple is None
     assert packet.score.net_return.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
     assert "packet evidence for return math" in packet.score.net_return.missing_inputs
+    valuation_factor = packet.score_factors[0]
+    assert valuation_factor.name == "Valuation and net return"
+    assert valuation_factor.score == 0
+    assert valuation_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert valuation_factor.missing_inputs == ["packet evidence for return math"]
+    assert "95x" not in valuation_factor.explanation
+    assert "$1B" not in valuation_factor.explanation
 
 
 def test_build_agent_input_packet_clears_return_math_when_support_text_is_truncated() -> None:

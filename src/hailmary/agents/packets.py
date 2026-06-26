@@ -26,6 +26,7 @@ from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import (
     NetReturnEstimate,
     ScoredDeal,
+    ScoreFactor,
     ScoreSupportStatus,
 )
 from hailmary.scoring.portfolio import portfolio_rank_key, portfolio_scenario
@@ -318,6 +319,7 @@ def build_agent_input_packet(
         ),
         score_factors=_score_factor_items(
             scored_deal,
+            packet_net_return=packet_net_return,
             allowed_evidence_ids=allowed_evidence_ids,
         ),
         triggered_kill_gates=_triggered_kill_gate_items(scored_deal),
@@ -393,21 +395,76 @@ def _has_packet_entry_valuation_support(selected_claim_labels: set[str]) -> bool
 def _score_factor_items(
     scored_deal: ScoredDeal,
     *,
+    packet_net_return: NetReturnEstimate,
     allowed_evidence_ids: set[str],
 ) -> list[AgentScoreFactorItem]:
     return [
-        AgentScoreFactorItem(
-            name=factor.name,
-            score=factor.score,
-            max_score=factor.max_score,
-            explanation=factor.explanation,
-            evidence_ids=_allowed_ids(
-                factor.evidence_ids,
-                allowed_evidence_ids=allowed_evidence_ids,
-            ),
+        _score_factor_item(
+            factor,
+            scored_deal=scored_deal,
+            packet_net_return=packet_net_return,
+            allowed_evidence_ids=allowed_evidence_ids,
         )
         for factor in scored_deal.score_factors
     ]
+
+
+def _score_factor_item(
+    factor: ScoreFactor,
+    *,
+    scored_deal: ScoredDeal,
+    packet_net_return: NetReturnEstimate,
+    allowed_evidence_ids: set[str],
+) -> AgentScoreFactorItem:
+    if getattr(factor, "name", "") == "Valuation and net return":
+        return AgentScoreFactorItem(
+            name=factor.name,
+            score=_packet_valuation_factor_score(scored_deal, packet_net_return),
+            max_score=factor.max_score,
+            explanation=(
+                f"Valuation risk is {scored_deal.valuation_risk}. "
+                f"{packet_net_return.explanation}"
+            ),
+            evidence_ids=_allowed_ids(
+                packet_net_return.evidence_ids,
+                allowed_evidence_ids=allowed_evidence_ids,
+            ),
+            support_status=packet_net_return.support_status,
+            missing_inputs=packet_net_return.missing_inputs,
+        )
+    return AgentScoreFactorItem(
+        name=factor.name,
+        score=factor.score,
+        max_score=factor.max_score,
+        explanation=factor.explanation,
+        evidence_ids=_allowed_ids(
+            factor.evidence_ids,
+            allowed_evidence_ids=allowed_evidence_ids,
+        ),
+        support_status=factor.support_status,
+        missing_inputs=factor.missing_inputs,
+    )
+
+
+def _packet_valuation_factor_score(
+    scored_deal: ScoredDeal,
+    packet_net_return: NetReturnEstimate,
+) -> int:
+    score_by_risk = {
+        "unknown": 0,
+        "high": 4,
+        "medium": 9,
+        "low": 13,
+    }
+    score = score_by_risk[str(scored_deal.valuation_risk)]
+    if packet_net_return.net_return_multiple is not None:
+        if packet_net_return.net_return_multiple >= 10:
+            score += 7
+        elif packet_net_return.net_return_multiple >= 5:
+            score += 4
+        elif packet_net_return.net_return_multiple >= 2:
+            score += 2
+    return min(20, score)
 
 
 def _triggered_kill_gate_items(scored_deal: ScoredDeal) -> list[AgentKillGateItem]:

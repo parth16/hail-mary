@@ -17,6 +17,7 @@ from hailmary.schemas.scoring import (
     NetReturnEstimate,
     PMFLevel,
     Recommendation,
+    ScoreSupportStatus,
     ValuationRisk,
 )
 
@@ -92,6 +93,8 @@ class AgentScoreFactorItem(BaseModel):
     max_score: int
     explanation: str
     evidence_ids: list[str] = Field(default_factory=list)
+    support_status: ScoreSupportStatus = ScoreSupportStatus.INFERRED
+    missing_inputs: list[str] = Field(default_factory=list)
 
 
 class AgentKillGateItem(BaseModel):

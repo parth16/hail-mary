@@ -100,6 +100,12 @@ STAGE_NEGATED_PATTERNS = (
         rf"(?:investors?|funds?|backers?)\b(?:\s+\w+){{0,4}}",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"\b(?:no|without)\s+(?:current\s+|active\s+|committed\s+|"
+        rf"verified\s+|confirmed\s+)?{STAGE_NEGATED_SIGNAL}\s+"
+        rf"(?:funding|financing|round|raise)\b",
+        re.IGNORECASE,
+    ),
 )
 RETURN_INPUT_PATTERNS = {
     "dilution": re.compile(
@@ -128,6 +134,18 @@ RETURN_INPUT_PATTERNS = {
         re.IGNORECASE,
     ),
 }
+NEGATED_GROSS_EXIT_PATTERNS = (
+    re.compile(
+        r"\b(?:no|without)\s+(?:gross\s+)?(?:exit value|exit)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:gross\s+)?(?:exit value|exit)\b(?:\s+\S+){0,4}\s+"
+        r"(?:is|are|was|were|has been|have been)\s+not\s+"
+        r"(?:provided|available|disclosed|included)\b",
+        re.IGNORECASE,
+    ),
+)
 TRACTION_NEGATED_SIGNAL = (
     r"(?:customers?|revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)"
 )
@@ -431,6 +449,8 @@ def _kill_gates(
     )
     has_verified_claims = bool(verified_claims)
     has_pricing_term = _has_readable_pricing_term(verified_claims)
+    missing_key_terms_reason = _missing_key_terms_reason(verified_claims)
+    missing_key_terms_evidence_ids = _missing_key_terms_evidence_ids(verified_claims)
     missing_key_terms = has_scorable_deal and not has_pricing_term
     valuation_too_high = has_scorable_deal and valuation_risk == ValuationRisk.HIGH
     conflict_evidence_ids = _conflict_evidence_ids(store, valid_conflicts)
@@ -486,14 +506,14 @@ def _kill_gates(
             name="Missing key investment terms",
             triggered=missing_key_terms,
             reason=(
-                "No verified valuation or valuation-cap term was found."
+                missing_key_terms_reason
                 if not has_pricing_term
                 else "A verified valuation or valuation-cap term is available."
             ),
             evidence_ids=(
                 _pricing_evidence_ids(verified_claims)
                 if has_pricing_term
-                else _claim_evidence_ids(verified_claims)
+                else missing_key_terms_evidence_ids
             ),
             support_status=(
                 ScoreSupportStatus.VERIFIED
@@ -615,7 +635,7 @@ def _evidence_authority_factor(store: EvidenceStore) -> ScoreFactor:
         score=score,
         max_score=15,
         explanation=explanation,
-        evidence_ids=[evidence.id for evidence in store.evidence[:5]],
+        evidence_ids=_evidence_authority_evidence_ids(store.evidence),
         support_status=(
             ScoreSupportStatus.NEEDS_DILIGENCE
             if unknown_count
@@ -625,6 +645,16 @@ def _evidence_authority_factor(store: EvidenceStore) -> ScoreFactor:
             ["current source dates"] if unknown_count else []
         ),
     )
+
+
+def _evidence_authority_evidence_ids(evidence: list[EvidenceRecord]) -> list[str]:
+    freshness_impacted = [
+        record
+        for record in evidence
+        if record.source_freshness in {SourceFreshness.STALE, SourceFreshness.UNKNOWN}
+    ]
+    ordered = [*freshness_impacted, *evidence]
+    return _dedupe_evidence_ids(ordered)
 
 
 def _deal_terms_factor(
@@ -1119,7 +1149,15 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
             combined_fees_and_carry_percent = _float_text(combined_match.group("value"))
             evidence_ids.append(record.id)
         exit_match = RETURN_INPUT_PATTERNS["gross_exit_value"].search(record.text)
-        if gross_exit_value is None and exit_match:
+        if (
+            gross_exit_value is None
+            and exit_match
+            and not _match_overlaps_pattern(
+                record.text,
+                exit_match,
+                NEGATED_GROSS_EXIT_PATTERNS,
+            )
+        ):
             gross_exit_value = _money_text_to_dollars(exit_match.group("value"))
             evidence_ids.append(record.id)
     fees_and_carry: float | None
@@ -1397,6 +1435,41 @@ def _has_readable_pricing_term(verified_claims: list[ClaimRecord]) -> bool:
     return _entry_valuation(verified_claims, valuation_claim) is not None
 
 
+def _missing_key_terms_reason(verified_claims: list[ClaimRecord]) -> str:
+    if _pre_money_claim_needs_round_size(verified_claims) is not None:
+        return (
+            "A verified pre-money valuation needs a verified round size before "
+            "Hail Mary can calculate the entry valuation."
+        )
+    return "No verified valuation or valuation-cap term was found."
+
+
+def _missing_key_terms_evidence_ids(verified_claims: list[ClaimRecord]) -> list[str]:
+    pre_money_claim = _pre_money_claim_needs_round_size(verified_claims)
+    if pre_money_claim is None:
+        return _claim_evidence_ids(verified_claims)
+    evidence_ids = _claim_evidence_ids([pre_money_claim])
+    round_size_claim = _round_size_claim(verified_claims)
+    if round_size_claim is not None:
+        evidence_ids.extend(_claim_evidence_ids([round_size_claim]))
+    return list(dict.fromkeys(evidence_ids))
+
+
+def _pre_money_claim_needs_round_size(
+    verified_claims: list[ClaimRecord],
+) -> ClaimRecord | None:
+    round_size_claim = _round_size_claim(verified_claims)
+    round_size = _claim_money_value(round_size_claim) if round_size_claim is not None else None
+    if round_size is not None:
+        return None
+    for claim in verified_claims:
+        if claim.label == "pre-money valuation":
+            valuation = _claim_money_value(claim)
+            if valuation is not None and valuation > 0:
+                return claim
+    return None
+
+
 def _claim_money_value(claim: ClaimRecord) -> int | None:
     normalized_prefix = "usd_cents:"
     if claim.normalized_value.startswith(normalized_prefix):
@@ -1563,6 +1636,14 @@ def _span_overlaps(
 ) -> bool:
     start, end = span
     return any(start < negated_end and negated_start < end for negated_start, negated_end in spans)
+
+
+def _match_overlaps_pattern(
+    text: str,
+    match: re.Match[str],
+    patterns: tuple[re.Pattern[str], ...],
+) -> bool:
+    return _span_overlaps(match.span(), _negated_spans(text, patterns))
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:

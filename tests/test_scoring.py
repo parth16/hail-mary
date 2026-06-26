@@ -372,6 +372,32 @@ def test_stage_classification_prefers_current_stage_over_series_a_investor_refer
     )
 
 
+def test_stage_classification_ignores_absent_seed_funding_mentions() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "No seed funding yet. Valuation cap $60M. Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$60M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.company_stage == CompanyStage.UNKNOWN
+    assert scored.valuation_risk == ValuationRisk.HIGH
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_score_evidence_store_gates_valuation_far_ahead_of_evidence() -> None:
     evidence = [
         _evidence(
@@ -560,6 +586,30 @@ def test_net_return_math_requires_complete_fees_and_carry_inputs() -> None:
     assert "fees or carry" in scored.net_return.missing_inputs
 
 
+def test_net_return_math_ignores_negated_exit_scenarios() -> None:
+    evidence = [
+        _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_return",
+            "Estimated dilution 20%. SPV expenses 5%. Carry 20%. "
+            "No exit value $1B was provided.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.net_return_multiple is None
+    assert "gross exit scenario" in scored.net_return.missing_inputs
+
+
 def test_net_return_math_adds_round_size_to_pre_money_valuation() -> None:
     evidence = [
         _evidence("ev_valuation", "Pre-money valuation $40M."),
@@ -599,6 +649,16 @@ def test_net_return_math_needs_round_size_for_pre_money_valuation() -> None:
         "verified round size for pre-money valuation"
     ]
     assert "verified round size" in scored.net_return.explanation
+    missing_terms_gate = next(
+        gate
+        for gate in scored.triggered_kill_gates
+        if gate.name == "Missing key investment terms"
+    )
+    assert missing_terms_gate.evidence_ids == ["ev_valuation"]
+    assert missing_terms_gate.reason == (
+        "A verified pre-money valuation needs a verified round size before "
+        "Hail Mary can calculate the entry valuation."
+    )
 
 
 def test_readable_pricing_is_required_before_clearing_key_terms() -> None:
@@ -873,6 +933,28 @@ def test_evidence_authority_with_unknown_freshness_needs_diligence() -> None:
     authority_factor = _score_factor(scored, "Evidence authority and freshness")
     assert authority_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
     assert authority_factor.missing_inputs == ["current source dates"]
+
+
+def test_evidence_authority_cites_stale_or_unknown_freshness_records_first() -> None:
+    evidence = [
+        *[
+            _evidence(f"ev_current_{index}", f"Current evidence {index}.")
+            for index in range(6)
+        ],
+        _evidence(
+            "ev_stale",
+            "Stale evidence requiring freshness penalty.",
+            source_freshness=SourceFreshness.STALE,
+        ),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=[]),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    authority_factor = _score_factor(scored, "Evidence authority and freshness")
+    assert authority_factor.evidence_ids[0] == "ev_stale"
 
 
 def test_fundability_factor_does_not_ask_for_funding_already_present() -> None:
