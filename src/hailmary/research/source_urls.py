@@ -69,6 +69,8 @@ def validate_http_url(url: str, *, field_name: str) -> None:
         raise ValueError(f"{field_name} cannot include path parameters")
     if parsed.fragment:
         raise ValueError(f"{field_name} cannot include URL fragments")
+    if _query_contains_semicolon_delimiter(parsed.query):
+        raise ValueError(f"{field_name} cannot include semicolon query delimiters")
     if _decoded_component_has_delimiter(parsed.path):
         raise ValueError(
             f"{field_name} cannot include encoded query, fragment, or "
@@ -142,3 +144,12 @@ def _query_contains_sensitive_access(query: str) -> bool:
         if normalized_key in REDIRECT_QUERY_KEYS:
             return True
     return False
+
+
+def _query_contains_semicolon_delimiter(query: str) -> bool:
+    if not query:
+        return False
+    decoded = _recursive_unquote(query)
+    if decoded is None:
+        return True
+    return ";" in decoded

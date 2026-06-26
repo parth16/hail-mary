@@ -35,7 +35,7 @@ from .schemas import (
     ResearchTaskStatus,
 )
 from .templates import prepare_research_results_template
-from .web import WebResearchClient, collect_web_research
+from .web import WebResearchClient, WebResearchTaskSummary, collect_web_research
 
 
 class ResearchWorkflowError(RuntimeError):
@@ -95,6 +95,7 @@ class ResearchWorkflowCollectionSummary(BaseModel):
     no_result_companies: list[str] = Field(default_factory=list)
     skipped_non_exact_company_names: list[str] = Field(default_factory=list)
     match_details: list[CompanyMatch] = Field(default_factory=list)
+    provider_statuses: list[ResearchProviderStatusSummary] = Field(default_factory=list)
     incomplete_search: bool = False
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
@@ -583,6 +584,7 @@ def _run_web_collection(
         result_count=result.fetched_count,
         deal_count=len({task.company_name for task in result.tasks}),
         no_result_companies=sorted(no_result_companies),
+        provider_statuses=_web_provider_statuses(result.tasks),
         incomplete_search=_warnings_indicate_incomplete_search(warnings),
         warnings=warnings,
     )
@@ -696,6 +698,54 @@ def _collection_status(
     return ResearchProviderRunStatus.SKIPPED
 
 
+def _web_provider_statuses(
+    tasks: list[WebResearchTaskSummary],
+) -> list[ResearchProviderStatusSummary]:
+    by_provider: dict[str, list[WebResearchTaskSummary]] = {}
+    for task in tasks:
+        by_provider.setdefault(task.provider_id, []).append(task)
+
+    statuses: list[ResearchProviderStatusSummary] = []
+    for provider_id, provider_tasks in by_provider.items():
+        provider_name = provider_tasks[0].provider_name
+        fetched_count = sum(1 for task in provider_tasks if task.status == "fetched")
+        warnings = [
+            f"{task.company_name}: {task.reason}"
+            for task in provider_tasks
+            if task.status == "failed"
+        ]
+        no_result_companies = sorted(
+            {
+                task.company_name
+                for task in provider_tasks
+                if task.status != "fetched"
+            }
+        )
+        status = (
+            ResearchProviderRunStatus.FAILED
+            if warnings
+            else _collection_status(
+                result_count=fetched_count,
+                no_result_companies=no_result_companies,
+                warnings=warnings,
+                error=None,
+            )
+        )
+        statuses.append(
+            ResearchProviderStatusSummary(
+                provider_id=provider_id,
+                provider_name=provider_name,
+                status=status,
+                collected_count=fetched_count,
+                warning_count=len(warnings),
+                no_exact_result_companies=no_result_companies,
+                incomplete_search=_warnings_indicate_incomplete_search(warnings),
+                failure="; ".join(warnings) if warnings else None,
+            )
+        )
+    return statuses
+
+
 def _warnings_indicate_incomplete_search(warnings: list[str]) -> bool:
     return any(
         "incomplete" in warning.casefold()
@@ -728,6 +778,41 @@ def _research_workflow_summary(
     }
 
     for collection in workflow.collections:
+        for provider_status in collection.provider_statuses:
+            existing_status = statuses.get(provider_status.provider_id)
+            if existing_status is None:
+                existing_status = ResearchProviderStatusSummary(
+                    provider_id=provider_status.provider_id,
+                    provider_name=provider_status.provider_name,
+                    status=provider_status.status,
+                )
+            statuses[provider_status.provider_id] = existing_status.model_copy(
+                update={
+                    "provider_name": provider_status.provider_name,
+                    "status": _merge_provider_status(
+                        existing_status.status,
+                        provider_status.status,
+                    ),
+                    "collected_count": (
+                        existing_status.collected_count
+                        + provider_status.collected_count
+                    ),
+                    "warning_count": (
+                        existing_status.warning_count + provider_status.warning_count
+                    ),
+                    "no_exact_result_companies": sorted(
+                        set(existing_status.no_exact_result_companies)
+                        | set(provider_status.no_exact_result_companies)
+                    ),
+                    "incomplete_search": (
+                        existing_status.incomplete_search
+                        or provider_status.incomplete_search
+                    ),
+                    "failure": provider_status.failure or existing_status.failure,
+                }
+            )
+        if collection.provider_statuses:
+            continue
         status = statuses.get(collection.source_id)
         if status is None:
             status = ResearchProviderStatusSummary(

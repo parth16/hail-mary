@@ -50,6 +50,7 @@ from hailmary.portfolio import (
     portfolio_status as build_portfolio_status,
 )
 from hailmary.research import (
+    CompanyMatch,
     MeridianWorkflowError,
     ResearchCollectionError,
     ResearchImportError,
@@ -1962,9 +1963,15 @@ def _research_match_counts(collection: ResearchWorkflowCollectionSummary) -> str
 def _research_skipped_match_lines(
     collection: ResearchWorkflowCollectionSummary,
 ) -> list[str]:
+    return _research_skipped_match_detail_lines(collection.match_details)
+
+
+def _research_skipped_match_detail_lines(
+    match_details: Sequence[CompanyMatch],
+) -> list[str]:
     lines: list[str] = []
     seen: set[tuple[str, str, str]] = set()
-    for match in collection.match_details:
+    for match in match_details:
         if match.import_ready:
             continue
         key = (match.kind.value, match.requested_name, match.candidate_name)
@@ -1978,7 +1985,7 @@ def _research_skipped_match_lines(
         )
         if len(lines) == 5:
             remaining = sum(
-                1 for item in collection.match_details if not item.import_ready
+                1 for item in match_details if not item.import_ready
             ) - len(seen)
             if remaining > 0:
                 lines.append(f"skipped {remaining} additional non-exact matches.")
@@ -2586,7 +2593,7 @@ def collect_github_repositories_command(
         ),
     ] = None,
 ) -> None:
-    """Collect public GitHub repository evidence for exact owner or repository matches."""
+    """Collect public GitHub repository evidence for exact owner matches."""
 
     config = _config_from_options(data_dir)
     try:
@@ -2614,7 +2621,11 @@ def collect_github_repositories_command(
                     f"A live run can make repository-name, user-owner, and "
                     f"organization-owner searches, requesting up to {limit} repository "
                     "records per page for up to 5 pages per company while looking for "
-                    "exact GitHub owner or repository-name matches."
+                    "exact GitHub owner matches."
+                ),
+                _plain(
+                    "Repository-name-only matches are reported as likely matches and "
+                    "skipped until an operator validates the entity."
                 ),
                 _plain("No GitHub API requests were sent and no results file was saved."),
             ],
@@ -2628,7 +2639,7 @@ def collect_github_repositories_command(
         ]
         lines = [
             _plain(
-                f"No exact GitHub owner or repository-name {result_word} were found "
+                f"No exact GitHub owner {result_word} were found "
                 f"for {result.deal_count} {company_word}."
             ),
             _plain(
@@ -2639,6 +2650,8 @@ def collect_github_repositories_command(
         ]
         for warning in result.warnings:
             lines.append(_plain(f"Warning: {warning}"))
+        for skipped_match in _research_skipped_match_detail_lines(result.match_details):
+            lines.append(_plain(skipped_match))
         _print_section("GitHub repository results", lines, style="yellow")
         return
 
@@ -2656,7 +2669,8 @@ def collect_github_repositories_command(
         ),
         _plain(f"Saved the private JSON results file to {result.output_path}."),
         _plain(
-            "Only exact GitHub owner or repository-name matches were prepared. "
+            "Only exact GitHub owner matches were prepared. "
+            "Repository-name-only matches are skipped until an operator validates the entity. "
             "Hail Mary saved repository metadata only and did not clone code or fetch "
             "README files."
         ),
@@ -2664,6 +2678,8 @@ def collect_github_repositories_command(
     ]
     for warning in result.warnings:
         lines.append(_plain(f"Warning: {warning}"))
+    for skipped_match in _research_skipped_match_detail_lines(result.match_details):
+        lines.append(_plain(skipped_match))
     zero_result_companies = [deal.company_name for deal in result.deals if deal.result_count == 0]
     if zero_result_companies:
         lines.append(

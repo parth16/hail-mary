@@ -20,6 +20,7 @@ from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.research import (
+    CompanyMatch,
     CompanyMatchKind,
     GitHubApiError,
     GitHubRepositoryCollectionRunSummary,
@@ -438,6 +439,13 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
     assert result.ready_to_import_count == 5
     assert result.blocking_issue_count == 0
     assert result.no_prepared_result_companies == []
+    company_website_status = next(
+        status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "company_website"
+    )
+    assert company_website_status.status == ResearchProviderRunStatus.COLLECTED
+    assert company_website_status.collected_count == 1
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
@@ -3676,6 +3684,69 @@ def test_collect_github_repositories_command_dry_run_reports_no_api_contact(
     assert not list((tmp_path / "data" / "research-results").glob("*.json"))
 
 
+def test_collect_github_repositories_command_reports_likely_skipped_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_collect_github_repositories(
+        *,
+        config: AppConfig,
+        company_names: list[str] | None,
+        limit: int,
+        dry_run: bool,
+    ) -> GitHubRepositoryCollectionRunSummary:
+        _ = (config, limit, dry_run)
+        assert company_names == ["Acme AI"]
+        return GitHubRepositoryCollectionRunSummary(
+            output_path=None,
+            collected_at=BUILT_AT,
+            deals=[
+                ResearchCollectionDealSummary(
+                    company_name="Acme AI",
+                    result_count=0,
+                )
+            ],
+            match_details=[
+                CompanyMatch(
+                    requested_name="Acme AI",
+                    candidate_name="other/acme-ai",
+                    kind=CompanyMatchKind.LIKELY,
+                    reason=(
+                        "GitHub repository name matches, but the owner does not. "
+                        "Operator validation is required before import."
+                    ),
+                    normalized_requested="acme ai",
+                    normalized_candidate="acme ai",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(
+        cli_module,
+        "collect_github_repositories",
+        fake_collect_github_repositories,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "collect-github-repositories",
+            "--company",
+            "Acme AI",
+            "--data-dir",
+            str(tmp_path / "data"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = _plain_cli_output(result.output)
+    assert "No exact GitHub owner result" in output
+    assert "skipped likely match other/acme-ai for Acme AI" in output
+    assert "Operator validation is required before import" in output
+
+
 def test_collect_sec_form_d_filings_command_success_reports_import_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6076,6 +6147,14 @@ def test_import_research_results_requires_plain_english_licensing_notes(
             "credential, redirect",
         ),
         (
+            "https://www.sec.gov/example/acme-ai?file=x;access_token=secret",
+            "semicolon query delimiters",
+        ),
+        (
+            "https://www.sec.gov/example/acme-ai?file=x%253Baccess_token=secret",
+            "semicolon query delimiters",
+        ),
+        (
             "https://www.sec.gov/example/acme-ai#access_token=secret",
             "URL fragments",
         ),
@@ -6124,6 +6203,10 @@ def test_import_research_results_rejects_unsafe_source_urls(
         (
             "https://api.example.com/result?next=https%3A%2F%2Fexample.com",
             "source_api cannot include token, signature, credential, redirect",
+        ),
+        (
+            "https://api.example.com/result?file=x;access_token=secret",
+            "source_api cannot include semicolon query delimiters",
         ),
         (
             "https://api.example.com/result#access_token=secret",
