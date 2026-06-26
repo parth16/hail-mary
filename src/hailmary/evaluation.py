@@ -17,6 +17,14 @@ from hailmary.agents.packets import (
 )
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig, ConfigError, create_local_state, validate_local_state
+from hailmary.evidence import (
+    ReviewIssueSeverity,
+    build_deal_evidence_review,
+)
+from hailmary.evidence.review import (
+    DealEvidenceReview,
+    ReviewIssueSummary,
+)
 from hailmary.ingest.folder_loader import (
     DealFolderInspection,
     IngestionError,
@@ -163,6 +171,7 @@ class DealEvaluationResult:
     ocr_status: str
     research_run: EvaluationResearchRun | None = None
     research_imported_count: int = 0
+    evidence_review: DealEvidenceReview | None = None
     operator_limitations: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -412,6 +421,15 @@ def evaluate_deal_folder(
                 )
         final_review_was_model = False
 
+    _stage(stage_callback, "evidence health review")
+    evidence_review = _build_evaluate_deal_evidence_review(
+        deal,
+        store,
+        config=config,
+        scored_deal=scored_deal,
+        final_recommendation=guarded_decision.recommendation,
+    )
+
     _stage(stage_callback, "final memo write")
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir, description="report")
@@ -422,6 +440,7 @@ def evaluate_deal_folder(
         ),
         *_ingestion_ocr_warnings(deal),
         *_research_warnings(research_run),
+        *_evidence_review_warnings(evidence_review),
         *_evaluation_warnings(specialist_results, guarded_decision),
     ]
     failed_specialist_roles = [
@@ -432,6 +451,7 @@ def evaluate_deal_folder(
         specialist_results,
         guarded_decision=guarded_decision,
         no_evidence=store.evidence_count == 0,
+        evidence_review=evidence_review,
     )
     _write_private_text(
         final_memo_path,
@@ -444,6 +464,7 @@ def evaluate_deal_folder(
             warnings=warnings,
             final_review_was_model=final_review_was_model,
             research_run=research_run,
+            evidence_review=evidence_review,
         ),
         description="final evaluation memo",
     )
@@ -467,6 +488,7 @@ def evaluate_deal_folder(
         ocr_status=_ocr_status(config, deal),
         research_run=research_run,
         research_imported_count=research_run.imported_count if research_run else 0,
+        evidence_review=evidence_review,
         operator_limitations=operator_limitations,
         warnings=warnings,
     )
@@ -840,6 +862,7 @@ def render_final_evaluation_memo(
     warnings: Sequence[str] = (),
     final_review_was_model: bool = True,
     research_run: EvaluationResearchRun | None = None,
+    evidence_review: DealEvidenceReview | None = None,
 ) -> str:
     verified_claims = validated_verified_claims(store)
     lines = [
@@ -888,6 +911,9 @@ def render_final_evaluation_memo(
 
     lines.extend(["", "## External Research"])
     lines.extend(_research_memo_lines(research_run))
+
+    lines.extend(["", "## Evidence Health"])
+    lines.extend(_evidence_health_memo_lines(evidence_review))
 
     lines.extend(["", "## Model Committee Findings"])
     successful_results = [result for result in specialist_results if result.output is not None]
@@ -1702,6 +1728,166 @@ def _research_count_phrase(count: int, singular: str, plural: str | None = None)
     return f"{count} {label}"
 
 
+def _build_evaluate_deal_evidence_review(
+    deal: IngestedDeal,
+    store: EvidenceStore,
+    *,
+    config: AppConfig,
+    scored_deal: ScoredDeal,
+    final_recommendation: AgentRecommendationRationale,
+) -> DealEvidenceReview:
+    evidence_store_path = deal.evidence_store_path or (
+        config.data_dir / "processed" / "deals" / deal.id / "evidence_store.json"
+    )
+    return build_deal_evidence_review(
+        deal,
+        store,
+        evidence_store_path=evidence_store_path,
+        recommendation_evidence_ids=_evidence_review_recommendation_ids(
+            scored_deal,
+            final_recommendation,
+        ),
+    )
+
+
+def _evidence_review_recommendation_ids(
+    scored_deal: ScoredDeal,
+    final_recommendation: AgentRecommendationRationale,
+) -> list[str]:
+    evidence_ids: list[str] = []
+
+    def add_id(evidence_id: str) -> None:
+        if evidence_id not in evidence_ids:
+            evidence_ids.append(evidence_id)
+
+    for factor in scored_deal.score_factors:
+        for evidence_id in factor.evidence_ids:
+            add_id(evidence_id)
+    for question in scored_deal.diligence_questions:
+        for evidence_id in question.evidence_ids:
+            add_id(evidence_id)
+    for reference in final_recommendation.evidence:
+        add_id(reference.evidence_id)
+    return evidence_ids
+
+
+def _evidence_review_warnings(evidence_review: DealEvidenceReview | None) -> list[str]:
+    if evidence_review is None:
+        return []
+    active_issues = _active_evidence_review_issues(evidence_review)
+    if not active_issues:
+        return []
+    blocking_issues = [
+        issue for issue in active_issues if issue.severity == ReviewIssueSeverity.BLOCKING
+    ]
+    warning_issues = [
+        issue for issue in active_issues if issue.severity == ReviewIssueSeverity.WARNING
+    ]
+    if not blocking_issues and not warning_issues:
+        return []
+    issue_summary = _evidence_issue_counts_text(active_issues)
+    issue_names = _evidence_issue_names(active_issues)
+    warning = (
+        "Evidence review found "
+        f"{issue_summary}. Evidence health means whether saved source records are "
+        "complete and safe enough to rely on."
+    )
+    if blocking_issues:
+        warning += (
+            " Review these issues before relying on this memo: "
+            f"{issue_names}."
+        )
+    elif warning_issues:
+        warning += f" Review these warnings: {issue_names}."
+    return [warning]
+
+
+def _evidence_review_limitations(
+    evidence_review: DealEvidenceReview | None,
+) -> list[str]:
+    if evidence_review is None:
+        return []
+    blocking_issues = [
+        issue
+        for issue in _active_evidence_review_issues(evidence_review)
+        if issue.severity == ReviewIssueSeverity.BLOCKING
+    ]
+    if not blocking_issues:
+        return []
+    return [
+        "Evidence review found issues that need attention before relying on this memo: "
+        f"{_evidence_issue_names(blocking_issues)}."
+    ]
+
+
+def _evidence_health_memo_lines(
+    evidence_review: DealEvidenceReview | None,
+) -> list[str]:
+    if evidence_review is None:
+        return [
+            "- Evidence health was not reviewed for this run.",
+        ]
+    active_issues = _active_evidence_review_issues(evidence_review)
+    lines = [
+        "- Evidence health means whether saved source records are complete and safe "
+        "enough to rely on.",
+    ]
+    if not active_issues:
+        lines.append("- No evidence review issues were found.")
+        return lines
+    lines.append(
+        "- Evidence review found "
+        f"{_evidence_issue_counts_text(active_issues)}. Run "
+        "`hailmary review-evidence` for the full local evidence review."
+    )
+    for issue in active_issues:
+        lines.append(
+            f"- {_evidence_issue_severity_label(issue.severity)}: "
+            f"{_memo_text(issue.issue)} ({issue.count}). "
+            f"{_memo_text(issue.guidance)}"
+        )
+    return lines
+
+
+def _active_evidence_review_issues(
+    evidence_review: DealEvidenceReview,
+) -> list[ReviewIssueSummary]:
+    return [issue for issue in evidence_review.issues if issue.count > 0]
+
+
+def _evidence_issue_counts_text(issues: Sequence[ReviewIssueSummary]) -> str:
+    blocking_count = sum(
+        1 for issue in issues if issue.severity == ReviewIssueSeverity.BLOCKING
+    )
+    warning_count = sum(
+        1 for issue in issues if issue.severity == ReviewIssueSeverity.WARNING
+    )
+    info_count = sum(1 for issue in issues if issue.severity == ReviewIssueSeverity.INFO)
+    parts: list[str] = []
+    if blocking_count:
+        parts.append(_research_count_phrase(blocking_count, "blocking issue"))
+    if warning_count:
+        parts.append(_research_count_phrase(warning_count, "warning"))
+    if info_count:
+        parts.append(_research_count_phrase(info_count, "note"))
+    return ", ".join(parts) if parts else "no issues"
+
+
+def _evidence_issue_names(issues: Sequence[ReviewIssueSummary]) -> str:
+    names = [f"{issue.issue} ({issue.count})" for issue in issues[:5]]
+    if len(issues) > 5:
+        names.append(f"{len(issues) - 5} more")
+    return "; ".join(names)
+
+
+def _evidence_issue_severity_label(severity: ReviewIssueSeverity) -> str:
+    if severity == ReviewIssueSeverity.BLOCKING:
+        return "Needs attention before relying on the memo"
+    if severity == ReviewIssueSeverity.WARNING:
+        return "Warning"
+    return "Note"
+
+
 def _evaluation_warnings(
     specialist_results: Sequence[RoleReviewResult],
     final_decision: GuardedFinalDecision,
@@ -1735,6 +1921,7 @@ def _operator_limitations(
     *,
     guarded_decision: GuardedFinalDecision,
     no_evidence: bool,
+    evidence_review: DealEvidenceReview | None = None,
 ) -> list[str]:
     limitations: list[str] = []
 
@@ -1754,6 +1941,8 @@ def _operator_limitations(
                 result.limitation
                 or f"{_role_title(result.role)} model review failed validation."
             )
+    for limitation in _evidence_review_limitations(evidence_review):
+        add_limitation(limitation)
     add_limitation(guarded_decision.warning)
     return limitations
 

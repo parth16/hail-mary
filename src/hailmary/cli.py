@@ -37,6 +37,7 @@ from hailmary.evidence import EvidenceReviewError
 from hailmary.evidence import review_evidence as build_evidence_review
 from hailmary.evidence.review import (
     DealEvidenceReview,
+    ReviewIssueSeverity,
     supports_page_or_table_location,
 )
 from hailmary.ingest.folder_loader import (
@@ -1451,6 +1452,10 @@ def evaluate_deal(
     summary.add_row(_plain("Claims found"), _plain(str(result.claim_count)))
     summary.add_row(_plain("Conflicts found"), _plain(str(result.conflict_count)))
     summary.add_row(
+        _plain("Evidence health"),
+        _plain(_evaluate_deal_evidence_health_text(result.evidence_review)),
+    )
+    summary.add_row(
         _plain("External research imported"),
         _plain(str(result.research_imported_count)),
     )
@@ -1511,6 +1516,15 @@ def evaluate_deal(
             )
     else:
         renderables.append(_plain("External research was skipped for this run."))
+    if result.evidence_review is not None:
+        renderables.append(
+            _plain(
+                "Evidence health review found "
+                f"{_evaluate_deal_evidence_health_text(result.evidence_review)}. "
+                "Evidence health means whether saved source records are complete and "
+                "safe enough to rely on."
+            )
+        )
     if result.warnings:
         warning_table = _two_column_table("Warning", "Detail")
         for index, warning in enumerate(result.warnings, start=1):
@@ -2020,6 +2034,33 @@ def _research_summary_counts_text(result: ResearchWorkflowRunSummary) -> str:
     return (
         f"{failed_provider_count}, {incomplete_search_count}, {warning_count}"
     )
+
+
+def _evaluate_deal_evidence_health_text(
+    evidence_review: DealEvidenceReview | None,
+) -> str:
+    if evidence_review is None:
+        return "not reviewed"
+    active_issues = [issue for issue in evidence_review.issues if issue.count > 0]
+    blocking_count = sum(
+        1 for issue in active_issues if issue.severity == ReviewIssueSeverity.BLOCKING
+    )
+    warning_count = sum(
+        1 for issue in active_issues if issue.severity == ReviewIssueSeverity.WARNING
+    )
+    info_count = sum(
+        1 for issue in active_issues if issue.severity == ReviewIssueSeverity.INFO
+    )
+    if not active_issues:
+        return "no issues"
+    parts: list[str] = []
+    if blocking_count:
+        parts.append(_research_count_phrase(blocking_count, "blocking issue"))
+    if warning_count:
+        parts.append(_research_count_phrase(warning_count, "warning"))
+    if info_count:
+        parts.append(_research_count_phrase(info_count, "note"))
+    return ", ".join(parts)
 
 
 def _research_count_phrase(count: int, singular: str, plural: str | None = None) -> str:
