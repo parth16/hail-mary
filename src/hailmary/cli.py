@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import shlex
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Annotated, Literal, NoReturn
+from typing import Annotated, Literal, NoReturn, Protocol
 
 import typer
 from rich import box
@@ -34,7 +35,10 @@ from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder
 from hailmary.evidence import EvidenceReviewError
 from hailmary.evidence import review_evidence as build_evidence_review
-from hailmary.evidence.review import DealEvidenceReview
+from hailmary.evidence.review import (
+    DealEvidenceReview,
+    supports_page_or_table_location,
+)
 from hailmary.ingest.folder_loader import (
     IngestionError,
 )
@@ -78,6 +82,7 @@ from hailmary.research import (
     run_research_workflow,
 )
 from hailmary.schemas.documents import SourceKind
+from hailmary.schemas.evidence import EvidenceRecord
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 
 app = typer.Typer(
@@ -89,7 +94,7 @@ portfolio_app = typer.Typer(
     help="Track recorded investments and available capital for new checks.",
     no_args_is_help=True,
 )
-app.add_typer(portfolio_app, name="portfolio")
+app.add_typer(portfolio_app, name="portfolio", hidden=True)
 console = Console(highlight=False)
 DEFAULT_REVIEW_QUOTE_LIMIT = 240
 MAX_REVIEW_QUOTE_LIMIT = 500
@@ -288,7 +293,7 @@ def _has_ocr_warning(notes: str | None) -> bool:
     )
 
 
-@portfolio_app.command("status")
+@portfolio_app.command("status", hidden=True)
 def portfolio_status_command(
     data_dir: Annotated[
         Path | None,
@@ -335,7 +340,7 @@ def portfolio_status_command(
     _print_panel("Portfolio status", renderables, border_style="green")
 
 
-@portfolio_app.command("add-investment")
+@portfolio_app.command("add-investment", hidden=True)
 def portfolio_add_investment_command(
     company: Annotated[
         str,
@@ -403,7 +408,7 @@ def portfolio_add_investment_command(
     )
 
 
-@portfolio_app.command("plan")
+@portfolio_app.command("plan", hidden=True)
 def portfolio_plan_command(
     data_dir: Annotated[
         Path | None,
@@ -489,7 +494,7 @@ def _parse_portfolio_date(raw_value: str) -> date:
         ) from exc
 
 
-@app.command("init")
+@app.command("init", hidden=True)
 def init(
     data_dir: Annotated[
         Path | None,
@@ -526,7 +531,7 @@ def init(
     _print_panel("Init complete", [table], border_style="green")
 
 
-@app.command("ingest-folder")
+@app.command("ingest-folder", hidden=True)
 def ingest_folder(
     folder: Annotated[
         Path,
@@ -808,6 +813,7 @@ def _print_deal_evidence_review(
 ) -> None:
     console.print(Rule(deal_review.company_name, style="cyan"))
     console.print(_deal_review_summary_table(deal_review))
+    console.print(_evidence_health_table(deal_review))
     console.print(_source_document_review_table(deal_review))
     external_sources_table = _external_source_review_table(deal_review)
     if external_sources_table is not None:
@@ -826,6 +832,31 @@ def _deal_review_summary_table(deal_review: DealEvidenceReview) -> Table:
     table.add_row(_plain("Evidence records"), _plain(str(deal_review.evidence_count)))
     table.add_row(_plain("Claims"), _plain(str(deal_review.claim_count)))
     table.add_row(_plain("Stored conflicts"), _plain(str(deal_review.conflict_count)))
+    return table
+
+
+def _evidence_health_table(deal_review: DealEvidenceReview) -> Table:
+    table = Table(
+        title="Evidence health summary",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Area", style="bold cyan")
+    table.add_column("Summary", overflow="fold")
+    health = deal_review.health
+    severity_counts = _issue_severity_counts(deal_review)
+    table.add_row(_plain("Source kinds"), _plain(_metric_summary(health.source_kinds)))
+    table.add_row(
+        _plain("Claim verification"),
+        _plain(_metric_summary(health.verification_statuses)),
+    )
+    table.add_row(_plain("Source freshness"), _plain(_metric_summary(health.recency)))
+    table.add_row(_plain("Claim materiality"), _plain(_metric_summary(health.materiality)))
+    table.add_row(_plain("Claim confidence"), _plain(_metric_summary(health.confidence)))
+    table.add_row(_plain("Source lineage"), _plain(_metric_summary(health.source_lineage)))
+    table.add_row(_plain("Review issues"), _plain(_metric_summary(severity_counts)))
     return table
 
 
@@ -858,7 +889,7 @@ def _source_document_review_table(deal_review: DealEvidenceReview) -> Table:
         freshness_issues = summary.stale_count + summary.unknown_freshness_count
         table.add_row(
             _plain(str(summary.document_path)),
-            _plain(str(summary.source_kind)),
+            _plain(_enum_label(summary.source_kind)),
             _plain(str(summary.evidence_count)),
             _plain(str(summary.missing_source_span_count)),
             _plain(str(summary.ocr_applied_count)),
@@ -910,7 +941,7 @@ def _claim_review_table(deal_review: DealEvidenceReview) -> Table:
     for summary in deal_review.claim_statuses:
         table.add_row(
             _plain(summary.label),
-            _plain(str(summary.verification_status)),
+            _plain(_enum_label(summary.verification_status)),
             _plain(str(summary.count)),
         )
     return table
@@ -955,11 +986,15 @@ def _issue_review_table(deal_review: DealEvidenceReview) -> Table:
         show_edge=False,
         pad_edge=False,
     )
-    table.add_column("Issue", style="bold cyan")
+    table.add_column("Severity", no_wrap=True)
+    table.add_column("Code", no_wrap=True)
+    table.add_column("Issue", style="bold cyan", overflow="fold")
     table.add_column("Count", justify="right")
-    table.add_column("What to review")
+    table.add_column("What to review", overflow="fold")
     if not deal_review.issues:
         table.add_row(
+            _plain(""),
+            _plain(""),
             _plain("No review issues found"),
             _plain("0"),
             _plain("No evidence review warnings were found for this store."),
@@ -967,6 +1002,8 @@ def _issue_review_table(deal_review: DealEvidenceReview) -> Table:
         return table
     for issue in deal_review.issues:
         table.add_row(
+            _plain(issue.severity.value),
+            _plain(issue.code),
             _plain(issue.issue),
             _plain(str(issue.count)),
             _plain(issue.guidance),
@@ -1011,7 +1048,7 @@ def _evidence_record_review_table(
             _plain(evidence.id),
             _plain(str(evidence.document_path)),
             _plain(_evidence_location(evidence)),
-            _plain(str(evidence.source_freshness)),
+            _plain(_enum_label(evidence.source_freshness)),
             _plain(_evidence_flags(evidence)),
         ]
         if excerpt_limit is not None:
@@ -1045,14 +1082,14 @@ def _evidence_location(evidence: object) -> str:
     return "document"
 
 
-def _evidence_flags(evidence: object) -> str:
+def _evidence_flags(evidence: EvidenceRecord) -> str:
     flags: list[str] = []
     if getattr(evidence, "ocr_applied", False):
         ocr_confidence = getattr(evidence, "ocr_confidence", None)
         if ocr_confidence is None:
-            flags.append("OCR")
+            flags.append("image-based text reading")
         else:
-            flags.append(f"OCR {_format_review_percent(ocr_confidence)}")
+            flags.append(f"image-based text reading {_format_review_percent(ocr_confidence)}")
     source_span_start = getattr(evidence, "source_span_start", None)
     source_span_end = getattr(evidence, "source_span_end", None)
     if (
@@ -1062,7 +1099,46 @@ def _evidence_flags(evidence: object) -> str:
         or source_span_end <= source_span_start
     ):
         flags.append("missing source span")
+    if supports_page_or_table_location(evidence) and (
+        evidence.page_number is None and evidence.table_index is None
+    ):
+        flags.append("missing page/table location")
     return ", ".join(flags) if flags else "none"
+
+
+class _MetricLike(Protocol):
+    @property
+    def label(self) -> str: ...
+
+    @property
+    def count(self) -> int: ...
+
+
+def _metric_summary(metrics: Sequence[_MetricLike]) -> str:
+    if not metrics:
+        return "none"
+    return ", ".join(f"{metric.label}: {metric.count}" for metric in metrics)
+
+
+def _issue_severity_counts(deal_review: DealEvidenceReview) -> list[_SimpleMetric]:
+    counts: dict[str, int] = {}
+    for issue in deal_review.issues:
+        counts[issue.severity.value] = counts.get(issue.severity.value, 0) + issue.count
+    return [
+        _SimpleMetric(label=label, count=count)
+        for label, count in sorted(counts.items(), key=lambda item: item[0])
+    ]
+
+
+@dataclass(frozen=True)
+class _SimpleMetric:
+    label: str
+    count: int
+
+
+def _enum_label(value: object) -> str:
+    raw_value = getattr(value, "value", value)
+    return str(raw_value).replace("_", " ")
 
 
 def _format_review_percent(value: float) -> str:
@@ -1078,7 +1154,7 @@ def _bounded_excerpt(text: str, limit: int) -> str:
     return f"{collapsed[: limit - 3].rstrip()}..."
 
 
-@app.command("score-deals")
+@app.command("score-deals", hidden=True)
 def score_deals(
     data_dir: Annotated[
         Path | None,
@@ -1453,7 +1529,7 @@ def evaluate_deal(
     _print_panel("Deal evaluation complete", renderables, border_style="green")
 
 
-@app.command("prepare-agent-packets")
+@app.command("prepare-agent-packets", hidden=True)
 def prepare_agent_packets_command(
     data_dir: Annotated[
         Path | None,
@@ -1484,7 +1560,7 @@ def prepare_agent_packets_command(
     )
 
 
-@app.command("validate-agent-output")
+@app.command("validate-agent-output", hidden=True)
 def validate_agent_output_command(
     output_path: Annotated[
         Path,
@@ -1528,7 +1604,7 @@ def validate_agent_output_command(
     )
 
 
-@app.command("run-evals")
+@app.command("run-evals", hidden=True)
 def run_evals_command(
     case: Annotated[
         list[str] | None,
@@ -1590,7 +1666,7 @@ def run_evals_command(
         raise typer.Exit(1) from None
 
 
-@app.command("list-research-providers")
+@app.command("list-research-providers", hidden=True)
 def list_research_providers_command(
     include_paid: Annotated[
         bool,
@@ -1644,7 +1720,7 @@ def list_research_providers_command(
     _print_panel("Research providers", renderables, border_style="cyan")
 
 
-@app.command("research-workflow")
+@app.command("research-workflow", hidden=True)
 def research_workflow_command(
     company: Annotated[
         list[str] | None,
@@ -2022,7 +2098,7 @@ def _research_workflow_import_lines(preview: ResearchWorkflowImportPreview) -> l
     return lines
 
 
-@app.command("prepare-research-plan")
+@app.command("prepare-research-plan", hidden=True)
 def prepare_research_plan_command(
     company: Annotated[
         list[str] | None,
@@ -2113,7 +2189,7 @@ def prepare_research_plan_command(
     _print_panel("Research plan prepared", plan_lines, border_style="green")
 
 
-@app.command("collect-web-research")
+@app.command("collect-web-research", hidden=True)
 def collect_web_research_command(
     research_plan: Annotated[
         Path | None,
@@ -2217,7 +2293,7 @@ def collect_web_research_command(
         raise typer.Exit(1)
 
 
-@app.command("prepare-research-results-template")
+@app.command("prepare-research-results-template", hidden=True)
 def prepare_research_results_template_command(
     research_plan: Annotated[
         Path | None,
@@ -2271,7 +2347,7 @@ def prepare_research_results_template_command(
     )
 
 
-@app.command("prepare-public-research-results")
+@app.command("prepare-public-research-results", hidden=True)
 def prepare_public_research_results_command(
     company: Annotated[
         list[str] | None,
@@ -2435,7 +2511,7 @@ def prepare_public_research_results_command(
     _print_section("Public research results prepared", result_lines, style="green")
 
 
-@app.command("collect-sec-form-d-filings")
+@app.command("collect-sec-form-d-filings", hidden=True)
 def collect_sec_form_d_filings_command(
     company: Annotated[
         list[str] | None,
@@ -2558,7 +2634,7 @@ def collect_sec_form_d_filings_command(
     _print_section("SEC Form D results collected", lines, style="green")
 
 
-@app.command("collect-github-repositories")
+@app.command("collect-github-repositories", hidden=True)
 def collect_github_repositories_command(
     company: Annotated[
         list[str] | None,
@@ -2692,7 +2768,7 @@ def collect_github_repositories_command(
     _print_section("GitHub repository results collected", lines, style="green")
 
 
-@app.command("collect-usaspending-awards")
+@app.command("collect-usaspending-awards", hidden=True)
 def collect_usaspending_awards_command(
     company: Annotated[
         list[str] | None,
@@ -2811,7 +2887,7 @@ def collect_usaspending_awards_command(
     _print_section("USAspending results collected", lines, style="green")
 
 
-@app.command("collect-sbir-awards")
+@app.command("collect-sbir-awards", hidden=True)
 def collect_sbir_awards_command(
     company: Annotated[
         list[str] | None,
@@ -2930,7 +3006,7 @@ def collect_sbir_awards_command(
     _print_section("SBIR/STTR results collected", lines, style="green")
 
 
-@app.command("prepare-meridian-workflow")
+@app.command("prepare-meridian-workflow", hidden=True)
 def prepare_meridian_workflow_command(
     company: Annotated[
         str,
@@ -2997,7 +3073,7 @@ def prepare_meridian_workflow_command(
     )
 
 
-@app.command("import-research-results")
+@app.command("import-research-results", hidden=True)
 def import_research_results_command(
     results_file: Annotated[
         Path,

@@ -6,11 +6,20 @@ from hailmary.evidence.store import (
     verify_citation,
 )
 
-from .review import EvidenceReviewError, review_evidence
+from .review import (
+    EvidenceReviewError,
+    ReviewIssueSeverity,
+    build_deal_evidence_review,
+    build_evidence_health,
+    review_evidence,
+)
 
 __all__ = [
     "EvidenceReviewError",
+    "ReviewIssueSeverity",
+    "build_deal_evidence_review",
     "build_evidence_store",
+    "build_evidence_health",
     "refresh_deal_term_claims",
     "review_evidence",
     "verify_citation",
