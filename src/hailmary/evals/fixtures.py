@@ -2942,7 +2942,9 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
             *,
             repair_issues: Sequence[AgentValidationIssue] = (),
             committee_context: str | None = None,
+            max_output_tokens: int | None = None,
         ) -> str:
+            del max_output_tokens
             self.roles.append(packet.agent_role)
             payload = json.dumps(
                 openai_review_messages(
@@ -3160,6 +3162,33 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "Expected evaluate-deal to persist parseable model-output artifacts for every role.",
         missing_roles=", ".join(missing_output_roles),
     )
+    metadata_paths = sorted((result.agent_output_dir / "model-call-metadata").glob("*.json"))
+    metadata_payloads = [
+        json.loads(path.read_text(encoding="utf-8")) for path in metadata_paths
+    ]
+    metadata_roles = {
+        AgentRole(str(payload.get("agent_role"))) for payload in metadata_payloads
+    }
+    missing_metadata_roles = sorted(
+        role.value for role in set(DEFAULT_AGENT_ROLES) - metadata_roles
+    )
+    _expect(
+        not missing_metadata_roles,
+        "Expected evaluate-deal to persist model-call metadata for every role.",
+        missing_roles=", ".join(missing_metadata_roles),
+    )
+    _expect(
+        all(payload.get("raw_prompt_stored") is False for payload in metadata_payloads),
+        "Expected model-call metadata to state that raw prompts are not stored.",
+    )
+    _expect(
+        all(
+            isinstance(payload.get("estimated_prompt_tokens"), int)
+            and isinstance(payload.get("estimated_response_tokens"), int)
+            for payload in metadata_payloads
+        ),
+        "Expected model-call metadata to include token estimates.",
+    )
     product_output = next(
         (
             output
@@ -3304,6 +3333,25 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         not leaked_private_markers,
         "Expected evaluate-deal outputs to avoid private long-tail text and local paths.",
         leaked_private_markers=", ".join(leaked_private_markers),
+    )
+    serialized_metadata = "\n".join(
+        json.dumps(payload, sort_keys=True) for payload in metadata_payloads
+    )
+    leaked_metadata_markers = [
+        marker
+        for marker in (
+            private_tail_marker,
+            str(company / "memo.txt"),
+            "input_file",
+            "https://example.com/synthetic-goldenco/traction",
+            "Synthetic GoldenCo public site reports paid customer growth",
+        )
+        if marker in serialized_metadata
+    ]
+    _expect(
+        not leaked_metadata_markers,
+        "Expected model-call metadata to avoid prompts, excerpts, source URLs, and paths.",
+        leaked_markers=", ".join(leaked_metadata_markers),
     )
 
 

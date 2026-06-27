@@ -41,6 +41,14 @@ class AppConfig(BaseModel):
     enable_ocr: bool = False
     enable_web_research: bool = False
     mock_llm: bool = True
+    llm_specialist_token_budget: int | None = None
+    llm_final_token_budget: int | None = None
+    llm_specialist_max_output_tokens: int | None = None
+    llm_final_max_output_tokens: int | None = None
+    llm_input_cost_per_million_tokens_cents: int | None = None
+    llm_output_cost_per_million_tokens_cents: int | None = None
+    llm_specialist_cost_budget_cents: int | None = None
+    llm_final_cost_budget_cents: int | None = None
 
     @property
     def config_dir(self) -> Path:
@@ -109,6 +117,32 @@ def _setting_int(
     if env_value is not None and env_value.strip() != "":
         return _env_int(env_name, default)
     return _config_int(config_values, config_name, default)
+
+
+def _env_optional_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return _parse_int(value, source=name)
+
+
+def _config_optional_int(values: dict[str, str], name: str) -> int | None:
+    value = values.get(name)
+    if value is None or value.strip() == "":
+        return None
+    return _parse_int(value, source=f".hailmary/config.yaml field {name}")
+
+
+def _setting_optional_int(
+    *,
+    env_name: str,
+    config_values: dict[str, str],
+    config_name: str,
+) -> int | None:
+    env_value = os.getenv(env_name)
+    if env_value is not None and env_value.strip() != "":
+        return _env_optional_int(env_name)
+    return _config_optional_int(config_values, config_name)
 
 
 def _env_decimal(name: str, default: Decimal) -> Decimal:
@@ -278,6 +312,46 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         enable_ocr=enable_ocr,
         enable_web_research=enable_web_research,
         mock_llm=mock_llm,
+        llm_specialist_token_budget=_setting_optional_int(
+            env_name="HAILMARY_LLM_SPECIALIST_TOKEN_BUDGET",
+            config_values=saved_values,
+            config_name="llm_specialist_token_budget",
+        ),
+        llm_final_token_budget=_setting_optional_int(
+            env_name="HAILMARY_LLM_FINAL_TOKEN_BUDGET",
+            config_values=saved_values,
+            config_name="llm_final_token_budget",
+        ),
+        llm_specialist_max_output_tokens=_setting_optional_int(
+            env_name="HAILMARY_LLM_SPECIALIST_MAX_OUTPUT_TOKENS",
+            config_values=saved_values,
+            config_name="llm_specialist_max_output_tokens",
+        ),
+        llm_final_max_output_tokens=_setting_optional_int(
+            env_name="HAILMARY_LLM_FINAL_MAX_OUTPUT_TOKENS",
+            config_values=saved_values,
+            config_name="llm_final_max_output_tokens",
+        ),
+        llm_input_cost_per_million_tokens_cents=_setting_optional_int(
+            env_name="HAILMARY_LLM_INPUT_COST_PER_MILLION_TOKENS_CENTS",
+            config_values=saved_values,
+            config_name="llm_input_cost_per_million_tokens_cents",
+        ),
+        llm_output_cost_per_million_tokens_cents=_setting_optional_int(
+            env_name="HAILMARY_LLM_OUTPUT_COST_PER_MILLION_TOKENS_CENTS",
+            config_values=saved_values,
+            config_name="llm_output_cost_per_million_tokens_cents",
+        ),
+        llm_specialist_cost_budget_cents=_setting_optional_int(
+            env_name="HAILMARY_LLM_SPECIALIST_COST_BUDGET_CENTS",
+            config_values=saved_values,
+            config_name="llm_specialist_cost_budget_cents",
+        ),
+        llm_final_cost_budget_cents=_setting_optional_int(
+            env_name="HAILMARY_LLM_FINAL_COST_BUDGET_CENTS",
+            config_values=saved_values,
+            config_name="llm_final_cost_budget_cents",
+        ),
     )
     return validate_investment_settings(config)
 
@@ -291,6 +365,7 @@ def validate_investment_settings(config: AppConfig) -> AppConfig:
     """Validate deterministic investment and portfolio assumptions."""
 
     _ensure_investment_limits(config)
+    _ensure_llm_limits(config)
     return config
 
 
@@ -493,6 +568,66 @@ def _ensure_investment_limits(config: AppConfig) -> None:
     )
     if config.gross_return_multiple < 0:
         raise ConfigError("The gross return multiple cannot be negative.")
+
+
+def _ensure_llm_limits(config: AppConfig) -> None:
+    _ensure_positive_optional_int(
+        config.llm_specialist_token_budget,
+        name="model specialist token budget",
+    )
+    _ensure_positive_optional_int(
+        config.llm_final_token_budget,
+        name="model final committee token budget",
+    )
+    _ensure_positive_optional_int(
+        config.llm_specialist_max_output_tokens,
+        name="model specialist output token cap",
+    )
+    _ensure_positive_optional_int(
+        config.llm_final_max_output_tokens,
+        name="model final committee output token cap",
+    )
+    _ensure_positive_optional_int(
+        config.llm_input_cost_per_million_tokens_cents,
+        name="model input cost rate",
+    )
+    _ensure_positive_optional_int(
+        config.llm_output_cost_per_million_tokens_cents,
+        name="model output cost rate",
+    )
+    _ensure_positive_optional_int(
+        config.llm_specialist_cost_budget_cents,
+        name="model specialist cost budget",
+    )
+    _ensure_positive_optional_int(
+        config.llm_final_cost_budget_cents,
+        name="model final committee cost budget",
+    )
+    cost_budget_configured = (
+        config.llm_specialist_cost_budget_cents is not None
+        or config.llm_final_cost_budget_cents is not None
+    )
+    cost_rates_complete = (
+        config.llm_input_cost_per_million_tokens_cents is not None
+        and config.llm_output_cost_per_million_tokens_cents is not None
+    )
+    if cost_budget_configured and not cost_rates_complete:
+        raise ConfigError(
+            "Model cost budgets need both input and output token cost rates. "
+            "Tokens are small chunks of model text, and Hail Mary did not guess "
+            "prices because model spending should fail closed."
+        )
+
+
+def _ensure_positive_optional_int(value: int | None, *, name: str) -> None:
+    if value is None:
+        return
+    if value <= 0:
+        raise ConfigError(
+            f"The {name} must be a positive whole number. "
+            "Hail Mary did not guess because model spending and privacy limits "
+            "should fail closed."
+        )
 
 
 def _ensure_percent(value: Decimal, *, name: str) -> None:
@@ -942,6 +1077,12 @@ def _default_config_text(config: AppConfig) -> str:
     enable_ocr = "true" if config.enable_ocr else "false"
     web_research = "true" if config.enable_web_research else "false"
     mock_llm = "true" if config.mock_llm else "false"
+    llm_input_cost_rate = _optional_int_text(
+        config.llm_input_cost_per_million_tokens_cents
+    )
+    llm_output_cost_rate = _optional_int_text(
+        config.llm_output_cost_per_million_tokens_cents
+    )
 
     return f"""# Local Hail Mary settings. Do not commit this file.
 data_dir: {_yaml_string(config.data_dir.as_posix())}
@@ -960,7 +1101,19 @@ meridian_profile_dir: {_yaml_string(config.meridian_profile_dir.as_posix())}
 enable_ocr: {enable_ocr}
 enable_web_research: {web_research}
 mock_llm: {mock_llm}
+llm_specialist_token_budget: {_optional_int_text(config.llm_specialist_token_budget)}
+llm_final_token_budget: {_optional_int_text(config.llm_final_token_budget)}
+llm_specialist_max_output_tokens: {_optional_int_text(config.llm_specialist_max_output_tokens)}
+llm_final_max_output_tokens: {_optional_int_text(config.llm_final_max_output_tokens)}
+llm_input_cost_per_million_tokens_cents: {llm_input_cost_rate}
+llm_output_cost_per_million_tokens_cents: {llm_output_cost_rate}
+llm_specialist_cost_budget_cents: {_optional_int_text(config.llm_specialist_cost_budget_cents)}
+llm_final_cost_budget_cents: {_optional_int_text(config.llm_final_cost_budget_cents)}
 """
+
+
+def _optional_int_text(value: int | None) -> str:
+    return "" if value is None else str(value)
 
 
 def _decimal_text(value: Decimal) -> str:
