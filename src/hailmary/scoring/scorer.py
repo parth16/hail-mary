@@ -211,6 +211,7 @@ NEGATED_TRACTION_PATTERNS = (
 )
 BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
+BENIGN_FUNDING_CONCERN_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 NEGATED_FUNDING_PATTERNS = (
     re.compile(
         r"\b(?:planned|projected|expected|future|upcoming|target|targeted)\s+"
@@ -270,8 +271,18 @@ NEGATED_FUNDING_PATTERNS = (
         r"(?:\s+investors?)?\b",
         re.IGNORECASE,
     ),
-    re.compile(r"\bno\s+(?:seed|follow[-\s]?on)(?:\s+\w+){0,3}\b", re.IGNORECASE),
-    re.compile(r"\bno\s+(?:\w+\s+){0,3}follow[-\s]?on\b", re.IGNORECASE),
+    re.compile(
+        r"\bno\s+"
+        rf"(?!(?:[\w-]+\s+){{0,4}}{BENIGN_FUNDING_CONCERN_NOUNS}\b)"
+        r"(?:seed|follow[-\s]?on)(?:\s+\w+){0,3}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno\s+"
+        rf"(?!(?:[\w-]+\s+){{0,4}}{BENIGN_FUNDING_CONCERN_NOUNS}\b)"
+        r"(?:\w+\s+){0,3}follow[-\s]?on\b",
+        re.IGNORECASE,
+    ),
 )
 PRICING_TERM_LABELS = {
     "post-money valuation",
@@ -830,13 +841,13 @@ def _fundability_factor(
     positive_funding_evidence = _positive_funding_evidence(store.evidence)
     negative_funding_evidence = _negative_funding_evidence(store.evidence)
     positive_traction_evidence = _positive_traction_evidence(store.evidence)
-    positive_funding_is_stale_only = _all_records_stale(positive_funding_evidence)
-    positive_traction_is_stale_only = _all_records_stale(positive_traction_evidence)
+    positive_funding_is_not_current = _all_records_not_current(positive_funding_evidence)
+    positive_traction_is_not_current = _all_records_not_current(positive_traction_evidence)
     matched_evidence = _dedupe_evidence_records(
         [
             *positive_funding_evidence,
             *negative_funding_evidence,
-            *(positive_traction_evidence if positive_traction_is_stale_only else []),
+            *(positive_traction_evidence if positive_traction_is_not_current else []),
         ]
     )
     missing_inputs: list[str] = []
@@ -844,7 +855,7 @@ def _fundability_factor(
         missing_inputs.append(
             "lead investor, institutional investor, or follow-on financing evidence"
         )
-    elif positive_funding_is_stale_only:
+    elif positive_funding_is_not_current:
         missing_inputs.append(
             "current lead investor, institutional investor, or follow-on evidence"
         )
@@ -856,7 +867,7 @@ def _fundability_factor(
         missing_inputs.append("verified deal terms")
     if pmf_level != PMFLevel.DEVELOPING:
         missing_inputs.append("customer, revenue, retention, or usage evidence")
-    elif positive_traction_is_stale_only:
+    elif positive_traction_is_not_current:
         missing_inputs.append("current customer, revenue, retention, or usage evidence")
     explanation = f"Next-round fundability risk is {fundability_risk}."
     if negative_funding_evidence and positive_funding_evidence:
@@ -870,15 +881,15 @@ def _fundability_factor(
             "Next-round fundability risk is high because source-linked evidence says "
             "lead, institutional, or follow-on financing is missing."
         )
-    elif positive_funding_is_stale_only:
+    elif positive_funding_is_not_current:
         explanation = (
             "Next-round fundability risk is high because funding support appears only "
-            "in stale evidence."
+            "in stale or undated evidence."
         )
-    elif positive_traction_is_stale_only:
+    elif positive_traction_is_not_current:
         explanation = (
             "Next-round fundability risk is high because traction support appears only "
-            "in stale evidence."
+            "in stale or undated evidence."
         )
     return ScoreFactor(
         name="Fundability and next-round risk",
@@ -1176,10 +1187,12 @@ def _net_return_estimate(
         and return_inputs.gross_exit_value is not None
         and entry_valuation > 0
     ):
+        ownership_fraction = max(0.0, return_inputs.ownership_percent / 100)
         ownership_after_dilution = max(0.0, 1 - (return_inputs.dilution_percent / 100))
         proceeds_after_fees = max(0.0, 1 - (return_inputs.fees_and_carry_percent / 100))
         net_multiple = round(
             (return_inputs.gross_exit_value / entry_valuation)
+            * ownership_fraction
             * ownership_after_dilution
             * proceeds_after_fees,
             2,
@@ -1364,14 +1377,14 @@ def _fundability_risk(
     has_traction = bool(traction_evidence)
     has_funding_signal = bool(funding_evidence)
     has_missing_funding_signal = bool(_negative_funding_evidence(store.evidence))
-    has_only_stale_support = (
-        (has_traction and _all_records_stale(traction_evidence))
-        or (has_funding_signal and _all_records_stale(funding_evidence))
+    has_only_non_current_support = (
+        (has_traction and _all_records_not_current(traction_evidence))
+        or (has_funding_signal and _all_records_not_current(funding_evidence))
     )
     if has_missing_funding_signal:
         return FundabilityRisk.HIGH
     if has_terms and has_traction and has_funding_signal:
-        if has_only_stale_support:
+        if has_only_non_current_support:
             return FundabilityRisk.HIGH
         return FundabilityRisk.LOW
     if has_terms and has_traction:
@@ -1532,7 +1545,7 @@ def _check_size_cap(
         cap = 1_000
     if (
         valuation_risk == ValuationRisk.MEDIUM
-        or fundability_risk == FundabilityRisk.MEDIUM
+        or fundability_risk in {FundabilityRisk.MEDIUM, FundabilityRisk.HIGH}
         or net_return.missing_inputs
     ):
         cap = _min_optional_cap(cap, _one_tier_lower(target))
@@ -1813,9 +1826,10 @@ def _negative_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceR
     ]
 
 
-def _all_records_stale(evidence: list[EvidenceRecord]) -> bool:
+def _all_records_not_current(evidence: list[EvidenceRecord]) -> bool:
     return bool(evidence) and all(
-        record.source_freshness == SourceFreshness.STALE for record in evidence
+        record.source_freshness in {SourceFreshness.STALE, SourceFreshness.UNKNOWN}
+        for record in evidence
     )
 
 
