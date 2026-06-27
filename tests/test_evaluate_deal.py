@@ -1843,6 +1843,42 @@ def test_evaluate_deal_cli_commentary_separates_check_size_caps_from_overrides(
     assert "controlled the final recommendation" not in commentary.decisive_factor
 
 
+def test_evaluate_deal_cli_commentary_explains_local_guarded_pass(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="LocalGuardedPassCo",
+        recommendation=Recommendation.INVEST,
+        check_size=1_000,
+        total_score=85,
+        one_line_reason=(
+            "Recommended because the score was 85/100, confidence was high, "
+            "and no kill gate triggered."
+        ),
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason=(
+            "NEEDS_DILIGENCE: Rule-based scoring suggested INVEST, but Hail Mary "
+            "could not keep safe cited evidence after citation checks."
+        ),
+        evidence=[],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        evaluation_mode="local-only",
+    )
+
+    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+
+    assert "safe source-linked recommendation citations" in commentary.decisive_factor
+    assert "final review did not clear" not in commentary.decisive_factor
+
+
 def test_forced_pass_warns_when_rule_based_citations_are_filtered() -> None:
     evidence = _evidence_record(
         "ev-instruction",
@@ -2926,11 +2962,12 @@ def _commentary_result(
     scored_deal: ScoredDeal,
     final_recommendation: AgentRecommendationRationale,
     final_output: AgentReviewOutput | None = None,
+    evaluation_mode: str = "model-backed",
 ) -> evaluation.DealEvaluationResult:
     return evaluation.DealEvaluationResult(
         deal_id=scored_deal.deal_id,
         company_name=scored_deal.company_name,
-        evaluation_mode="model-backed",
+        evaluation_mode=evaluation_mode,
         mode_explanation="Synthetic test mode.",
         document_count=1,
         evidence_count=1,

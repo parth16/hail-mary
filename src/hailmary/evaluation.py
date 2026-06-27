@@ -399,6 +399,16 @@ def _cli_decisive_factor(result: DealEvaluationResult) -> str:
             f"{uncertainty_prefix}The recommendation is PASS because {reason}.",
             max_chars=360,
         )
+    if result.evaluation_mode != "model-backed":
+        return _clean_cli_commentary_text(
+            (
+                f"{uncertainty_prefix}The recommendation is PASS because rule-based "
+                "scoring could not keep safe source-linked recommendation citations "
+                "for the suggested INVEST case. Review citation safety before relying "
+                "on the deal."
+            ),
+            max_chars=360,
+        )
     return _clean_cli_commentary_text(
         (
             f"{uncertainty_prefix}The recommendation is PASS because final review did "
