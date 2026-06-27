@@ -737,6 +737,20 @@ def test_run_research_workflow_counts_only_unresolved_manual_tasks(
 
     assert result.manual_task_count > 0
     assert result.unresolved_manual_task_count == result.manual_task_count - 1
+    sam_status = next(
+        status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "sam_gov"
+    )
+    assert sam_status.status == ResearchProviderRunStatus.PLANNED
+    assert sam_status.collected_count == 1
+    assert not any(
+        status.provider_id.startswith("import:")
+        for status in result.summary.provider_statuses
+    )
+    assert result.manual_task_queue_path is not None
+    queue_payload = json.loads(result.manual_task_queue_path.read_text(encoding="utf-8"))
+    assert all(task["provider_id"] != "sam_gov" for task in queue_payload["tasks"])
 
 
 def test_prepare_research_plan_rejects_meridian_url_for_multiple_companies(

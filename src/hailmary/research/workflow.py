@@ -290,11 +290,6 @@ def run_research_workflow(
             plan_path=plan_result.output_path,
             created_at=created_at,
         )
-        manual_task_queue_path = _write_manual_task_queue(
-            config=config,
-            plan=plan_result.plan,
-            created_at=created_at,
-        )
     except Exception as exc:
         raise ResearchWorkflowError(str(exc)) from exc
 
@@ -414,6 +409,17 @@ def run_research_workflow(
         supplied_result_paths=set(results_files or []),
     )
     issues.extend(import_issues)
+    try:
+        manual_task_queue_path = _write_manual_task_queue(
+            config=config,
+            manual_tasks=_unresolved_manual_tasks_from_plan(
+                plan_result.plan,
+                import_previews,
+            ),
+            created_at=created_at,
+        )
+    except Exception as exc:
+        raise ResearchWorkflowError(str(exc)) from exc
 
     return ResearchWorkflowRunSummary(
         created_at=created_at,
@@ -434,10 +440,9 @@ def run_research_workflow(
 def _write_manual_task_queue(
     *,
     config: AppConfig,
-    plan: ResearchPlan,
+    manual_tasks: list[ResearchTask],
     created_at: datetime,
 ) -> Path | None:
-    manual_tasks = [task for task in plan.tasks if _task_needs_manual_work(task)]
     if not manual_tasks:
         return None
     output_dir = config.data_dir / "research-manual-tasks"
@@ -939,15 +944,41 @@ def _provider_display_name(provider_id: str) -> str:
     return provider.name if provider is not None else provider_id
 
 
-def _collection_import_source_id(collection: ResearchWorkflowCollectionSummary) -> str:
-    provider_ids_with_results = [
-        provider_status.provider_id
-        for provider_status in collection.provider_statuses
-        if provider_status.collected_count > 0
+def _import_preview_provider_statuses(
+    preview: ResearchWorkflowImportPreview,
+    *,
+    plan: ResearchPlan,
+) -> list[ResearchProviderStatusSummary]:
+    if preview.error is not None or preview.imported_count <= 0:
+        return []
+    try:
+        results_file = ResearchResultsFile.model_validate_json(
+            preview.input_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return []
+    deal_company_names = {
+        deal.deal_id: deal.company_name
+        for deal in plan.deals
+    }
+    provider_counts: dict[str, int] = {}
+    for result in results_file.results:
+        company_name = result.company_name
+        if company_name is None and result.deal_id is not None:
+            company_name = deal_company_names.get(result.deal_id)
+        if company_name is None:
+            continue
+        provider_counts[result.provider_id] = provider_counts.get(result.provider_id, 0) + 1
+    return [
+        ResearchProviderStatusSummary(
+            provider_id=provider_id,
+            provider_name=_provider_display_name(provider_id),
+            status=ResearchProviderRunStatus.PLANNED,
+            collected_count=result_count,
+        )
+        for provider_id, result_count in sorted(provider_counts.items())
+        if result_count > 0
     ]
-    if len(provider_ids_with_results) == 1:
-        return provider_ids_with_results[0]
-    return collection.source_id
 
 
 def _warnings_indicate_incomplete_search(warnings: list[str]) -> bool:
@@ -976,10 +1007,8 @@ def _research_workflow_summary(
         )
         for source in workflow.source_summaries
     }
-    path_to_source_id = {
-        collection.output_path.resolve(strict=False): _collection_import_source_id(
-            collection
-        )
+    collection_output_paths = {
+        collection.output_path.resolve(strict=False)
         for collection in workflow.collections
         if collection.output_path is not None
     }
@@ -1052,19 +1081,37 @@ def _research_workflow_summary(
         )
 
     for preview in workflow.import_previews:
-        if preview.imported_count <= 0:
+        preview_path = preview.input_path.resolve(strict=False)
+        if preview.imported_count <= 0 or preview_path in collection_output_paths:
             continue
-        source_id = path_to_source_id.get(preview.input_path.resolve(strict=False))
-        if source_id is None:
-            source_id = f"import:{preview.input_path.name}"
-        status = statuses.get(source_id)
-        if status is None:
-            status = ResearchProviderStatusSummary(
-                provider_id=source_id,
-                provider_name=preview.input_path.name,
-                status=ResearchProviderRunStatus.PLANNED,
+        for provider_status in _import_preview_provider_statuses(
+            preview,
+            plan=workflow.plan,
+        ):
+            existing_status = statuses.get(provider_status.provider_id)
+            if existing_status is None:
+                existing_status = ResearchProviderStatusSummary(
+                    provider_id=provider_status.provider_id,
+                    provider_name=provider_status.provider_name,
+                    status=provider_status.status,
+                )
+            statuses[provider_status.provider_id] = existing_status.model_copy(
+                update={
+                    "provider_name": provider_status.provider_name,
+                    "status": _merge_provider_status_summary(
+                        existing=existing_status,
+                        incoming=provider_status,
+                    ),
+                    "collected_count": (
+                        existing_status.collected_count
+                        + provider_status.collected_count
+                    ),
+                    "no_exact_result_companies": sorted(
+                        set(existing_status.no_exact_result_companies)
+                        | set(provider_status.no_exact_result_companies)
+                    ),
+                }
             )
-        statuses[source_id] = status
 
     provider_statuses = list(statuses.values())
     warning_count = sum(1 for issue in workflow.issues if issue.severity == "warning")
@@ -1124,6 +1171,24 @@ def _merge_provider_status_summary(
     existing: ResearchProviderStatusSummary,
     incoming: ResearchProviderStatusSummary,
 ) -> ResearchProviderRunStatus:
+    lower_priority_statuses = {
+        ResearchProviderRunStatus.NO_EXACT_RESULTS,
+        ResearchProviderRunStatus.MANUAL_NEEDED,
+        ResearchProviderRunStatus.NOT_RUN,
+        ResearchProviderRunStatus.PLANNED,
+    }
+    if (
+        incoming.status == ResearchProviderRunStatus.PLANNED
+        and incoming.collected_count > 0
+        and existing.status in lower_priority_statuses
+    ):
+        return ResearchProviderRunStatus.PLANNED
+    if (
+        existing.status == ResearchProviderRunStatus.PLANNED
+        and existing.collected_count > 0
+        and incoming.status in lower_priority_statuses
+    ):
+        return ResearchProviderRunStatus.PLANNED
     if (
         ResearchProviderRunStatus.NO_EXACT_RESULTS
         in {existing.status, incoming.status}
@@ -1179,10 +1244,20 @@ def _source_summaries(plan: ResearchPlan) -> list[ResearchWorkflowSourceSummary]
 
 
 def _unresolved_manual_tasks(workflow: ResearchWorkflowRunSummary) -> list[ResearchTask]:
-    resolved_result_keys = _resolved_research_result_keys(workflow)
+    return _unresolved_manual_tasks_from_plan(
+        workflow.plan,
+        workflow.import_previews,
+    )
+
+
+def _unresolved_manual_tasks_from_plan(
+    plan: ResearchPlan,
+    import_previews: list[ResearchWorkflowImportPreview],
+) -> list[ResearchTask]:
+    resolved_result_keys = _resolved_research_result_keys(plan, import_previews)
     return [
         task
-        for task in workflow.plan.tasks
+        for task in plan.tasks
         if _task_needs_manual_work(task)
         and _research_result_key(task.company_name, task.provider_id)
         not in resolved_result_keys
@@ -1190,14 +1265,15 @@ def _unresolved_manual_tasks(workflow: ResearchWorkflowRunSummary) -> list[Resea
 
 
 def _resolved_research_result_keys(
-    workflow: ResearchWorkflowRunSummary,
+    plan: ResearchPlan,
+    import_previews: list[ResearchWorkflowImportPreview],
 ) -> set[tuple[str, str]]:
     deal_company_names = {
         deal.deal_id: deal.company_name
-        for deal in workflow.plan.deals
+        for deal in plan.deals
     }
     result_keys: set[tuple[str, str]] = set()
-    for preview in workflow.import_previews:
+    for preview in import_previews:
         if preview.error is not None:
             continue
         try:
