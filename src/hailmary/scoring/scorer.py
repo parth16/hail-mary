@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 
 from hailmary.config import CHECK_SIZE_TIERS, AppConfig
@@ -17,6 +18,8 @@ from hailmary.schemas.scoring import (
     CompanyStage,
     ConfidenceLevel,
     DiligenceQuestion,
+    DiligenceQuestionCategory,
+    DiligenceResearchContext,
     FundabilityRisk,
     KillGate,
     NetReturnEstimate,
@@ -210,6 +213,10 @@ NEGATED_TRACTION_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+ABSENCE_TRACTION_PATTERNS = (
+    NEGATED_TRACTION_PATTERNS[0],
+    *NEGATED_TRACTION_PATTERNS[2:],
+)
 BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_FUNDING_CONCERN_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
@@ -297,6 +304,7 @@ def score_evidence_store(
     *,
     config: AppConfig,
     capital_remaining: int | None = None,
+    research_context: DiligenceResearchContext | None = None,
 ) -> ScoredDeal:
     """Score one deal using only validated evidence-store records."""
 
@@ -409,6 +417,8 @@ def score_evidence_store(
             valuation_risk=valuation_risk,
             net_return=net_return,
             valid_conflicts=valid_conflicts,
+            kill_gates=kill_gates,
+            research_context=research_context,
         ),
         capital_remaining_before=available_capital,
         capital_remaining_after=max(0, available_capital - check_size),
@@ -1428,58 +1438,219 @@ def _diligence_questions(
     valuation_risk: ValuationRisk,
     net_return: NetReturnEstimate,
     valid_conflicts: list[ClaimConflict],
+    kill_gates: list[KillGate],
+    research_context: DiligenceResearchContext | None,
 ) -> list[DiligenceQuestion]:
     questions: list[DiligenceQuestion] = []
+    if not store.evidence:
+        questions.extend(
+            [
+                _question(
+                    category=DiligenceQuestionCategory.COMPANY,
+                    question=(
+                        "Provide source-linked company materials before relying on this "
+                        "deal."
+                    ),
+                    reason=(
+                        "No usable source evidence was available, so material claims "
+                        "cannot be checked."
+                    ),
+                    materiality_score=5,
+                    decision_impact_score=5,
+                    missing_evidence_score=5,
+                    confidence_gap_score=5,
+                    missing_evidence=["source-linked evidence"],
+                ),
+                _question(
+                    category=DiligenceQuestionCategory.FINANCING_TERMS,
+                    question="Confirm valuation, round size, discount, and minimum check.",
+                    reason=(
+                        "The check size and recommendation cannot be trusted without "
+                        "verified investment terms."
+                    ),
+                    materiality_score=5,
+                    decision_impact_score=5,
+                    missing_evidence_score=5,
+                    confidence_gap_score=5,
+                    missing_evidence=[
+                        "verified valuation or valuation cap",
+                        "verified round size",
+                        "verified discount",
+                        "verified minimum check",
+                    ],
+                ),
+                _question(
+                    category=DiligenceQuestionCategory.CUSTOMERS,
+                    question="Find concrete customer, revenue, retention, or usage evidence.",
+                    reason=(
+                        "Customer proof is needed to judge whether product demand is real."
+                    ),
+                    materiality_score=4,
+                    decision_impact_score=4,
+                    missing_evidence_score=5,
+                    confidence_gap_score=4,
+                    missing_evidence=[
+                        "customer, revenue, retention, usage, pilot, or design-partner proof"
+                    ],
+                ),
+                _question(
+                    category=DiligenceQuestionCategory.LEGAL_COMPLIANCE,
+                    question=(
+                        "Check for legal, regulatory, or platform restrictions before "
+                        "advancing diligence."
+                    ),
+                    reason=(
+                        "Without source materials, Hail Mary cannot tell whether any "
+                        "legal or platform constraint blocks an investment."
+                    ),
+                    materiality_score=4,
+                    decision_impact_score=4,
+                    missing_evidence_score=5,
+                    confidence_gap_score=4,
+                    missing_evidence=["legal, regulatory, and platform constraint evidence"],
+                ),
+            ]
+        )
+        research_question = _research_status_question(research_context)
+        if research_question is not None:
+            questions.append(research_question)
+        return _rank_questions(questions)
+
     if valid_conflicts:
         questions.append(
-            DiligenceQuestion(
-                priority=1,
+            _question(
+                category=DiligenceQuestionCategory.FINANCING_TERMS,
                 question="Resolve the conflicting deal terms in the original documents.",
-                reason="The evidence store has conflicting extracted values.",
-                evidence_ids=_conflict_evidence_ids(store, valid_conflicts),
+                reason=(
+                    "Conflicting deal terms can change price, ownership, and whether "
+                    "the check fits the portfolio."
+                ),
+                materiality_score=5,
+                decision_impact_score=5,
+                missing_evidence_score=3,
+                confidence_gap_score=5,
+                conflicting_evidence_ids=_conflict_evidence_ids(store, valid_conflicts),
+                missing_evidence=["resolved source for conflicting deal terms"],
+            )
+        )
+    positive_traction = _positive_traction_evidence(store.evidence)
+    negative_traction = _negative_traction_evidence(store.evidence)
+    if positive_traction and negative_traction:
+        questions.append(
+            _question(
+                category=DiligenceQuestionCategory.CUSTOMERS,
+                question="Resolve the conflicting customer traction signals.",
+                reason=(
+                    "The evidence contains both traction support and statements that "
+                    "traction is missing, which can change product and customer risk."
+                ),
+                materiality_score=5,
+                decision_impact_score=5,
+                missing_evidence_score=3,
+                confidence_gap_score=5,
+                supporting_evidence_ids=_dedupe_evidence_ids(positive_traction),
+                conflicting_evidence_ids=_dedupe_evidence_ids(negative_traction),
+                missing_evidence=["resolved customer traction evidence"],
             )
         )
     if not verified_claims:
         questions.append(
-            DiligenceQuestion(
-                priority=2,
+            _question(
+                category=DiligenceQuestionCategory.FINANCING_TERMS,
                 question="Confirm valuation, round size, discount, and minimum check.",
-                reason="No verified deal-term claims were available.",
+                reason=(
+                    "No verified deal-term claims were available, so pricing and "
+                    "basic access terms are still unconfirmed."
+                ),
+                materiality_score=5,
+                decision_impact_score=5,
+                missing_evidence_score=5,
+                confidence_gap_score=5,
+                missing_evidence=[
+                    "verified valuation or valuation cap",
+                    "verified round size",
+                    "verified discount",
+                    "verified minimum check",
+                ],
+            )
+        )
+    elif "verified round size for pre-money valuation" in net_return.missing_inputs:
+        questions.append(
+            _question(
+                category=DiligenceQuestionCategory.FINANCING_TERMS,
+                question="Confirm the round size for the verified pre-money valuation.",
+                reason=(
+                    "A pre-money valuation needs the round size before Hail Mary can "
+                    "calculate the post-money entry valuation."
+                ),
+                materiality_score=5,
+                decision_impact_score=5,
+                missing_evidence_score=5,
+                confidence_gap_score=4,
+                supporting_evidence_ids=net_return.evidence_ids,
+                missing_evidence=["verified round size for pre-money valuation"],
             )
         )
     elif not _has_readable_pricing_term(verified_claims):
         questions.append(
-            DiligenceQuestion(
-                priority=2,
+            _question(
+                category=DiligenceQuestionCategory.FINANCING_TERMS,
                 question="Confirm the valuation, valuation cap, or priced-round valuation.",
-                reason="The evidence did not include a verified pricing term.",
-                evidence_ids=_claim_evidence_ids(verified_claims),
+                reason=(
+                    "The evidence did not include a verified pricing term, so Hail "
+                    "Mary cannot model entry price or return."
+                ),
+                materiality_score=5,
+                decision_impact_score=5,
+                missing_evidence_score=5,
+                confidence_gap_score=4,
+                supporting_evidence_ids=_claim_evidence_ids(verified_claims),
+                missing_evidence=["verified valuation or valuation cap"],
             )
         )
     if company_stage == CompanyStage.UNKNOWN:
         questions.append(
-            DiligenceQuestion(
-                priority=3,
+            _question(
+                category=DiligenceQuestionCategory.COMPANY,
                 question="Confirm the company stage before applying the underwriting bar.",
                 reason="The extracted evidence did not include an explicit stage signal.",
+                materiality_score=4,
+                decision_impact_score=4,
+                missing_evidence_score=4,
+                confidence_gap_score=3,
+                missing_evidence=["explicit company stage"],
             )
         )
     if pmf_level == PMFLevel.UNKNOWN:
         questions.append(
-            DiligenceQuestion(
-                priority=4,
+            _question(
+                category=DiligenceQuestionCategory.CUSTOMERS,
                 question="Find concrete customer, revenue, retention, or usage evidence.",
                 reason="The extracted evidence did not show product-market fit signals.",
+                materiality_score=4,
+                decision_impact_score=4,
+                missing_evidence_score=5,
+                confidence_gap_score=4,
+                missing_evidence=[
+                    "customer, revenue, retention, usage, pilot, or design-partner proof"
+                ],
             )
         )
     if fundability_risk in {FundabilityRisk.HIGH, FundabilityRisk.UNKNOWN}:
         questions.append(
-            DiligenceQuestion(
-                priority=5,
+            _question(
+                category=DiligenceQuestionCategory.FINANCING_TERMS,
                 question="Check whether the company can raise the next round.",
                 reason="The evidence has limited investor or growth signals.",
-                evidence_ids=[
-                    evidence.id for evidence in _negative_funding_evidence(store.evidence)[:5]
+                materiality_score=4,
+                decision_impact_score=4,
+                missing_evidence_score=4,
+                confidence_gap_score=4,
+                conflicting_evidence_ids=[
+                    evidence.id for evidence in _negative_funding_evidence(store.evidence)
+                ],
+                missing_evidence=[
+                    "lead investor, institutional investor, or follow-on financing evidence"
                 ],
             )
         )
@@ -1491,34 +1662,277 @@ def _diligence_questions(
             pmf_level,
         )
         questions.append(
-            DiligenceQuestion(
-                priority=1,
+            _question(
+                category=DiligenceQuestionCategory.FINANCING_TERMS,
                 question="Confirm why the valuation is justified by current evidence.",
                 reason="The verified valuation appears far ahead of stage and traction.",
-                evidence_ids=valuation_evidence_ids,
+                materiality_score=5,
+                decision_impact_score=5,
+                missing_evidence_score=3,
+                confidence_gap_score=4,
+                supporting_evidence_ids=valuation_evidence_ids,
+                missing_evidence=["current evidence justifying the valuation"],
             )
         )
     if net_return.missing_inputs:
         questions.append(
-            DiligenceQuestion(
-                priority=6,
+            _question(
+                category=DiligenceQuestionCategory.PORTFOLIO_FIT,
                 question="Collect the missing return-math inputs before sizing the check.",
                 reason=(
                     "Hail Mary needs verified "
                     f"{', '.join(net_return.missing_inputs)} to model net return."
                 ),
-                evidence_ids=net_return.evidence_ids,
+                materiality_score=4,
+                decision_impact_score=5,
+                missing_evidence_score=5,
+                confidence_gap_score=4,
+                supporting_evidence_ids=net_return.evidence_ids,
+                missing_evidence=net_return.missing_inputs,
             )
         )
+    questions.extend(
+        _evidence_verification_questions(
+            store,
+            verified_claims,
+        )
+    )
+    research_question = _research_status_question(research_context)
+    if research_question is not None:
+        questions.append(research_question)
+    questions.extend(_triggered_gate_questions(kill_gates))
     if not questions:
         questions.append(
-            DiligenceQuestion(
-                priority=1,
+            _question(
+                category=DiligenceQuestionCategory.COMPANY,
                 question="Verify that the strongest claims remain true in current materials.",
                 reason="The deterministic checks did not find a blocking gap.",
+                materiality_score=3,
+                decision_impact_score=3,
+                missing_evidence_score=2,
+                confidence_gap_score=2,
+                supporting_evidence_ids=_dedupe_evidence_ids(store.evidence),
+                missing_evidence=["current confirmation of strongest claims"],
             )
         )
-    return sorted(questions, key=lambda question: question.priority)
+    return _rank_questions(questions)
+
+
+def _question(
+    *,
+    category: DiligenceQuestionCategory,
+    question: str,
+    reason: str,
+    materiality_score: int,
+    decision_impact_score: int,
+    missing_evidence_score: int,
+    confidence_gap_score: int,
+    supporting_evidence_ids: Iterable[str] = (),
+    conflicting_evidence_ids: Iterable[str] = (),
+    missing_evidence: Iterable[str] = (),
+    support_status: ScoreSupportStatus = ScoreSupportStatus.NEEDS_DILIGENCE,
+) -> DiligenceQuestion:
+    supporting_ids = _dedupe_strings(supporting_evidence_ids)
+    conflicting_ids = _dedupe_strings(conflicting_evidence_ids)
+    missing_labels = _dedupe_strings(missing_evidence, limit=None)
+    evidence_ids = _question_evidence_ids(supporting_ids, conflicting_ids)
+    return DiligenceQuestion(
+        priority=0,
+        question=question,
+        reason=reason,
+        evidence_ids=evidence_ids,
+        support_status=support_status,
+        category=category,
+        rank_score=(
+            materiality_score
+            + decision_impact_score
+            + missing_evidence_score
+            + confidence_gap_score
+        ),
+        materiality_score=materiality_score,
+        decision_impact_score=decision_impact_score,
+        missing_evidence_score=missing_evidence_score,
+        confidence_gap_score=confidence_gap_score,
+        supporting_evidence_ids=supporting_ids,
+        conflicting_evidence_ids=conflicting_ids,
+        missing_evidence=missing_labels,
+    )
+
+
+def _question_evidence_ids(
+    supporting_evidence_ids: list[str],
+    conflicting_evidence_ids: list[str],
+) -> list[str]:
+    if not conflicting_evidence_ids:
+        return _dedupe_strings(supporting_evidence_ids)
+    if not supporting_evidence_ids:
+        return _dedupe_strings(conflicting_evidence_ids)
+    evidence_ids = _dedupe_strings(
+        [*supporting_evidence_ids[:4], *conflicting_evidence_ids]
+    )
+    if any(evidence_id in evidence_ids for evidence_id in conflicting_evidence_ids):
+        return evidence_ids
+    return _dedupe_strings([*supporting_evidence_ids[:4], conflicting_evidence_ids[0]])
+
+
+def _rank_questions(questions: list[DiligenceQuestion]) -> list[DiligenceQuestion]:
+    deduped: dict[str, DiligenceQuestion] = {}
+    for question in questions:
+        existing = deduped.get(question.question)
+        if existing is None or question.rank_score > existing.rank_score:
+            deduped[question.question] = question
+    ranked = sorted(
+        deduped.values(),
+        key=lambda item: (
+            -item.rank_score,
+            item.category.value,
+            item.question.casefold(),
+        ),
+    )
+    return [
+        question.model_copy(update={"priority": priority})
+        for priority, question in enumerate(ranked, start=1)
+    ]
+
+
+def _evidence_verification_questions(
+    store: EvidenceStore,
+    verified_claims: list[ClaimRecord],
+) -> list[DiligenceQuestion]:
+    questions: list[DiligenceQuestion] = []
+    stale_or_unknown_ids = [
+        evidence.id
+        for evidence in store.evidence
+        if evidence.source_freshness in {SourceFreshness.STALE, SourceFreshness.UNKNOWN}
+    ]
+    if stale_or_unknown_ids:
+        questions.append(
+            _question(
+                category=DiligenceQuestionCategory.COMPANY,
+                question="Verify stale or undated evidence before relying on it.",
+                reason=(
+                    "Old or undated evidence may no longer reflect the company's "
+                    "current traction, terms, or risks."
+                ),
+                materiality_score=4,
+                decision_impact_score=3,
+                missing_evidence_score=3,
+                confidence_gap_score=4,
+                supporting_evidence_ids=stale_or_unknown_ids,
+                missing_evidence=["current source dates"],
+            )
+        )
+    low_confidence_claim_ids = _low_confidence_claim_evidence_ids(verified_claims)
+    if low_confidence_claim_ids:
+        questions.append(
+            _question(
+                category=DiligenceQuestionCategory.COMPANY,
+                question="Verify low-confidence extracted claims against the source.",
+                reason=(
+                    "Low-confidence claims can distort score factors if extraction or "
+                    "source quality was weak."
+                ),
+                materiality_score=4,
+                decision_impact_score=3,
+                missing_evidence_score=3,
+                confidence_gap_score=5,
+                supporting_evidence_ids=low_confidence_claim_ids,
+                missing_evidence=["higher-confidence support for extracted claims"],
+            )
+        )
+    image_text_ids = [
+        evidence.id
+        for evidence in store.evidence
+        if evidence.ocr_applied
+        and (
+            evidence.ocr_confidence is None
+            or evidence.ocr_confidence < 0.75
+        )
+    ]
+    if image_text_ids:
+        questions.append(
+            _question(
+                category=DiligenceQuestionCategory.COMPANY,
+                question="Review low-confidence image-read evidence against the source.",
+                reason=(
+                    "Image-read text can misread numbers or names, so it needs source "
+                    "review before it drives diligence."
+                ),
+                materiality_score=4,
+                decision_impact_score=3,
+                missing_evidence_score=3,
+                confidence_gap_score=5,
+                supporting_evidence_ids=image_text_ids,
+                missing_evidence=["source review for low-confidence image-read evidence"],
+            )
+        )
+    return questions
+
+
+def _research_status_question(
+    research_context: DiligenceResearchContext | None,
+) -> DiligenceQuestion | None:
+    if research_context is None or research_context.planned_task_count == 0:
+        return None
+    missing_evidence: list[str] = []
+    if research_context.failed_provider_count:
+        missing_evidence.append("resolved failed external research providers")
+    if research_context.incomplete_search_count:
+        missing_evidence.append("completed external research searches")
+    if research_context.no_exact_result_provider_count:
+        missing_evidence.append("exact-match external research results")
+    if research_context.manual_needed_provider_count:
+        missing_evidence.append("manual external research results")
+    if research_context.not_run_provider_count:
+        missing_evidence.append("run or explicitly skipped external research providers")
+    if research_context.stale_record_count:
+        missing_evidence.append("current external research records")
+    if research_context.warning_count:
+        missing_evidence.append("resolved external research warnings")
+    if research_context.no_prepared_result_companies:
+        missing_evidence.append("prepared external research for requested companies")
+    if not missing_evidence:
+        return None
+    return _question(
+        category=DiligenceQuestionCategory.MARKET,
+        question="Finish unresolved external research before relying on public-source gaps.",
+        reason=(
+            "Incomplete public-source research can leave market, customer, financing, "
+            "or legal facts unverified."
+        ),
+        materiality_score=4,
+        decision_impact_score=3,
+        missing_evidence_score=4,
+        confidence_gap_score=4,
+        missing_evidence=missing_evidence,
+    )
+
+
+def _triggered_gate_questions(kill_gates: list[KillGate]) -> list[DiligenceQuestion]:
+    questions: list[DiligenceQuestion] = []
+    for gate in kill_gates:
+        if not gate.triggered or gate.name in {
+            "No usable source-linked evidence",
+            "No verified deal terms",
+            "Missing key investment terms",
+            "Conflicting material deal terms",
+            "Valuation far ahead of evidence",
+        }:
+            continue
+        questions.append(
+            _question(
+                category=DiligenceQuestionCategory.PORTFOLIO_FIT,
+                question=f"Resolve the triggered gate: {gate.name}.",
+                reason=gate.reason,
+                materiality_score=5,
+                decision_impact_score=5,
+                missing_evidence_score=3,
+                confidence_gap_score=4,
+                supporting_evidence_ids=gate.evidence_ids,
+                missing_evidence=[gate.name],
+            )
+        )
+    return questions
 
 
 def _check_size_for_score(
@@ -1828,6 +2242,14 @@ def _positive_traction_evidence(evidence: list[EvidenceRecord]) -> list[Evidence
     ]
 
 
+def _negative_traction_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
+    return [
+        record
+        for record in evidence
+        if _negated_spans(record.text, ABSENCE_TRACTION_PATTERNS)
+    ]
+
+
 def _dedupe_evidence_records(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
     return list({record.id: record for record in evidence}.values())
 
@@ -1948,6 +2370,12 @@ def _claim_evidence_ids(claims: list[ClaimRecord]) -> list[str]:
     return evidence_ids[:5]
 
 
+def _low_confidence_claim_evidence_ids(claims: list[ClaimRecord]) -> list[str]:
+    return _claim_evidence_ids(
+        [claim for claim in claims if claim.quality.confidence < 0.75]
+    )
+
+
 def _pricing_evidence_ids(verified_claims: list[ClaimRecord]) -> list[str]:
     valuation_claim = _valuation_claim(verified_claims)
     if valuation_claim is None or _entry_valuation(verified_claims, valuation_claim) is None:
@@ -2016,6 +2444,18 @@ def _dedupe_evidence_ids(evidence: list[EvidenceRecord]) -> list[str]:
         if record.id not in evidence_ids:
             evidence_ids.append(record.id)
     return evidence_ids[:5]
+
+
+def _dedupe_strings(values: Iterable[str], *, limit: int | None = 5) -> list[str]:
+    deduped: list[str] = []
+    for value in values:
+        stripped = value.strip()
+        if not stripped or stripped in deduped:
+            continue
+        deduped.append(stripped)
+        if limit is not None and len(deduped) >= limit:
+            break
+    return deduped
 
 
 def _stage_pmf_evidence_ids(

@@ -75,7 +75,12 @@ from hailmary.schemas.evidence import (
     EvidenceStore,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal
+from hailmary.schemas.scoring import (
+    ConfidenceLevel,
+    DiligenceResearchContext,
+    Recommendation,
+    ScoredDeal,
+)
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -163,6 +168,27 @@ class EvaluationResearchRun:
     @property
     def stale_count(self) -> int:
         return sum(result.stale_count for result in self.imports)
+
+
+def _diligence_research_context(
+    research_run: EvaluationResearchRun | None,
+) -> DiligenceResearchContext | None:
+    if research_run is None:
+        return None
+    workflow = research_run.workflow
+    summary = workflow.summary
+    return DiligenceResearchContext(
+        planned_task_count=workflow.plan.task_count,
+        imported_record_count=research_run.imported_count,
+        failed_provider_count=summary.failed_provider_count,
+        incomplete_search_count=summary.incomplete_search_count,
+        no_exact_result_provider_count=summary.no_exact_result_provider_count,
+        manual_needed_provider_count=summary.manual_needed_provider_count,
+        not_run_provider_count=summary.not_run_provider_count,
+        stale_record_count=research_run.stale_count,
+        warning_count=summary.warning_count,
+        no_prepared_result_companies=workflow.no_prepared_result_companies,
+    )
 
 
 @dataclass(frozen=True)
@@ -376,6 +402,7 @@ def evaluate_deal_folder(
         store,
         config=config,
         capital_remaining=status.available_capital,
+        research_context=_diligence_research_context(research_run),
     )
 
     packet_created_at = created_at or datetime.now(UTC)
