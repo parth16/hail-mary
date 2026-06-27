@@ -158,6 +158,10 @@ class EvaluationResearchRun:
     def skipped_duplicate_count(self) -> int:
         return sum(result.skipped_duplicate_count for result in self.imports)
 
+    @property
+    def stale_count(self) -> int:
+        return sum(result.stale_count for result in self.imports)
+
 
 @dataclass(frozen=True)
 class EvaluationMode:
@@ -1760,6 +1764,22 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
         "incomplete search",
         "incomplete searches",
     )
+    no_exact_count = _research_count_phrase(
+        research_summary.no_exact_result_provider_count,
+        "no-result provider",
+    )
+    manual_needed_count = _research_count_phrase(
+        research_summary.manual_needed_provider_count,
+        "manual-needed provider",
+    )
+    not_run_count = _research_count_phrase(
+        research_summary.not_run_provider_count,
+        "not-run provider",
+    )
+    stale_count = _research_count_phrase(
+        research_summary.stale_record_count,
+        "stale imported record",
+    )
     warning_count = _research_count_phrase(research_summary.warning_count, "warning")
     imported_record_word = "record" if research_run.imported_count == 1 else "records"
     lines = [
@@ -1778,18 +1798,31 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
         ),
         (
             "- Research summary: "
-            f"{failed_provider_count}, {incomplete_search_count}, {warning_count}."
+            f"{failed_provider_count}, {incomplete_search_count}, {no_exact_count}, "
+            f"{manual_needed_count}, {not_run_count}, {stale_count}, {warning_count}."
         ),
     ]
+    if workflow.manual_task_queue_path is not None:
+        lines.append(
+            "- Manual research follow-up queue: "
+            f"{_memo_text(str(workflow.manual_task_queue_path))}."
+        )
     if research_run.skipped_duplicate_count:
         lines.append(
             f"- Skipped {research_run.skipped_duplicate_count} duplicate external research records."
         )
-    if workflow.manual_task_count:
+    if research_run.stale_count:
+        stale_record_word = "record" if research_run.stale_count == 1 else "records"
         lines.append(
-            f"- {workflow.manual_task_count} planned source tasks still need manual "
+            f"- Imported {research_run.stale_count} stale external research "
+            f"{stale_record_word}; stale evidence is treated as limited support."
+        )
+    if workflow.unresolved_manual_task_count:
+        lines.append(
+            f"- {workflow.unresolved_manual_task_count} planned source tasks still need manual "
             "or local-file work."
         )
+    lines.extend(_research_provider_status_memo_lines(workflow))
     if workflow.no_prepared_result_companies:
         lines.append(
             "- No prepared external research results yet for: "
@@ -1818,6 +1851,39 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
             )
     else:
         lines.append("- No research workflow issues were recorded.")
+    return lines
+
+
+def _research_provider_status_memo_lines(workflow: ResearchWorkflowRunSummary) -> list[str]:
+    statuses = sorted(
+        workflow.summary.provider_statuses,
+        key=lambda status: (status.provider_name.casefold(), status.provider_id),
+    )
+    if not statuses:
+        return []
+    lines = ["- Provider statuses:"]
+    for status in statuses:
+        details: list[str] = []
+        if status.collected_count:
+            details.append(
+                _research_count_phrase(status.collected_count, "ready-to-import result")
+            )
+        if status.imported_count:
+            details.append(_research_count_phrase(status.imported_count, "imported record"))
+        if status.no_exact_result_companies:
+            details.append(
+                "no exact results for "
+                f"{_memo_text(', '.join(status.no_exact_result_companies))}"
+            )
+        if status.incomplete_search:
+            details.append("search incomplete")
+        if status.failure:
+            details.append(f"failure: {_memo_text(status.failure)}")
+        detail_text = f" ({'; '.join(details)})" if details else ""
+        lines.append(
+            f"  - {_memo_text(status.provider_name)}: "
+            f"{status.status.value.replace('_', ' ')}{detail_text}."
+        )
     return lines
 
 
@@ -1856,6 +1922,17 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
             f"{research_summary.incomplete_search_count} provider search"
             f"{'' if research_summary.incomplete_search_count == 1 else 'es'}. "
             "More public results may exist."
+        )
+    if research_run.stale_count:
+        stale_word = "record" if research_run.stale_count == 1 else "records"
+        warnings.append(
+            f"{research_run.stale_count} imported external research {stale_word} "
+            "were stale. Treat them as limited support until refreshed."
+        )
+    if workflow.unresolved_manual_task_count:
+        warnings.append(
+            f"{workflow.unresolved_manual_task_count} external research source tasks still need "
+            "manual or local-file follow-up."
         )
     for issue in workflow.issues:
         prefix = "Research error" if issue.severity == "error" else "Research warning"

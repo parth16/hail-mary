@@ -27,6 +27,9 @@ from hailmary.research import (
     MeridianWorkflowError,
     ResearchCollectionError,
     ResearchImportError,
+    ResearchProviderRunStatus,
+    SbirAwardRecord,
+    SbirAwardsResponse,
     SecFormDFilingRecord,
     SecFormDFilingsResponse,
     UsaspendingAwardRecord,
@@ -1148,6 +1151,145 @@ def run_research_workflow_v2_fixture(work_dir: Path) -> None:
     )
 
 
+def run_research_workflow_v4_fixture(work_dir: Path) -> None:
+    root = (work_dir / "pitch-decks").resolve(strict=False)
+    company = root / "Synthetic WorkflowV4Co"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(
+        data_dir=(work_dir / "data").resolve(strict=False),
+        local_only=False,
+        enable_web_research=True,
+    )
+    summary = ingest_folder(root, config=config)
+    _expect_equal(
+        len(summary.deals),
+        1,
+        "Expected workflow v4 fixture setup to ingest one synthetic deal.",
+    )
+    deal = summary.deals[0]
+    _expect(
+        deal.evidence_store_path is not None,
+        "Expected workflow v4 fixture setup to write an evidence store.",
+    )
+    if deal.evidence_store_path is None:
+        raise EvalFixtureFailure("Expected workflow v4 fixture setup to write a store.")
+    before_store = deal.evidence_store_path.read_text(encoding="utf-8")
+
+    sec_results_path = (work_dir / "workflow-v4-sec-results.json").resolve(strict=False)
+    sec_results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Synthetic WorkflowV4Co",
+                        "title": "Synthetic WorkflowV4Co stale Form D",
+                        "text": "Synthetic WorkflowV4Co filed an older public financing notice.",
+                        "retrieved_at": "2024-01-01T12:00:00Z",
+                        "source_url": (
+                            "https://www.sec.gov/Archives/edgar/data/"
+                            "synthetic-workflow-v4/form-d"
+                        ),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    usaspending_responses = {
+        ("Synthetic WorkflowV4Co", page): _usaspending_response(
+            [
+                _usaspending_award(
+                    recipient_name="Synthetic WorkflowV4Co Federal",
+                    award_id=f"FAKE-V4-{page}",
+                    generated_internal_id=f"CONT_AWD_FAKE_V4_{page}",
+                )
+            ],
+            has_next=True,
+        )
+        for page in range(1, 21)
+    }
+    usaspending_responses[("Synthetic MissingV4Co", 1)] = _usaspending_response([])
+
+    workflow = run_research_workflow(
+        config=config,
+        company_names=["Synthetic WorkflowV4Co", "Synthetic MissingV4Co"],
+        sec_form_d_results_path=sec_results_path,
+        created_at=BUILT_AT,
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {
+                ("Synthetic WorkflowV4Co", 0): _sec_form_d_response([]),
+                ("Synthetic MissingV4Co", 0): _sec_form_d_response([]),
+            }
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(usaspending_responses),
+        sbir_client=_FakeSbirAwardsClient(
+            {
+                ("Synthetic WorkflowV4Co", 0): _sbir_response([]),
+                ("Synthetic MissingV4Co", 0): _sbir_response([]),
+            }
+        ),
+        github_client=_FakeGitHubRepositorySearchClient({}),
+    )
+
+    _expect(
+        workflow.manual_task_queue_path is not None
+        and workflow.manual_task_queue_path.exists(),
+        "Expected workflow v4 to write a manual task queue artifact.",
+    )
+    _expect(
+        any(artifact.kind == "manual_task_queue" for artifact in workflow.artifacts),
+        "Expected workflow v4 artifacts to include the manual task queue.",
+    )
+    _expect_equal(
+        workflow.summary.stale_record_count,
+        1,
+        "Expected workflow v4 import preview to count stale external records.",
+    )
+    _expect_equal(
+        workflow.import_previews[0].stale_count,
+        1,
+        "Expected workflow v4 import preview to expose stale record count.",
+    )
+    statuses = {
+        status.provider_id: status
+        for status in workflow.summary.provider_statuses
+    }
+    _expect_equal(
+        statuses["sec_form_d"].status,
+        ResearchProviderRunStatus.PLANNED,
+        "Expected local SEC results to stay planned after dry-run validation.",
+    )
+    _expect(
+        "Synthetic MissingV4Co" in statuses["sec_form_d"].no_exact_result_companies,
+        "Expected provider status to still show companies with no exact SEC results.",
+    )
+    _expect_equal(
+        statuses["usaspending"].status,
+        ResearchProviderRunStatus.INCOMPLETE_SEARCH,
+        "Expected capped USAspending search to be marked incomplete, not clean no-results.",
+    )
+    _expect_equal(
+        statuses["github"].status,
+        ResearchProviderRunStatus.FAILED,
+        "Expected missing fake GitHub response to be recorded as a failed provider.",
+    )
+    _expect_equal(
+        statuses["sam_gov"].status,
+        ResearchProviderRunStatus.MANUAL_NEEDED,
+        "Expected manual/local-only providers to be marked manual needed.",
+    )
+    _expect(
+        "Synthetic MissingV4Co" in workflow.no_prepared_result_companies,
+        "Expected workflow v4 to name companies with no prepared import-ready results.",
+    )
+    _expect_equal(
+        deal.evidence_store_path.read_text(encoding="utf-8"),
+        before_store,
+        "Expected workflow v4 import preview to avoid mutating evidence stores.",
+    )
+
+
 def run_usaspending_pagination_fixture(work_dir: Path) -> None:
     config = AppConfig(
         data_dir=(work_dir / "data").resolve(strict=False),
@@ -2110,6 +2252,36 @@ class _FakeSecFormDFilingsClient:
             ) from exc
 
 
+class _FakeSbirAwardsClient:
+    def __init__(
+        self,
+        responses: dict[tuple[str, int], SbirAwardsResponse],
+    ) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, int, int]] = []
+
+    def search_awards(
+        self,
+        company_name: str,
+        *,
+        rows: int,
+        start: int,
+        timeout_seconds: float,
+    ) -> SbirAwardsResponse:
+        _ = timeout_seconds
+        self.calls.append((company_name, rows, start))
+        try:
+            return self.responses[(company_name, start)]
+        except KeyError as exc:
+            raise EvalFixtureFailure(
+                "Missing fake SBIR/STTR response.",
+                {
+                    "company_name": company_name,
+                    "start": str(start),
+                },
+            ) from exc
+
+
 class _FakeGitHubRepositorySearchClient:
     def __init__(
         self,
@@ -2159,6 +2331,12 @@ def _sec_form_d_response(results: list[SecFormDFilingRecord]) -> SecFormDFilings
             "results": [result.model_dump() for result in results],
             "has_next": False,
         }
+    )
+
+
+def _sbir_response(results: list[SbirAwardRecord]) -> SbirAwardsResponse:
+    return SbirAwardsResponse.model_validate(
+        {"results": [result.model_dump() for result in results]}
     )
 
 

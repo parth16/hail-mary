@@ -38,7 +38,7 @@ def test_builtin_eval_metadata_covers_required_phase_6_categories() -> None:
 def test_run_builtin_evals_passes_all_synthetic_cases(tmp_path: Path) -> None:
     summary = run_builtin_evals(work_dir=tmp_path)
 
-    assert summary.total_count == 36
+    assert summary.total_count == 37
     assert summary.passed
     assert summary.failed_results == []
 
@@ -149,6 +149,7 @@ def test_run_builtin_evals_filters_research_import_cases(tmp_path: Path) -> None
         "research-free-public-collectors-v2",
         "research-public-source-import",
         "research-workflow-v2",
+        "research-workflow-v4",
         "research-usaspending-api-pagination",
     }
     assert summary.passed

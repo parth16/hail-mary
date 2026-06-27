@@ -231,6 +231,18 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="research-workflow-v4",
+                category=EvalCategory.RESEARCH_IMPORT,
+                name="Research workflow V4 provider status loop",
+                description=(
+                    "Checks provider status aggregation, manual task queue output, "
+                    "stale import previews, and incomplete-vs-no-result behavior."
+                ),
+            ),
+            run=fixtures.run_research_workflow_v4_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="public-collectors-source-guards",
                 category=EvalCategory.PUBLIC_COLLECTORS,
                 name="Public collector exact-match and source guards",

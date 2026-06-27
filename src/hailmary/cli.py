@@ -2149,6 +2149,13 @@ def evaluate_deal(
                 f"{_research_summary_counts_text(research_workflow)}."
             )
         )
+        if research_workflow.manual_task_queue_path is not None:
+            renderables.append(
+                _plain(
+                    "Manual research follow-up queue: "
+                    f"{research_workflow.manual_task_queue_path}."
+                )
+            )
         if research_workflow.live_collection_enabled:
             renderables.append(_plain("Live public research ran because web research is enabled."))
         else:
@@ -2509,6 +2516,7 @@ def research_workflow_command(
             {
                 "planned_source_count": result.planned_source_count,
                 "manual_task_count": result.manual_task_count,
+                "unresolved_manual_task_count": result.unresolved_manual_task_count,
                 "live_collectable_task_count": result.live_collectable_task_count,
                 "ready_to_import_count": result.ready_to_import_count,
                 "blocking_issue_count": result.blocking_issue_count,
@@ -2541,6 +2549,13 @@ def _research_workflow_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
         _plain(f"Saved the private research plan to {result.plan_path}."),
         _plain(f"Saved the fillable results template to {result.result_template_path}."),
     ]
+    if result.manual_task_queue_path is not None:
+        lines.append(
+            _plain(
+                "Saved the manual follow-up queue to "
+                f"{result.manual_task_queue_path}."
+            )
+        )
     if result.meridian_workflow_path is not None:
         lines.append(_plain(f"Saved the Meridian workflow to {result.meridian_workflow_path}."))
     if result.meridian_result_template_path is not None:
@@ -2554,7 +2569,7 @@ def _research_workflow_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
     lines.append(
         _plain(
             f"Sources: {result.planned_source_count} planned, "
-            f"{result.manual_task_count} need manual or local-file work, "
+            f"{result.unresolved_manual_task_count} still need manual or local-file work, "
             f"{result.live_collectable_task_count} can be collected live."
         )
     )
@@ -2573,6 +2588,8 @@ def _research_workflow_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
                 "and HAILMARY_ENABLE_WEB_RESEARCH=true to enable it."
             )
         )
+
+    lines.extend(_research_provider_status_lines(result))
 
     for collection in result.collections:
         lines.extend(_research_workflow_collection_lines(collection))
@@ -2663,6 +2680,41 @@ def _research_status_label(status: str) -> str:
     return status.replace("_", " ")
 
 
+def _research_provider_status_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
+    statuses = sorted(
+        result.summary.provider_statuses,
+        key=lambda status: (status.provider_name.casefold(), status.provider_id),
+    )
+    if not statuses:
+        return []
+    lines = [_plain("Provider statuses:")]
+    for status in statuses:
+        details: list[str] = []
+        if status.collected_count:
+            details.append(
+                _research_count_phrase(status.collected_count, "ready-to-import result")
+            )
+        if status.imported_count:
+            details.append(_research_count_phrase(status.imported_count, "imported record"))
+        if status.no_exact_result_companies:
+            details.append(
+                "no exact results for "
+                f"{', '.join(status.no_exact_result_companies)}"
+            )
+        if status.incomplete_search:
+            details.append("search incomplete")
+        if status.failure:
+            details.append(f"failure: {status.failure}")
+        detail_text = f" ({'; '.join(details)})" if details else ""
+        lines.append(
+            _plain(
+                f"- {status.provider_name}: "
+                f"{_research_status_label(status.status.value)}{detail_text}."
+            )
+        )
+    return lines
+
+
 def _research_summary_counts_text(result: ResearchWorkflowRunSummary) -> str:
     summary = result.summary
     failed_provider_count = _research_count_phrase(
@@ -2674,9 +2726,26 @@ def _research_summary_counts_text(result: ResearchWorkflowRunSummary) -> str:
         "incomplete search",
         "incomplete searches",
     )
+    no_exact_count = _research_count_phrase(
+        summary.no_exact_result_provider_count,
+        "no-result provider",
+    )
+    manual_count = _research_count_phrase(
+        summary.manual_needed_provider_count,
+        "manual-needed provider",
+    )
+    not_run_count = _research_count_phrase(
+        summary.not_run_provider_count,
+        "not-run provider",
+    )
+    stale_count = _research_count_phrase(
+        summary.stale_record_count,
+        "stale imported record",
+    )
     warning_count = _research_count_phrase(summary.warning_count, "warning")
     return (
-        f"{failed_provider_count}, {incomplete_search_count}, {warning_count}"
+        f"{failed_provider_count}, {incomplete_search_count}, {no_exact_count}, "
+        f"{manual_count}, {not_run_count}, {stale_count}, {warning_count}"
     )
 
 
@@ -2806,6 +2875,14 @@ def _research_workflow_import_lines(preview: ResearchWorkflowImportPreview) -> l
     if skipped_rows:
         row_word = "row" if skipped_rows == 1 else "rows"
         lines.append(_plain(f"  Skipped {skipped_rows} untouched template {row_word}."))
+    if preview.stale_count:
+        stale_word = "record" if preview.stale_count == 1 else "records"
+        lines.append(
+            _plain(
+                f"  {preview.stale_count} importable {stale_word} are stale and "
+                "will be treated as limited support."
+            )
+        )
     for deal in preview.deals:
         if deal.imported_count:
             deal_record_word = "record" if deal.imported_count == 1 else "records"
@@ -2815,6 +2892,14 @@ def _research_workflow_import_lines(preview: ResearchWorkflowImportPreview) -> l
                     f"{deal_record_word}."
                 )
             )
+            if deal.stale_count:
+                stale_word = "record" if deal.stale_count == 1 else "records"
+                lines.append(
+                    _plain(
+                        f"  {deal.company_name}: {deal.stale_count} stale "
+                        f"{stale_word}."
+                    )
+                )
     return lines
 
 
@@ -3859,6 +3944,15 @@ def import_research_results_command(
                 f"Skipped {result.skipped_blank_template_row_count} untouched template {row_word}."
             )
         )
+    if result.stale_count:
+        stale_word = "record" if result.stale_count == 1 else "records"
+        action = "would be imported" if result.dry_run else "were imported"
+        result_lines.append(
+            _plain(
+                f"{result.stale_count} stale external research {stale_word} {action}. "
+                "Stale evidence is treated as limited support until refreshed."
+            )
+        )
     if result.dry_run:
         for deal in result.deals:
             if deal.imported_count:
@@ -3869,6 +3963,14 @@ def import_research_results_command(
                         f"{deal_record_word}."
                     )
                 )
+                if deal.stale_count:
+                    stale_word = "record" if deal.stale_count == 1 else "records"
+                    result_lines.append(
+                        _plain(
+                            f"  {deal.company_name}: {deal.stale_count} stale "
+                            f"{stale_word}."
+                        )
+                    )
         result_lines.append(_plain("No evidence stores were changed."))
         result_lines.append(_plain("No websites or APIs were contacted."))
         _print_panel("Research import preview", result_lines, border_style=border_style)
@@ -3886,6 +3988,14 @@ def import_research_results_command(
                         f"- {deal.company_name}: added {deal.imported_count} {deal_record_word}."
                     )
                 )
+                if deal.stale_count:
+                    stale_word = "record" if deal.stale_count == 1 else "records"
+                    result_lines.append(
+                        _plain(
+                            f"  {deal.company_name}: {deal.stale_count} stale "
+                            f"{stale_word}."
+                        )
+                    )
     else:
         result_lines.append(_plain("No new evidence records were added."))
     result_lines.append(_plain("No websites or APIs were contacted."))

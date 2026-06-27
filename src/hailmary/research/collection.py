@@ -649,6 +649,8 @@ class ResearchCollectionRunSummary(BaseModel):
     collected_at: datetime
     provider_ids: list[str]
     deals: list[ResearchCollectionDealSummary] = Field(default_factory=list)
+    provider_result_counts: dict[str, int] = Field(default_factory=dict)
+    provider_company_result_counts: dict[str, dict[str, int]] = Field(default_factory=dict)
     skipped_non_exact_company_names: list[str] = Field(default_factory=list)
     match_details: list[CompanyMatch] = Field(default_factory=list)
 
@@ -1408,6 +1410,11 @@ def prepare_public_research_results(
     )
     results: list[ResearchResultInput] = []
     deal_summaries: list[ResearchCollectionDealSummary] = []
+    provider_result_counts: dict[str, int] = {provider_id: 0 for provider_id in provider_ids}
+    provider_company_result_counts: dict[str, dict[str, int]] = {
+        provider_id: {company_name: 0 for company_name in companies}
+        for provider_id in provider_ids
+    }
     for deal in deals:
         deal_results = [
             result
@@ -1415,6 +1422,18 @@ def prepare_public_research_results(
             for result in adapter.collect(deal, collected_at=collected_at)
         ]
         results.extend(deal_results)
+        for result in deal_results:
+            provider_result_counts[result.provider_id] = (
+                provider_result_counts.get(result.provider_id, 0) + 1
+            )
+            provider_company_counts = provider_company_result_counts.setdefault(
+                result.provider_id,
+                {},
+            )
+            provider_company_counts[result.company_name or deal.company_name] = (
+                provider_company_counts.get(result.company_name or deal.company_name, 0)
+                + 1
+            )
         deal_summaries.append(
             ResearchCollectionDealSummary(
                 company_name=deal.company_name,
@@ -1428,6 +1447,8 @@ def prepare_public_research_results(
             collected_at=collected_at,
             provider_ids=provider_ids,
             deals=deal_summaries,
+            provider_result_counts=provider_result_counts,
+            provider_company_result_counts=provider_company_result_counts,
             skipped_non_exact_company_names=skipped_non_exact_company_names,
             match_details=match_details,
         )
@@ -1459,6 +1480,8 @@ def prepare_public_research_results(
         collected_at=collected_at,
         provider_ids=provider_ids,
         deals=deal_summaries,
+        provider_result_counts=provider_result_counts,
+        provider_company_result_counts=provider_company_result_counts,
         skipped_non_exact_company_names=skipped_non_exact_company_names,
         match_details=match_details,
     )

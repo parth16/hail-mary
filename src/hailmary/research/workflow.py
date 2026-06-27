@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
+import secrets
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -26,11 +30,13 @@ from .importer import ResearchImportError, import_research_results
 from .matching import CompanyMatch
 from .meridian import clean_meridian_url, prepare_meridian_workflow
 from .planner import prepare_research_plan
+from .providers import builtin_research_providers
 from .schemas import (
     ResearchImportDealSummary,
     ResearchImportRunSummary,
     ResearchPlan,
     ResearchProviderCategory,
+    ResearchResultsFile,
     ResearchTask,
     ResearchTaskStatus,
 )
@@ -67,9 +73,9 @@ class ResearchWorkflowArtifact(BaseModel):
 
 
 class ResearchProviderRunStatus(StrEnum):
+    NOT_RUN = "not_run"
     PLANNED = "planned"
-    SKIPPED = "skipped"
-    COLLECTED = "collected"
+    MANUAL_NEEDED = "manual_needed"
     IMPORTED = "imported"
     NO_EXACT_RESULTS = "no_exact_results"
     INCOMPLETE_SEARCH = "incomplete_search"
@@ -95,6 +101,9 @@ class ResearchWorkflowCollectionSummary(BaseModel):
     no_result_companies: list[str] = Field(default_factory=list)
     skipped_non_exact_company_names: list[str] = Field(default_factory=list)
     match_details: list[CompanyMatch] = Field(default_factory=list)
+    provider_ids: list[str] = Field(default_factory=list)
+    provider_result_counts: dict[str, int] = Field(default_factory=dict)
+    provider_company_result_counts: dict[str, dict[str, int]] = Field(default_factory=dict)
     provider_statuses: list[ResearchProviderStatusSummary] = Field(default_factory=list)
     incomplete_search: bool = False
     warnings: list[str] = Field(default_factory=list)
@@ -117,8 +126,12 @@ class ResearchProviderStatusSummary(BaseModel):
 class ResearchWorkflowSummary(BaseModel):
     planned_task_count: int = 0
     imported_record_count: int = 0
+    stale_record_count: int = 0
     failed_provider_count: int = 0
     incomplete_search_count: int = 0
+    no_exact_result_provider_count: int = 0
+    manual_needed_provider_count: int = 0
+    not_run_provider_count: int = 0
     warning_count: int = 0
     provider_statuses: list[ResearchProviderStatusSummary] = Field(default_factory=list)
 
@@ -128,6 +141,7 @@ class ResearchWorkflowImportPreview(BaseModel):
     imported_count: int = 0
     skipped_duplicate_count: int = 0
     skipped_blank_template_row_count: int = 0
+    stale_count: int = 0
     deals: list[ResearchImportDealSummary] = Field(default_factory=list)
     error: str | None = None
 
@@ -137,6 +151,7 @@ class ResearchWorkflowRunSummary(BaseModel):
     plan: ResearchPlan
     plan_path: Path
     result_template_path: Path
+    manual_task_queue_path: Path | None = None
     meridian_workflow_path: Path | None = None
     meridian_result_template_path: Path | None = None
     source_summaries: list[ResearchWorkflowSourceSummary] = Field(default_factory=list)
@@ -157,6 +172,10 @@ class ResearchWorkflowRunSummary(BaseModel):
     @property
     def manual_task_count(self) -> int:
         return sum(source.manual_count for source in self.source_summaries)
+
+    @property
+    def unresolved_manual_task_count(self) -> int:
+        return len(_unresolved_manual_tasks(self))
 
     @property
     def live_collectable_task_count(self) -> int:
@@ -199,6 +218,13 @@ class ResearchWorkflowRunSummary(BaseModel):
                 path=self.result_template_path,
             ),
         ]
+        if self.manual_task_queue_path is not None:
+            artifacts.append(
+                ResearchWorkflowArtifact(
+                    kind="manual_task_queue",
+                    path=self.manual_task_queue_path,
+                )
+            )
         if self.meridian_workflow_path is not None:
             artifacts.append(
                 ResearchWorkflowArtifact(
@@ -383,12 +409,24 @@ def run_research_workflow(
         supplied_result_paths=set(results_files or []),
     )
     issues.extend(import_issues)
+    try:
+        manual_task_queue_path = _write_manual_task_queue(
+            config=config,
+            manual_tasks=_unresolved_manual_tasks_from_plan(
+                plan_result.plan,
+                import_previews,
+            ),
+            created_at=created_at,
+        )
+    except Exception as exc:
+        raise ResearchWorkflowError(str(exc)) from exc
 
     return ResearchWorkflowRunSummary(
         created_at=created_at,
         plan=plan_result.plan,
         plan_path=plan_result.output_path,
         result_template_path=template_result.output_path,
+        manual_task_queue_path=manual_task_queue_path,
         meridian_workflow_path=meridian_workflow_path,
         meridian_result_template_path=meridian_result_template_path,
         source_summaries=_source_summaries(plan_result.plan),
@@ -397,6 +435,94 @@ def run_research_workflow(
         issues=issues,
         live_collection_enabled=live_collection_enabled,
     )
+
+
+def _write_manual_task_queue(
+    *,
+    config: AppConfig,
+    manual_tasks: list[ResearchTask],
+    created_at: datetime,
+) -> Path | None:
+    if not manual_tasks:
+        return None
+    output_dir = config.data_dir / "research-manual-tasks"
+    _ensure_private_directory(output_dir, private_root=config.data_dir)
+    output_path = _unique_manual_task_queue_path(output_dir, created_at)
+    payload = {
+        "version": "1",
+        "created_at": _as_utc(created_at).isoformat(),
+        "task_count": len(manual_tasks),
+        "tasks": [task.model_dump(mode="json") for task in manual_tasks],
+        "privacy_notes": list(PRIVACY_NOTES),
+    }
+    _write_private_json(
+        output_path,
+        json.dumps(payload, indent=2),
+        description="manual research task queue",
+    )
+    return output_path
+
+
+def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
+    root_path = private_root if private_root.is_absolute() else Path.cwd() / private_root
+    resolved_root = root_path.resolve(strict=False)
+    resolved_path = (path if path.is_absolute() else Path.cwd() / path).resolve(strict=False)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError:
+        raise ResearchWorkflowError(
+            f"Manual research task queue folder {path} resolves outside the private data directory."
+        ) from None
+    if path.is_symlink():
+        raise ResearchWorkflowError(f"Manual research task queue folder {path} is a symlink.")
+    try:
+        root_path.mkdir(parents=True, exist_ok=True)
+        root_path.chmod(0o700)
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+    except OSError as exc:
+        raise ResearchWorkflowError(
+            f"Could not create manual research task queue folder at {path}: {exc}"
+        ) from exc
+
+
+def _unique_manual_task_queue_path(output_dir: Path, created_at: datetime) -> Path:
+    base_name = f"research-manual-tasks-{created_at.strftime('%Y%m%d-%H%M%S')}"
+    candidate = output_dir / f"{base_name}.json"
+    suffix = 2
+    while candidate.exists():
+        candidate = output_dir / f"{base_name}-{suffix}.json"
+        suffix += 1
+    return candidate
+
+
+def _write_private_json(path: Path, text: str, *, description: str) -> None:
+    if path.is_symlink():
+        raise ResearchWorkflowError(
+            f"Could not write {description} at {path}: output file is a symlink."
+        )
+    token = secrets.token_hex(8)
+    temp_path = path.with_name(f".{path.name}.{token}.tmp")
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        file_descriptor = os.open(temp_path, flags, 0o600)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        temp_path.chmod(0o600)
+        os.replace(temp_path, path)
+        path.chmod(0o600)
+    except UnicodeEncodeError as exc:
+        raise ResearchWorkflowError(
+            f"Could not write {description} at {path}: the queue contains text that "
+            "cannot be saved as UTF-8."
+        ) from exc
+    except OSError as exc:
+        raise ResearchWorkflowError(f"Could not write {description} at {path}: {exc}") from exc
+    finally:
+        with suppress(OSError):
+            temp_path.unlink()
 
 
 def _prepare_local_public_sources(
@@ -620,6 +746,14 @@ def _collection_summary_from_result(
         deal.company_name for deal in deals if getattr(deal, "result_count", 0) == 0
     ]
     incomplete_search = _warnings_indicate_incomplete_search(warnings)
+    provider_ids = list(getattr(result, "provider_ids", []))
+    provider_result_counts = dict(getattr(result, "provider_result_counts", {}))
+    provider_company_result_counts = {
+        str(provider_id): dict(company_counts)
+        for provider_id, company_counts in dict(
+            getattr(result, "provider_company_result_counts", {})
+        ).items()
+    }
     return ResearchWorkflowCollectionSummary(
         kind=kind,
         source_id=source_id,
@@ -636,6 +770,18 @@ def _collection_summary_from_result(
         no_result_companies=no_result_companies,
         skipped_non_exact_company_names=skipped_non_exact_company_names or [],
         match_details=list(getattr(result, "match_details", [])),
+        provider_ids=provider_ids,
+        provider_result_counts=provider_result_counts,
+        provider_company_result_counts=provider_company_result_counts,
+        provider_statuses=(
+            _local_public_provider_statuses(
+                provider_ids=provider_ids,
+                provider_result_counts=provider_result_counts,
+                provider_company_result_counts=provider_company_result_counts,
+            )
+            if kind == "local_public"
+            else []
+        ),
         incomplete_search=incomplete_search,
         warnings=warnings,
     )
@@ -684,6 +830,7 @@ def _import_preview_from_result(
         imported_count=result.imported_count,
         skipped_duplicate_count=result.skipped_duplicate_count,
         skipped_blank_template_row_count=result.skipped_blank_template_row_count,
+        stale_count=result.stale_count,
         deals=result.deals,
     )
 
@@ -706,10 +853,41 @@ def _collection_status(
     if _warnings_indicate_incomplete_search(warnings):
         return ResearchProviderRunStatus.INCOMPLETE_SEARCH
     if result_count > 0:
-        return ResearchProviderRunStatus.COLLECTED
+        return ResearchProviderRunStatus.PLANNED
     if no_result_companies:
         return ResearchProviderRunStatus.NO_EXACT_RESULTS
-    return ResearchProviderRunStatus.SKIPPED
+    return ResearchProviderRunStatus.NOT_RUN
+
+
+def _local_public_provider_statuses(
+    *,
+    provider_ids: list[str],
+    provider_result_counts: dict[str, int],
+    provider_company_result_counts: dict[str, dict[str, int]],
+) -> list[ResearchProviderStatusSummary]:
+    statuses: list[ResearchProviderStatusSummary] = []
+    for provider_id in provider_ids:
+        result_count = provider_result_counts.get(provider_id, 0)
+        company_counts = provider_company_result_counts.get(provider_id, {})
+        no_exact_result_companies = sorted(
+            company_name
+            for company_name, company_result_count in company_counts.items()
+            if company_result_count == 0
+        )
+        statuses.append(
+            ResearchProviderStatusSummary(
+                provider_id=provider_id,
+                provider_name=_provider_display_name(provider_id),
+                status=(
+                    ResearchProviderRunStatus.PLANNED
+                    if result_count > 0
+                    else ResearchProviderRunStatus.NO_EXACT_RESULTS
+                ),
+                collected_count=result_count,
+                no_exact_result_companies=no_exact_result_companies,
+            )
+        )
+    return statuses
 
 
 def _web_provider_statuses(
@@ -733,14 +911,16 @@ def _web_provider_statuses(
         no_result_companies: list[str] = []
         if warnings:
             status = ResearchProviderRunStatus.FAILED
-        elif fetched_count > 0:
-            status = ResearchProviderRunStatus.COLLECTED
-        elif planned_count > 0:
+        elif fetched_count > 0 or planned_count > 0:
             status = ResearchProviderRunStatus.PLANNED
         elif skipped_count > 0:
-            status = ResearchProviderRunStatus.SKIPPED
+            status = (
+                ResearchProviderRunStatus.MANUAL_NEEDED
+                if any(_web_task_needs_manual_work(task) for task in provider_tasks)
+                else ResearchProviderRunStatus.NOT_RUN
+            )
         else:
-            status = ResearchProviderRunStatus.SKIPPED
+            status = ResearchProviderRunStatus.NOT_RUN
         statuses.append(
             ResearchProviderStatusSummary(
                 provider_id=provider_id,
@@ -756,15 +936,49 @@ def _web_provider_statuses(
     return statuses
 
 
-def _collection_import_source_id(collection: ResearchWorkflowCollectionSummary) -> str:
-    provider_ids_with_results = [
-        provider_status.provider_id
-        for provider_status in collection.provider_statuses
-        if provider_status.collected_count > 0
+def _provider_display_name(provider_id: str) -> str:
+    provider = {
+        provider.id: provider
+        for provider in builtin_research_providers()
+    }.get(provider_id)
+    return provider.name if provider is not None else provider_id
+
+
+def _import_preview_provider_statuses(
+    preview: ResearchWorkflowImportPreview,
+    *,
+    plan: ResearchPlan,
+) -> list[ResearchProviderStatusSummary]:
+    if preview.error is not None or preview.imported_count <= 0:
+        return []
+    try:
+        results_file = ResearchResultsFile.model_validate_json(
+            preview.input_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return []
+    deal_company_names = {
+        deal.deal_id: deal.company_name
+        for deal in plan.deals
+    }
+    provider_counts: dict[str, int] = {}
+    for result in results_file.results:
+        company_name = result.company_name
+        if company_name is None and result.deal_id is not None:
+            company_name = deal_company_names.get(result.deal_id)
+        if company_name is None:
+            continue
+        provider_counts[result.provider_id] = provider_counts.get(result.provider_id, 0) + 1
+    return [
+        ResearchProviderStatusSummary(
+            provider_id=provider_id,
+            provider_name=_provider_display_name(provider_id),
+            status=ResearchProviderRunStatus.PLANNED,
+            collected_count=result_count,
+        )
+        for provider_id, result_count in sorted(provider_counts.items())
+        if result_count > 0
     ]
-    if len(provider_ids_with_results) == 1:
-        return provider_ids_with_results[0]
-    return collection.source_id
 
 
 def _warnings_indicate_incomplete_search(warnings: list[str]) -> bool:
@@ -776,26 +990,30 @@ def _warnings_indicate_incomplete_search(warnings: list[str]) -> bool:
     )
 
 
+def _web_task_needs_manual_work(task: WebResearchTaskSummary) -> bool:
+    reason = task.reason.casefold()
+    return "manual" in reason or "paid" in reason or "authenticated" in reason
+
+
 def _research_workflow_summary(
     workflow: ResearchWorkflowRunSummary,
 ) -> ResearchWorkflowSummary:
+    provider_ids_with_ready_results = _provider_ids_with_ready_results(workflow)
     statuses = {
         source.provider_id: ResearchProviderStatusSummary(
             provider_id=source.provider_id,
             provider_name=source.provider_name,
-            status=(
-                ResearchProviderRunStatus.PLANNED
-                if not _source_skipped_by_live_gate(source, workflow)
-                else ResearchProviderRunStatus.SKIPPED
+            status=_initial_provider_status(
+                source,
+                workflow,
+                provider_ids_with_ready_results=provider_ids_with_ready_results,
             ),
             planned_count=source.planned_count,
         )
         for source in workflow.source_summaries
     }
-    path_to_source_id = {
-        collection.output_path.resolve(strict=False): _collection_import_source_id(
-            collection
-        )
+    collection_output_paths = {
+        collection.output_path.resolve(strict=False)
         for collection in workflow.collections
         if collection.output_path is not None
     }
@@ -812,9 +1030,9 @@ def _research_workflow_summary(
             statuses[provider_status.provider_id] = existing_status.model_copy(
                 update={
                     "provider_name": provider_status.provider_name,
-                    "status": _merge_provider_status(
-                        existing_status.status,
-                        provider_status.status,
+                    "status": _merge_provider_status_summary(
+                        existing=existing_status,
+                        incoming=provider_status,
                     ),
                     "collected_count": (
                         existing_status.collected_count
@@ -846,7 +1064,15 @@ def _research_workflow_summary(
         statuses[collection.source_id] = status.model_copy(
             update={
                 "provider_name": collection.source_name,
-                "status": _merge_provider_status(status.status, collection.status),
+                "status": _merge_provider_status_summary(
+                    existing=status,
+                    incoming=ResearchProviderStatusSummary(
+                        provider_id=collection.source_id,
+                        provider_name=collection.source_name,
+                        status=collection.status,
+                        collected_count=collection.result_count,
+                    ),
+                ),
                 "collected_count": status.collected_count + collection.result_count,
                 "warning_count": status.warning_count + len(collection.warnings),
                 "no_exact_result_companies": sorted(
@@ -860,27 +1086,37 @@ def _research_workflow_summary(
         )
 
     for preview in workflow.import_previews:
-        if preview.imported_count <= 0:
+        preview_path = preview.input_path.resolve(strict=False)
+        if preview.imported_count <= 0 or preview_path in collection_output_paths:
             continue
-        source_id = path_to_source_id.get(preview.input_path.resolve(strict=False))
-        if source_id is None:
-            source_id = f"import:{preview.input_path.name}"
-        status = statuses.get(source_id)
-        if status is None:
-            status = ResearchProviderStatusSummary(
-                provider_id=source_id,
-                provider_name=preview.input_path.name,
-                status=ResearchProviderRunStatus.IMPORTED,
+        for provider_status in _import_preview_provider_statuses(
+            preview,
+            plan=workflow.plan,
+        ):
+            existing_status = statuses.get(provider_status.provider_id)
+            if existing_status is None:
+                existing_status = ResearchProviderStatusSummary(
+                    provider_id=provider_status.provider_id,
+                    provider_name=provider_status.provider_name,
+                    status=provider_status.status,
+                )
+            statuses[provider_status.provider_id] = existing_status.model_copy(
+                update={
+                    "provider_name": provider_status.provider_name,
+                    "status": _merge_provider_status_summary(
+                        existing=existing_status,
+                        incoming=provider_status,
+                    ),
+                    "collected_count": (
+                        existing_status.collected_count
+                        + provider_status.collected_count
+                    ),
+                    "no_exact_result_companies": sorted(
+                        set(existing_status.no_exact_result_companies)
+                        | set(provider_status.no_exact_result_companies)
+                    ),
+                }
             )
-        statuses[source_id] = status.model_copy(
-            update={
-                "status": _merge_provider_status(
-                    status.status,
-                    ResearchProviderRunStatus.IMPORTED,
-                ),
-                "imported_count": status.imported_count + preview.imported_count,
-            }
-        )
 
     provider_statuses = list(statuses.values())
     warning_count = sum(1 for issue in workflow.issues if issue.severity == "warning")
@@ -890,6 +1126,7 @@ def _research_workflow_summary(
         imported_record_count=sum(
             preview.imported_count for preview in workflow.import_previews
         ),
+        stale_record_count=sum(preview.stale_count for preview in workflow.import_previews),
         failed_provider_count=sum(
             1
             for status in provider_statuses
@@ -897,6 +1134,21 @@ def _research_workflow_summary(
         ),
         incomplete_search_count=sum(
             1 for status in provider_statuses if status.incomplete_search
+        ),
+        no_exact_result_provider_count=sum(
+            1
+            for status in provider_statuses
+            if status.status == ResearchProviderRunStatus.NO_EXACT_RESULTS
+        ),
+        manual_needed_provider_count=sum(
+            1
+            for status in provider_statuses
+            if status.status == ResearchProviderRunStatus.MANUAL_NEEDED
+        ),
+        not_run_provider_count=sum(
+            1
+            for status in provider_statuses
+            if status.status == ResearchProviderRunStatus.NOT_RUN
         ),
         warning_count=warning_count,
         provider_statuses=provider_statuses,
@@ -911,15 +1163,107 @@ def _merge_provider_status(
         ResearchProviderRunStatus.FAILED: 0,
         ResearchProviderRunStatus.INCOMPLETE_SEARCH: 1,
         ResearchProviderRunStatus.IMPORTED: 2,
-        ResearchProviderRunStatus.COLLECTED: 3,
-        ResearchProviderRunStatus.NO_EXACT_RESULTS: 4,
-        ResearchProviderRunStatus.SKIPPED: 5,
-        ResearchProviderRunStatus.PLANNED: 6,
+        ResearchProviderRunStatus.NO_EXACT_RESULTS: 3,
+        ResearchProviderRunStatus.MANUAL_NEEDED: 4,
+        ResearchProviderRunStatus.PLANNED: 5,
+        ResearchProviderRunStatus.NOT_RUN: 6,
     }
     return existing if rank[existing] <= rank[incoming] else incoming
 
 
-def _source_skipped_by_live_gate(
+def _merge_provider_status_summary(
+    *,
+    existing: ResearchProviderStatusSummary,
+    incoming: ResearchProviderStatusSummary,
+) -> ResearchProviderRunStatus:
+    if _ready_result_clears_manual_needed(existing=existing, incoming=incoming):
+        return ResearchProviderRunStatus.PLANNED
+    if _has_ready_results(existing) or _has_ready_results(incoming):
+        higher_priority_statuses = {
+            ResearchProviderRunStatus.FAILED,
+            ResearchProviderRunStatus.INCOMPLETE_SEARCH,
+            ResearchProviderRunStatus.IMPORTED,
+        }
+        if (
+            existing.status not in higher_priority_statuses
+            and incoming.status not in higher_priority_statuses
+        ):
+            return ResearchProviderRunStatus.PLANNED
+    if (
+        ResearchProviderRunStatus.NO_EXACT_RESULTS
+        in {existing.status, incoming.status}
+        and ResearchProviderRunStatus.PLANNED in {existing.status, incoming.status}
+        and (existing.collected_count > 0 or incoming.collected_count > 0)
+    ):
+        return ResearchProviderRunStatus.PLANNED
+    return _merge_provider_status(existing.status, incoming.status)
+
+
+def _ready_result_clears_manual_needed(
+    *,
+    existing: ResearchProviderStatusSummary,
+    incoming: ResearchProviderStatusSummary,
+) -> bool:
+    return (
+        existing.status == ResearchProviderRunStatus.MANUAL_NEEDED
+        and _has_ready_results(incoming)
+    ) or (
+        incoming.status == ResearchProviderRunStatus.MANUAL_NEEDED
+        and _has_ready_results(existing)
+    )
+
+
+def _has_ready_results(status: ResearchProviderStatusSummary) -> bool:
+    return (
+        status.status == ResearchProviderRunStatus.PLANNED
+        and status.collected_count > 0
+    )
+
+
+def _provider_ids_with_ready_results(
+    workflow: ResearchWorkflowRunSummary,
+) -> set[str]:
+    provider_ids = {
+        provider_status.provider_id
+        for collection in workflow.collections
+        for provider_status in collection.provider_statuses
+        if provider_status.collected_count > 0
+    }
+    collection_output_paths = {
+        collection.output_path.resolve(strict=False)
+        for collection in workflow.collections
+        if collection.output_path is not None
+    }
+    for preview in workflow.import_previews:
+        if preview.input_path.resolve(strict=False) in collection_output_paths:
+            continue
+        provider_ids.update(
+            provider_status.provider_id
+            for provider_status in _import_preview_provider_statuses(
+                preview,
+                plan=workflow.plan,
+            )
+            if provider_status.collected_count > 0
+        )
+    return provider_ids
+
+
+def _initial_provider_status(
+    source: ResearchWorkflowSourceSummary,
+    workflow: ResearchWorkflowRunSummary,
+    *,
+    provider_ids_with_ready_results: set[str],
+) -> ResearchProviderRunStatus:
+    if source.provider_id in provider_ids_with_ready_results:
+        return ResearchProviderRunStatus.PLANNED
+    if source.manual_count:
+        return ResearchProviderRunStatus.MANUAL_NEEDED
+    if _source_not_run_by_live_gate(source, workflow):
+        return ResearchProviderRunStatus.NOT_RUN
+    return ResearchProviderRunStatus.PLANNED
+
+
+def _source_not_run_by_live_gate(
     source: ResearchWorkflowSourceSummary,
     workflow: ResearchWorkflowRunSummary,
 ) -> bool:
@@ -950,6 +1294,59 @@ def _source_summaries(plan: ResearchPlan) -> list[ResearchWorkflowSourceSummary]
             }
         )
     return list(summaries.values())
+
+
+def _unresolved_manual_tasks(workflow: ResearchWorkflowRunSummary) -> list[ResearchTask]:
+    return _unresolved_manual_tasks_from_plan(
+        workflow.plan,
+        workflow.import_previews,
+    )
+
+
+def _unresolved_manual_tasks_from_plan(
+    plan: ResearchPlan,
+    import_previews: list[ResearchWorkflowImportPreview],
+) -> list[ResearchTask]:
+    resolved_result_keys = _resolved_research_result_keys(plan, import_previews)
+    return [
+        task
+        for task in plan.tasks
+        if _task_needs_manual_work(task)
+        and _research_result_key(task.company_name, task.provider_id)
+        not in resolved_result_keys
+    ]
+
+
+def _resolved_research_result_keys(
+    plan: ResearchPlan,
+    import_previews: list[ResearchWorkflowImportPreview],
+) -> set[tuple[str, str]]:
+    deal_company_names = {
+        deal.deal_id: deal.company_name
+        for deal in plan.deals
+    }
+    result_keys: set[tuple[str, str]] = set()
+    for preview in import_previews:
+        if preview.error is not None:
+            continue
+        try:
+            results_file = ResearchResultsFile.model_validate_json(
+                preview.input_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            continue
+        for result in results_file.results:
+            company_name = result.company_name
+            if company_name is None and result.deal_id is not None:
+                company_name = deal_company_names.get(result.deal_id)
+            if company_name is None:
+                continue
+            result_keys.add(_research_result_key(company_name, result.provider_id))
+    return result_keys
+
+
+def _research_result_key(company_name: str, provider_id: str) -> tuple[str, str]:
+    return (company_name.strip().casefold(), provider_id.strip())
 
 
 def _task_needs_manual_work(task: ResearchTask) -> bool:

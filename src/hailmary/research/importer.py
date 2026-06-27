@@ -90,6 +90,15 @@ TEMPLATE_REQUIRED_FACT_FIELDS = {
 MERIDIAN_PLACEHOLDER_TITLES = {
     f"Meridian: {fact}" for fact in MERIDIAN_RECOMMENDED_FACTS
 }
+PLACEHOLDER_LICENSING_NOTES = {
+    "n/a",
+    "na",
+    "none",
+    "unknown",
+    "todo",
+    "tbd",
+    "placeholder",
+}
 
 
 @dataclass(frozen=True)
@@ -153,6 +162,7 @@ def import_research_results(
     }
     imported_counts: dict[str, int] = {}
     duplicate_counts: dict[str, int] = {}
+    stale_counts: dict[str, int] = {}
 
     for match in matches:
         deal_id = match.deal.id
@@ -168,6 +178,8 @@ def import_research_results(
             _duplicate_ids_for_existing_evidence(evidence, deal_id=deal_id)
         )
         imported_counts[deal_id] = imported_counts.get(deal_id, 0) + 1
+        if evidence.source_freshness == SourceFreshness.STALE:
+            stale_counts[deal_id] = stale_counts.get(deal_id, 0) + 1
 
     if not dry_run:
         updated_stores: dict[str, EvidenceStore] = {}
@@ -213,6 +225,7 @@ def import_research_results(
             store_paths=store_paths,
             imported_counts=imported_counts,
             duplicate_counts=duplicate_counts,
+            stale_counts=stale_counts,
         ),
     )
 
@@ -547,6 +560,7 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
             )
         if result.source_api is not None:
             _validate_source_api(result.source_api, index=display_index)
+        _validate_licensing_notes(result, index=display_index)
         _validate_known_provider_source_kind(result, index=display_index)
         _validate_known_provider_source_locations(result, index=display_index)
         retrieved_at = _as_utc(result.retrieved_at)
@@ -569,6 +583,52 @@ def _validate_url_reference(source_url: str, *, index: int, field_name: str) -> 
 def _validate_source_api(source_api: str, *, index: int) -> None:
     if source_reference_looks_like_url(source_api):
         _validate_url_reference(source_api, index=index, field_name="source_api")
+
+
+def _validate_licensing_notes(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    saved_notes = _saved_licensing_notes(result.licensing_notes).strip()
+    if not saved_notes:
+        raise ResearchImportError(
+            f"Research result {index} licensing_notes is required. Explain why this "
+            "source or short excerpt can be saved and used for diligence."
+        )
+    normalized = re.sub(r"[\W_]+", " ", saved_notes).strip().casefold()
+    compact = re.sub(r"[\W_]+", "", saved_notes).casefold()
+    if saved_notes.strip().casefold() in PLACEHOLDER_LICENSING_NOTES or compact in {
+        "na",
+        "none",
+        "unknown",
+        "todo",
+        "tbd",
+        "placeholder",
+    }:
+        raise ResearchImportError(
+            f"Research result {index} licensing_notes must be a plain-English note "
+            "about source permissions, not a placeholder."
+        )
+    if re.fullmatch(r"https?://\S+", saved_notes):
+        raise ResearchImportError(
+            f"Research result {index} licensing_notes must explain source permissions "
+            "in plain English, not only provide a URL."
+        )
+    markdown_stripped = re.sub(r"\[[^\]]+\]\([^)]+\)", "", saved_notes)
+    markdown_stripped = re.sub(r"(?m)^\s*[-*#>`_~\s]+", "", markdown_stripped)
+    markdown_stripped = re.sub(r"[*_~`#>\-\s]+", "", markdown_stripped)
+    markdown_plain_text = re.sub(r"[\W_]+", "", markdown_stripped)
+    if ("[" in saved_notes or "](" in saved_notes) and not markdown_plain_text:
+        raise ResearchImportError(
+            f"Research result {index} licensing_notes must explain source permissions "
+            "in plain English, not only contain Markdown."
+        )
+    if not normalized:
+        raise ResearchImportError(
+            f"Research result {index} licensing_notes must explain source permissions "
+            "in plain English."
+        )
 
 
 def _validate_meridian_result_source(
@@ -1084,9 +1144,10 @@ def _import_deal_summaries(
     store_paths: dict[str, Path],
     imported_counts: dict[str, int],
     duplicate_counts: dict[str, int],
+    stale_counts: dict[str, int],
 ) -> list[ResearchImportDealSummary]:
     deal_by_id = {match.deal.id: match.deal for match in matches}
-    touched_deal_ids = sorted(set(imported_counts) | set(duplicate_counts))
+    touched_deal_ids = sorted(set(imported_counts) | set(duplicate_counts) | set(stale_counts))
     return [
         ResearchImportDealSummary(
             deal_id=deal_id,
@@ -1094,6 +1155,7 @@ def _import_deal_summaries(
             evidence_store_path=store_paths[deal_id],
             imported_count=imported_counts.get(deal_id, 0),
             skipped_duplicate_count=duplicate_counts.get(deal_id, 0),
+            stale_count=stale_counts.get(deal_id, 0),
         )
         for deal_id in touched_deal_ids
     ]

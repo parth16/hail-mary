@@ -873,6 +873,8 @@ def test_evaluate_deal_surfaces_meridian_manual_workflow_warning(
     )
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "Warning: meridian: Meridian is a manual authenticated workflow." in memo_text
+    assert "Manual research follow-up queue:" in memo_text
+    assert memo_text.index("## External Research") < memo_text.index("## Final Recommendation")
 
 
 def test_evaluate_deal_warns_incomplete_search_is_not_clean_no_evidence(
@@ -921,6 +923,9 @@ def test_evaluate_deal_warns_incomplete_search_is_not_clean_no_evidence(
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "Some external searches were incomplete" in memo_text
     assert "0 failed providers, 1 incomplete search" in memo_text
+    assert "Provider statuses:" in memo_text
+    assert "USAspending: incomplete search" in memo_text
+    assert memo_text.index("## External Research") < memo_text.index("## Final Recommendation")
 
 
 def test_evaluate_deal_local_only_filters_instruction_citations(
