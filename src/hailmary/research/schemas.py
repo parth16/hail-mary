@@ -255,6 +255,9 @@ class ResearchImportRunSummary(BaseModel):
     imported_at: datetime
     dry_run: bool = False
     skipped_blank_template_row_count: int = 0
+    provider_imported_counts: dict[str, int] = Field(default_factory=dict)
+    provider_stale_counts: dict[str, int] = Field(default_factory=dict)
+    provider_names: dict[str, str] = Field(default_factory=dict)
     deals: list[ResearchImportDealSummary] = Field(default_factory=list)
 
     @property

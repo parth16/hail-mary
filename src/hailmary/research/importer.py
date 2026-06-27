@@ -163,6 +163,9 @@ def import_research_results(
     imported_counts: dict[str, int] = {}
     duplicate_counts: dict[str, int] = {}
     stale_counts: dict[str, int] = {}
+    provider_imported_counts: dict[str, int] = {}
+    provider_stale_counts: dict[str, int] = {}
+    provider_names: dict[str, str] = {}
 
     for match in matches:
         deal_id = match.deal.id
@@ -178,8 +181,16 @@ def import_research_results(
             _duplicate_ids_for_existing_evidence(evidence, deal_id=deal_id)
         )
         imported_counts[deal_id] = imported_counts.get(deal_id, 0) + 1
+        provider_id = match.result.provider_id
+        provider_imported_counts[provider_id] = (
+            provider_imported_counts.get(provider_id, 0) + 1
+        )
+        provider_names[provider_id] = _provider_name(match.result)
         if evidence.source_freshness == SourceFreshness.STALE:
             stale_counts[deal_id] = stale_counts.get(deal_id, 0) + 1
+            provider_stale_counts[provider_id] = (
+                provider_stale_counts.get(provider_id, 0) + 1
+            )
 
     if not dry_run:
         updated_stores: dict[str, EvidenceStore] = {}
@@ -220,6 +231,9 @@ def import_research_results(
         imported_at=imported_at,
         dry_run=dry_run,
         skipped_blank_template_row_count=results_file._skipped_blank_template_row_count,
+        provider_imported_counts=provider_imported_counts,
+        provider_stale_counts=provider_stale_counts,
+        provider_names=provider_names,
         deals=_import_deal_summaries(
             matches,
             store_paths=store_paths,
