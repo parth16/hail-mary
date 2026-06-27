@@ -21,6 +21,11 @@ from hailmary.evidence import (
     ReviewIssueSeverity,
     build_deal_evidence_review,
 )
+from hailmary.evidence.actions import (
+    EvidenceActionError,
+    EvidenceActionSummary,
+    apply_evidence_actions,
+)
 from hailmary.evidence.review import (
     DealEvidenceReview,
     ReviewIssueSummary,
@@ -347,6 +352,13 @@ def evaluate_deal_folder(
         if research_run.imported_count:
             store = _load_evidence_store_for_deal(deal, config=config)
 
+    _stage(stage_callback, "evidence actions")
+    try:
+        action_application = apply_evidence_actions(config=config, store=store)
+    except EvidenceActionError as exc:
+        raise EvaluationError(str(exc)) from exc
+    store = action_application.store
+
     _stage(stage_callback, "rule-based scoring")
     try:
         status = portfolio_status(config)
@@ -456,6 +468,7 @@ def evaluate_deal_folder(
         config=config,
         scored_deal=scored_deal,
         final_recommendation=guarded_decision.recommendation,
+        action_summary=action_application.summary,
     )
 
     _stage(stage_callback, "final memo write")
@@ -1836,6 +1849,7 @@ def _build_evaluate_deal_evidence_review(
     config: AppConfig,
     scored_deal: ScoredDeal,
     final_recommendation: AgentRecommendationRationale,
+    action_summary: EvidenceActionSummary | None = None,
 ) -> DealEvidenceReview:
     evidence_store_path = deal.evidence_store_path or (
         config.data_dir / "processed" / "deals" / deal.id / "evidence_store.json"
@@ -1848,6 +1862,7 @@ def _build_evaluate_deal_evidence_review(
             scored_deal,
             final_recommendation,
         ),
+        action_summary=action_summary,
     )
 
 
@@ -1908,16 +1923,17 @@ def _evidence_review_limitations(
 ) -> list[str]:
     if evidence_review is None:
         return []
-    blocking_issues = [
+    limitation_issues = [
         issue
         for issue in _active_evidence_review_issues(evidence_review)
         if issue.severity == ReviewIssueSeverity.BLOCKING
+        or issue.code in {"needs_review_actions", "needs_review_cited"}
     ]
-    if not blocking_issues:
+    if not limitation_issues:
         return []
     return [
         "Evidence review found issues that need attention before relying on this memo: "
-        f"{_evidence_issue_names(blocking_issues)}."
+        f"{_evidence_issue_names(limitation_issues)}."
     ]
 
 
@@ -1933,6 +1949,22 @@ def _evidence_health_memo_lines(
         "- Evidence health means whether saved source records are complete and safe "
         "enough to rely on.",
     ]
+    if evidence_review.action_summary is not None:
+        action_summary = evidence_review.action_summary
+        if action_summary.valid_action_count or action_summary.stale_action_count:
+            action_parts = [
+                f"{status_count.status.value.replace('_', ' ')}: {status_count.count}"
+                for status_count in action_summary.status_counts
+            ]
+            if action_summary.stale_action_count:
+                action_parts.append(f"stale: {action_summary.stale_action_count}")
+            lines.append(
+                "- Evidence actions: "
+                f"{_memo_text(', '.join(action_parts))}. Excluded records are ignored "
+                "by scoring and model packets."
+            )
+        else:
+            lines.append("- Evidence actions: none.")
     if not active_issues:
         lines.append("- No evidence review issues were found.")
         return lines

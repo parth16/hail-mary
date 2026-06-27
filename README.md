@@ -49,6 +49,7 @@ uv sync
 hailmary evaluate-deal ./pitch-decks/ExampleCo
 hailmary evaluate-deal ./pitch-decks/ExampleCo --enable-ocr
 hailmary review-evidence
+hailmary evidence-actions needs-review --deal-id exampleco --evidence-id ev_example --note "Check source before relying on this."
 ```
 
 `evaluate-deal` is the main operator-facing command. It evaluates one company folder
@@ -70,8 +71,16 @@ freshness, materiality, confidence, source lineage, conflicts, image-based text
 reading, source spans, and citation gaps without printing confidential evidence text
 by default. Health issues are labeled as `blocking`, `warning`, or `info` so
 operators know what must be fixed before trusting a memo. The command is read-only;
-evidence exclusion and correction workflows are a future step. Use `--show-text` or
-`--quote-limit` only when you intentionally want short local excerpts.
+use `--show-text` or `--quote-limit` only when you intentionally want short local
+excerpts.
+
+`evidence-actions` records local review actions for evidence records and claims:
+usable, approved, excluded, or needs review. Action files live under the private
+generated data folder and store IDs, timestamps, status, and optional operator notes.
+They do not copy source text. Operator notes are hidden by default; use `--show-notes`
+only when you intentionally want to view them locally. `evaluate-deal` honors excluded
+evidence before scoring and model review, and surfaces needs-review actions in warnings
+and memo limitations.
 
 ### Internal Commands
 

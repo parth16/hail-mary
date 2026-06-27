@@ -10,6 +10,8 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from hailmary.cli import _format_dollars, app
+from hailmary.config import AppConfig
+from hailmary.evidence.actions import action_log_path
 from hailmary.ingest import folder_loader
 from hailmary.ingest.extractors import ExtractionResult
 from hailmary.ingest.extractors import extract_document as real_extract_document
@@ -685,6 +687,162 @@ def test_review_evidence_single_deal_latest_summary_hides_text_by_default(
     assert "source span" in result.output
     assert "citation span" in result.output
     assert "SECRET CUSTOMER LIST" not in result.output
+
+
+def test_evidence_actions_cli_writes_private_action_and_hides_notes_by_default(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_secret",
+        "SECRET CUSTOMER LIST. Valuation cap $8M.",
+        deal_id="deal_secret",
+    )
+    store = _review_store(
+        deal_id="deal_secret",
+        company_name="SecretCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    action_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "exclude",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--evidence-id",
+            "ev_secret",
+            "--note",
+            "Operator checked the source locally.",
+        ],
+    )
+    list_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "list",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+        ],
+    )
+    notes_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "list",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--show-notes",
+        ],
+    )
+
+    assert action_result.exit_code == 0, action_result.output
+    assert "No evidence text was copied" in action_result.output
+    assert "SECRET CUSTOMER LIST" not in action_result.output
+    action_path = action_log_path(
+        config=AppConfig(data_dir=data_dir),
+        deal_id="deal_secret",
+    )
+    action_text = action_path.read_text(encoding="utf-8")
+    assert "Operator checked the source locally" in action_text
+    assert "SECRET CUSTOMER LIST" not in action_text
+    assert list_result.exit_code == 0, list_result.output
+    assert "excluded" in list_result.output
+    assert "Operator checked the source locally" not in list_result.output
+    assert "SECRET CUSTOMER LIST" not in list_result.output
+    assert notes_result.exit_code == 0, notes_result.output
+    assert "Operator checked the source locally" in notes_result.output
+    assert "SECRET CUSTOMER LIST" not in notes_result.output
+
+
+def test_review_evidence_shows_action_status_but_hides_notes_by_default(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_secret",
+        "SECRET CUSTOMER LIST. Valuation cap $8M.",
+        deal_id="deal_secret",
+    )
+    store = _review_store(
+        deal_id="deal_secret",
+        company_name="SecretCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+    action_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "needs-review",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--evidence-id",
+            "ev_secret",
+            "--note",
+            "Operator note should stay private by default.",
+        ],
+    )
+
+    review_result = runner.invoke(
+        app,
+        ["review-evidence", "--data-dir", str(data_dir), "--deal-id", "deal_secret"],
+    )
+    review_notes_result = runner.invoke(
+        app,
+        [
+            "review-evidence",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--show-notes",
+        ],
+    )
+
+    assert action_result.exit_code == 0, action_result.output
+    assert review_result.exit_code == 0, review_result.output
+    assert "needs review" in review_result.output
+    assert "Operator note should stay private" not in review_result.output
+    assert "SECRET CUSTOMER LIST" not in review_result.output
+    assert review_notes_result.exit_code == 0, review_notes_result.output
+    assert "Operator note should stay private" in review_notes_result.output
+    assert "SECRET CUSTOMER LIST" not in review_notes_result.output
+
+
+def test_evidence_actions_cli_unknown_target_has_plain_english_error(
+    tmp_path: Path,
+) -> None:
+    store = _review_store(deal_id="deal_secret", company_name="SecretCo")
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "exclude",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--evidence-id",
+            "missing_ev",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "No evidence record missing_ev" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_review_evidence_selects_by_deal_id_company_and_all(tmp_path: Path) -> None:

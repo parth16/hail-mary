@@ -10,6 +10,12 @@ from typing import Literal
 from pydantic import ValidationError
 
 from hailmary.config import AppConfig
+from hailmary.evidence.actions import (
+    EvidenceActionError,
+    EvidenceActionStatus,
+    EvidenceActionSummary,
+    summarize_evidence_actions,
+)
 from hailmary.evidence.store import verify_citation
 from hailmary.ingest.ocr import LOW_OCR_CONFIDENCE_THRESHOLD
 from hailmary.schemas.documents import (
@@ -116,6 +122,7 @@ class DealEvidenceReview:
     conflicts: list[ConflictReviewSummary]
     issues: list[ReviewIssueSummary]
     evidence_records: list[EvidenceRecord]
+    action_summary: EvidenceActionSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +173,10 @@ def review_evidence(
             summary_path=summary_path,
         )
         store = _load_evidence_store(store_path, company_name=deal.company_name)
+        try:
+            action_summary = summarize_evidence_actions(config=config, store=store)
+        except EvidenceActionError as exc:
+            raise EvidenceReviewError(str(exc)) from exc
         if evidence_id is not None and any(
             evidence.id == evidence_id for evidence in store.evidence
         ):
@@ -177,6 +188,7 @@ def review_evidence(
                 evidence_store_path=store_path,
                 evidence_id=evidence_id,
                 recommendation_evidence_ids=recommendation_evidence_ids,
+                action_summary=action_summary,
             )
         )
 
@@ -200,6 +212,7 @@ def build_deal_evidence_review(
     evidence_store_path: Path,
     evidence_id: str | None = None,
     recommendation_evidence_ids: Sequence[str] = (),
+    action_summary: EvidenceActionSummary | None = None,
 ) -> DealEvidenceReview:
     """Build a read-only evidence review for one already loaded evidence store."""
 
@@ -212,6 +225,7 @@ def build_deal_evidence_review(
         store,
         deal.documents,
         recommendation_evidence_ids=recommendation_evidence_ids,
+        action_summary=action_summary,
     )
     return DealEvidenceReview(
         deal_id=store.deal_id,
@@ -226,6 +240,7 @@ def build_deal_evidence_review(
         conflicts=_conflict_summaries(store),
         issues=health.issues,
         evidence_records=evidence_records,
+        action_summary=action_summary,
     )
 
 
@@ -234,6 +249,7 @@ def build_evidence_health(
     documents: Sequence[IngestedDocument],
     *,
     recommendation_evidence_ids: Sequence[str] = (),
+    action_summary: EvidenceActionSummary | None = None,
 ) -> EvidenceHealthSummary:
     """Summarize whether one evidence store is healthy enough for diligence review."""
 
@@ -261,6 +277,7 @@ def build_evidence_health(
             store,
             documents,
             recommendation_evidence_ids=recommendation_evidence_ids,
+            action_summary=action_summary,
         ),
     )
 
@@ -595,6 +612,7 @@ def _issue_summaries(
     documents: Sequence[IngestedDocument],
     *,
     recommendation_evidence_ids: Sequence[str],
+    action_summary: EvidenceActionSummary | None,
 ) -> list[ReviewIssueSummary]:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
     document_ids_with_evidence = {evidence.document_id for evidence in store.evidence}
@@ -799,8 +817,79 @@ def _issue_summaries(
             "contains text that looks like source-document instructions. Review before "
             "using it.",
         ),
+        *_action_issue_summaries(
+            store,
+            action_summary=action_summary,
+            cited_or_recommendation_ids=cited_or_recommendation_ids,
+        ),
     ]
     return [issue for issue in issues if issue.count > 0]
+
+
+def _action_issue_summaries(
+    store: EvidenceStore,
+    *,
+    action_summary: EvidenceActionSummary | None,
+    cited_or_recommendation_ids: set[str],
+) -> list[ReviewIssueSummary]:
+    if action_summary is None:
+        return []
+    claim_by_id = {claim.id: claim for claim in store.claims}
+    needs_review_evidence_ids = {
+        evidence_id
+        for evidence_id, state in action_summary.evidence_states.items()
+        if state.status == EvidenceActionStatus.NEEDS_REVIEW
+    }
+    needs_review_claim_ids = {
+        claim_id
+        for claim_id, state in action_summary.claim_states.items()
+        if state.status == EvidenceActionStatus.NEEDS_REVIEW
+    }
+    cited_needs_review_claim_ids = {
+        claim_id
+        for claim_id in needs_review_claim_ids
+        if claim_by_id.get(claim_id) is not None
+        and any(
+            citation.evidence_id in cited_or_recommendation_ids
+            for citation in claim_by_id[claim_id].citations
+        )
+    }
+    cited_needs_review_count = len(
+        needs_review_evidence_ids & cited_or_recommendation_ids
+    ) + len(cited_needs_review_claim_ids)
+    return [
+        _issue(
+            "excluded_actions",
+            ReviewIssueSeverity.INFO,
+            "Evidence actions excluded records",
+            action_summary.excluded_evidence_count + action_summary.excluded_claim_count,
+            "Excluded evidence and claims are ignored by scoring and model packets.",
+        ),
+        _issue(
+            "needs_review_cited",
+            ReviewIssueSeverity.WARNING,
+            "Cited evidence action needs review",
+            cited_needs_review_count,
+            "A cited evidence record or claim is marked needs review. Verify it before "
+            "relying on scoring or model review.",
+        ),
+        _issue(
+            "needs_review_actions",
+            ReviewIssueSeverity.WARNING,
+            "Evidence actions need review",
+            action_summary.needs_review_count,
+            "One or more evidence records or claims are marked needs review. They remain "
+            "usable until excluded, but the final memo should be treated as limited.",
+        ),
+        _issue(
+            "stale_actions",
+            ReviewIssueSeverity.WARNING,
+            "Evidence actions no longer match current records",
+            action_summary.stale_action_count,
+            "One or more saved action targets were not found in the current evidence "
+            "store. Re-run review-evidence and update those actions with current IDs.",
+        ),
+    ]
 
 
 def _metric_counts(values: Iterable[str]) -> list[EvidenceHealthMetric]:
