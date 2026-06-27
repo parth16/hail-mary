@@ -80,6 +80,8 @@ from hailmary.schemas.scoring import (
     DiligenceResearchContext,
     Recommendation,
     ScoredDeal,
+    ScoreFactor,
+    ScoreSupportStatus,
 )
 from hailmary.scoring.scorer import (
     score_evidence_store,
@@ -91,6 +93,8 @@ from hailmary.utils.slug import slugify
 DEFAULT_EVALUATION_MAX_CONCURRENCY = 3
 MAX_COMMITTEE_CONTEXT_TEXT_CHARS = 500
 MAX_COMMITTEE_CONTEXT_QUOTE_CHARS = 240
+MAX_CLI_COMMENTARY_ITEMS = 3
+MAX_CLI_COMMENTARY_CHARS = 220
 SPECIALIST_AGENT_ROLES: tuple[AgentRole, ...] = tuple(
     role for role in DEFAULT_AGENT_ROLES if role != AgentRole.FINAL_DECISION
 )
@@ -200,6 +204,14 @@ class EvaluationMode:
 
 
 @dataclass(frozen=True)
+class EvaluateDealCliCommentary:
+    positives: list[str]
+    risks: list[str]
+    decisive_factor: str
+    source: str
+
+
+@dataclass(frozen=True)
 class DealEvaluationResult:
     deal_id: str
     company_name: str
@@ -222,6 +234,295 @@ class DealEvaluationResult:
     evidence_review: DealEvidenceReview | None = None
     operator_limitations: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+
+def build_evaluate_deal_cli_commentary(
+    result: DealEvaluationResult,
+) -> EvaluateDealCliCommentary:
+    """Build short operator-facing commentary without reading rendered memos."""
+
+    positives = _cli_positive_points(result)
+    risks = _cli_risk_points(result)
+    return EvaluateDealCliCommentary(
+        positives=positives,
+        risks=risks,
+        decisive_factor=_cli_decisive_factor(result),
+        source=_cli_commentary_source(result),
+    )
+
+
+def _cli_positive_points(result: DealEvaluationResult) -> list[str]:
+    points: list[str] = []
+    for factor in sorted(
+        result.deterministic_score.score_factors,
+        key=_score_factor_ratio,
+        reverse=True,
+    ):
+        if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+            break
+        if _score_factor_ratio(factor) < 0.70:
+            continue
+        if factor.support_status in {
+            ScoreSupportStatus.NEEDS_DILIGENCE,
+            ScoreSupportStatus.UNVERIFIED,
+        }:
+            continue
+        _add_cli_point(
+            points,
+            (
+                f"{_operator_factor_name(factor.name)} looked strongest among the "
+                "rule-based categories with verified or inferred support."
+            ),
+        )
+    if points:
+        return points
+    if result.evidence_count == 0:
+        return [
+            "There was not enough source-linked evidence to identify a supported positive."
+        ]
+    return [
+        "No single positive was strong enough to call out without more supporting evidence."
+    ]
+
+
+def _cli_risk_points(result: DealEvaluationResult) -> list[str]:
+    points: list[str] = []
+    if result.evidence_count == 0:
+        _add_cli_point(
+            points,
+            "No usable source-linked evidence was available, so the deal needs more diligence.",
+        )
+    for gate in result.deterministic_score.triggered_kill_gates:
+        _add_cli_point(
+            points,
+            (
+                "A rule-based guardrail, meaning a fixed safety rule, triggered: "
+                f"{_operator_factor_name(gate.name)}."
+            ),
+        )
+    if result.evidence_review is not None:
+        for issue in result.evidence_review.issues:
+            if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+                break
+            if issue.count <= 0 or issue.severity == ReviewIssueSeverity.INFO:
+                continue
+            _add_cli_point(
+                points,
+                (
+                    "Evidence health, meaning source-record completeness and safety, "
+                    f"found {issue.count} {issue.severity.value} issue"
+                    f"{'' if issue.count == 1 else 's'}: {issue.issue}"
+                ),
+            )
+    for factor in sorted(
+        result.deterministic_score.score_factors,
+        key=_score_factor_risk_sort_key,
+    ):
+        if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+            break
+        if factor.missing_inputs:
+            _add_cli_point(
+                points,
+                (
+                    f"{_operator_factor_name(factor.name)} still needs diligence: "
+                    f"missing {_human_list(factor.missing_inputs[:3])}."
+                ),
+            )
+        elif _score_factor_ratio(factor) <= 0.50:
+            _add_cli_point(
+                points,
+                (
+                    f"{_operator_factor_name(factor.name)} was one of the weakest "
+                    "rule-based categories."
+                ),
+            )
+    if len(points) < MAX_CLI_COMMENTARY_ITEMS and result.failed_specialist_roles:
+        _add_cli_point(
+            points,
+            (
+                "One or more specialist model reviews failed, so the model review was "
+                "less complete than usual."
+            ),
+        )
+    if len(points) < MAX_CLI_COMMENTARY_ITEMS and result.warnings:
+        _add_cli_point(
+            points,
+            "There were run warnings; review the warning table below before relying on the memo.",
+        )
+    if points:
+        return points[:MAX_CLI_COMMENTARY_ITEMS]
+    return [
+        "No major rule-based risk was identified, but the memo should still be "
+        "reviewed against the cited evidence."
+    ]
+
+
+def _cli_decisive_factor(result: DealEvaluationResult) -> str:
+    final_recommendation = result.final_recommendation.recommendation
+    deterministic = result.deterministic_score
+    reason = _reason_fragment(deterministic.one_line_reason)
+    uncertainty_prefix = _uncertainty_prefix(result.final_recommendation.reason)
+    if _final_recommendation_was_overridden(result):
+        return _clean_cli_commentary_text(
+            (
+                f"{uncertainty_prefix}The recommendation is {final_recommendation} "
+                "because deterministic guardrails controlled the final recommendation: "
+                f"{reason}. The model recommendation could not override the fixed "
+                "rule-based score or gates."
+            ),
+            max_chars=360,
+        )
+    if _final_check_size_was_capped(result):
+        return _clean_cli_commentary_text(
+            (
+                f"{uncertainty_prefix}The recommendation is INVEST because final "
+                "review and rule-based scoring both cleared the deal. The recommended check is "
+                f"{_format_check_size(result.final_recommendation.check_size)} because "
+                "the deterministic allocation set the final check size."
+            ),
+            max_chars=360,
+        )
+    if final_recommendation == Recommendation.INVEST:
+        return _clean_cli_commentary_text(
+            (
+                f"{uncertainty_prefix}The recommendation is INVEST because rule-based "
+                "scoring cleared the bar at "
+                f"{deterministic.total_score}/{deterministic.max_score}, "
+                "the final check stayed at "
+                f"{_format_check_size(result.final_recommendation.check_size)}, "
+                f"and no rule-based guardrail forced a pass. {reason}."
+            ),
+            max_chars=360,
+        )
+    if deterministic.recommendation == Recommendation.PASS:
+        return _clean_cli_commentary_text(
+            f"{uncertainty_prefix}The recommendation is PASS because {reason}.",
+            max_chars=360,
+        )
+    if result.evaluation_mode != "model-backed":
+        return _clean_cli_commentary_text(
+            (
+                f"{uncertainty_prefix}The recommendation is PASS because rule-based "
+                "scoring could not keep safe source-linked recommendation citations "
+                "for the suggested INVEST case. Review citation safety before relying "
+                "on the deal."
+            ),
+            max_chars=360,
+        )
+    return _clean_cli_commentary_text(
+        (
+            f"{uncertainty_prefix}The recommendation is PASS because final review did "
+            "not clear the deal after rule-based scoring had suggested INVEST. Review "
+            "the private memo for the source-linked rationale."
+        ),
+        max_chars=360,
+    )
+
+
+def _cli_commentary_source(result: DealEvaluationResult) -> str:
+    if (
+        result.evaluation_mode == "model-backed"
+        and not _final_recommendation_was_overridden(result)
+    ):
+        return "mixed"
+    return "deterministic"
+
+
+def _score_factor_ratio(factor: ScoreFactor) -> float:
+    if factor.max_score <= 0:
+        return 0.0
+    return factor.score / factor.max_score
+
+
+def _score_factor_risk_sort_key(factor: ScoreFactor) -> tuple[int, float]:
+    missing_rank = 0 if factor.missing_inputs else 1
+    return (missing_rank, _score_factor_ratio(factor))
+
+
+def _operator_factor_name(name: str) -> str:
+    labels = {
+        "Evidence authority and freshness": "source evidence",
+        "Deal terms and platform access": "deal terms",
+        "Stage and product-market fit": (
+            "customer and stage evidence, including whether customers use or pay for the product"
+        ),
+        "Fundability and next-round risk": "financing support",
+        "Valuation and net return": "valuation and return math",
+        "Missing data, conflicts, and staleness": "missing-data review",
+    }
+    return labels.get(name, name)
+
+
+def _add_cli_point(points: list[str], text: str) -> None:
+    point = _clean_cli_commentary_text(text)
+    if point and point not in points:
+        points.append(point)
+
+
+def _clean_cli_commentary_text(
+    text: object,
+    *,
+    max_chars: int = MAX_CLI_COMMENTARY_CHARS,
+) -> str:
+    collapsed = " ".join(str(text).split())
+    if collapsed.startswith("NEEDS_DILIGENCE:"):
+        collapsed = f"Needs diligence: {collapsed.split(':', 1)[1].strip()}"
+    elif collapsed.startswith("INFERRED:"):
+        collapsed = f"Inferred: {collapsed.split(':', 1)[1].strip()}"
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return collapsed[:max_chars].rstrip() + "..."
+
+
+def _reason_fragment(reason: str) -> str:
+    cleaned = _clean_cli_commentary_text(reason, max_chars=260)
+    for prefix in (
+        "Rule-based scoring forced PASS:",
+        "Passed because",
+        "Recommended because",
+    ):
+        if cleaned.lower().startswith(prefix.lower()):
+            cleaned = cleaned[len(prefix) :].strip()
+            break
+    if not cleaned:
+        return "the rule-based score did not provide enough support"
+    return (cleaned[0].lower() + cleaned[1:]).rstrip(".")
+
+
+def _uncertainty_prefix(reason: str) -> str:
+    if reason.startswith("NEEDS_DILIGENCE:"):
+        return "Needs diligence: "
+    if reason.startswith("INFERRED:"):
+        return "Inferred: "
+    return ""
+
+
+def _final_recommendation_was_overridden(result: DealEvaluationResult) -> bool:
+    model_recommendation = result.final_output.recommendation
+    if model_recommendation is None:
+        return False
+    return model_recommendation.recommendation != result.final_recommendation.recommendation
+
+
+def _final_check_size_was_capped(result: DealEvaluationResult) -> bool:
+    model_recommendation = result.final_output.recommendation
+    if model_recommendation is None:
+        return False
+    return (
+        model_recommendation.recommendation == result.final_recommendation.recommendation
+        and model_recommendation.check_size != result.final_recommendation.check_size
+    )
+
+
+def _human_list(values: Sequence[str]) -> str:
+    cleaned = [_clean_cli_commentary_text(value, max_chars=80) for value in values if value]
+    if not cleaned:
+        return "more verified inputs"
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
 
 
 class OpenAIAgentReviewClient:
@@ -382,6 +683,7 @@ def evaluate_deal_folder(
             github_client=github_client,
         )
         if research_run.imported_count:
+            _stage(stage_callback, "evidence refresh after research import")
             store = _load_evidence_store_for_deal(deal, config=config)
 
     _stage(stage_callback, "evidence actions")
