@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -42,6 +42,9 @@ from hailmary.evaluation import (
     evaluate_deal_folder,
 )
 from hailmary.evidence import (
+    DiligenceAnswerStatus,
+    DiligenceLoopError,
+    DiligenceQuestionQueue,
     EvidenceActionError,
     EvidenceActionStatus,
     EvidenceActionSummary,
@@ -49,9 +52,12 @@ from hailmary.evidence import (
     EvidenceAuditSeverity,
     EvidenceCompletenessAudit,
     EvidenceReviewError,
+    effective_diligence_answers,
     prune_stale_evidence_actions,
+    record_diligence_answer,
     record_evidence_action,
     select_action_context,
+    select_diligence_question_queue,
     summarize_evidence_actions,
 )
 from hailmary.evidence import review_evidence as build_evidence_review
@@ -120,8 +126,13 @@ evidence_actions_app = typer.Typer(
     help="Record local evidence review actions without copying source text.",
     no_args_is_help=True,
 )
+diligence_app = typer.Typer(
+    help="List and answer local diligence questions.",
+    no_args_is_help=True,
+)
 app.add_typer(portfolio_app, name="portfolio", hidden=True)
 app.add_typer(evidence_actions_app, name="evidence-actions")
+app.add_typer(diligence_app, name="diligence")
 console = Console(highlight=False)
 DEFAULT_REVIEW_QUOTE_LIMIT = 240
 MAX_REVIEW_QUOTE_LIMIT = 500
@@ -183,6 +194,8 @@ def _evaluate_deal_progress_label(stage: str) -> str:
         return "Running rule-based scoring..."
     if stage == "evidence completeness audit":
         return "Checking evidence completeness..."
+    if stage == "diligence question queue":
+        return "Updating diligence questions..."
     if stage == "model review preparation":
         return "Preparing model review packets..."
     if stage == "specialist model review":
@@ -1262,6 +1275,207 @@ def _action_status_label(status: EvidenceActionStatus) -> str:
     return status.value.replace("_", " ")
 
 
+@diligence_app.command("list")
+def diligence_questions_list_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read private diligence question state.",
+        ),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="List questions for one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="List questions for one exact ingested company name."),
+    ] = None,
+    show_answers: Annotated[
+        bool,
+        typer.Option(
+            "--show-answers",
+            help="Show local operator answers. Answers are hidden by default.",
+        ),
+    ] = False,
+) -> None:
+    """List local diligence questions from the latest evaluate-deal run."""
+
+    config = _config_from_options(data_dir)
+    try:
+        context = select_diligence_question_queue(
+            config=config,
+            deal_id=deal_id,
+            company_name=company,
+        )
+    except DiligenceLoopError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    renderables: list[RenderableType] = [
+        _plain(f"Company: {context.queue.company_name}."),
+        _plain(f"Deal ID: {context.queue.deal_id}."),
+        _plain(f"Diligence question file: {context.queue_path}."),
+        _plain(_diligence_question_summary(context.queue)),
+        _plain("Diligence means checking unanswered facts before investing."),
+    ]
+    if not show_answers:
+        renderables.append(
+            _plain("Operator answers are hidden by default. Use --show-answers to show them.")
+        )
+    answers_by_question_id = effective_diligence_answers(context.answer_log)
+    renderables.append(
+        _diligence_question_table(
+            context.queue,
+            show_answers=show_answers,
+            answers_by_question_id=answers_by_question_id,
+        )
+    )
+    if show_answers:
+        renderables.extend(_diligence_answer_lines(context.queue, answers_by_question_id))
+    _print_panel("Diligence questions", renderables, border_style="green")
+
+
+@diligence_app.command("answer")
+def diligence_questions_answer_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where Hail Mary should write private answers."),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="Answer a question for one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="Answer a question for one exact ingested company name."),
+    ] = None,
+    question_id: Annotated[
+        str,
+        typer.Option("--question-id", help="Diligence question ID from `hailmary diligence list`."),
+    ] = "",
+    status: Annotated[
+        DiligenceAnswerStatus,
+        typer.Option(
+            "--status",
+            help="Mark whether the answer resolves the question or leaves it unresolved.",
+        ),
+    ] = DiligenceAnswerStatus.RESOLVED,
+    answer: Annotated[
+        str,
+        typer.Option("--answer", help="Plain-English local answer to save privately."),
+    ] = "",
+    evidence_id: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--evidence-id",
+            help=(
+                "Current evidence ID that supports this answer. Use more than once "
+                "for several IDs."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Record a local answer for one diligence question."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = record_diligence_answer(
+            config=config,
+            deal_id=deal_id,
+            company_name=company,
+            question_id=question_id,
+            status=status,
+            answer=answer,
+            evidence_ids=evidence_id or [],
+        )
+    except DiligenceLoopError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    _print_panel(
+        "Diligence answer saved",
+        [
+            _plain(f"Company: {result.company_name}."),
+            _plain(f"Deal ID: {result.deal_id}."),
+            _plain(f"Question ID: {result.question_id}."),
+            _plain(f"Status: {result.status.value}."),
+            _plain(f"Saved private answer state to {result.answer_log_path}."),
+            _plain(f"Updated question status at {result.question_queue_path}."),
+            _plain("Rerun `hailmary evaluate-deal` to include this answer status in the memo."),
+        ],
+        border_style="green",
+    )
+
+
+def _diligence_question_summary(queue: DiligenceQuestionQueue) -> str:
+    return (
+        f"Questions: {len(queue.questions)} total, {queue.resolved_count} resolved, "
+        f"{queue.unresolved_count} unresolved."
+    )
+
+
+def _diligence_question_table(
+    queue: DiligenceQuestionQueue,
+    *,
+    show_answers: bool,
+    answers_by_question_id: Mapping[str, object],
+) -> Table:
+    table = Table(
+        title="Current questions",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Question ID", style="bold cyan", overflow="fold")
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Priority", no_wrap=True)
+    table.add_column("Source")
+    table.add_column("Question", overflow="fold")
+    table.add_column("Evidence IDs", overflow="fold")
+    if show_answers:
+        table.add_column("Operator answer", overflow="fold")
+    if not queue.questions:
+        row = [_plain("No questions"), _plain(""), _plain(""), _plain(""), _plain(""), _plain("")]
+        if show_answers:
+            row.append(_plain(""))
+        table.add_row(*row)
+        return table
+    for question in queue.questions:
+        row = [
+            _plain(question.question_id),
+            _plain(question.answer_status.value),
+            _plain(str(question.priority)),
+            _plain(question.source.value.replace("_", " ")),
+            _plain(question.question),
+            _plain(", ".join(question.answer_evidence_ids or question.evidence_ids) or "none"),
+        ]
+        if show_answers:
+            answer = answers_by_question_id.get(question.question_id)
+            answer_text = getattr(answer, "answer", "") if answer is not None else ""
+            row.append(_plain(str(answer_text)))
+        table.add_row(*row)
+    return table
+
+
+def _diligence_answer_lines(
+    queue: DiligenceQuestionQueue,
+    answers_by_question_id: Mapping[str, object],
+) -> list[Text]:
+    lines: list[Text] = []
+    for question in queue.questions:
+        answer = answers_by_question_id.get(question.question_id)
+        if answer is None:
+            continue
+        answer_text = getattr(answer, "answer", "")
+        lines.append(_plain(f"Answer for {question.question_id}: {answer_text}"))
+    if not lines:
+        lines.append(_plain("No operator answers are saved for these questions."))
+    return lines
+
+
 @app.command("review-evidence")
 def review_evidence_command(
     data_dir: Annotated[
@@ -2156,6 +2370,10 @@ def evaluate_deal(
         _plain(_evaluate_deal_evidence_audit_text(result.evidence_audit)),
     )
     summary.add_row(
+        _plain("Diligence questions"),
+        _plain(_evaluate_deal_diligence_questions_text(result.diligence_question_queue)),
+    )
+    summary.add_row(
         _plain("Evidence actions"),
         _plain(_evaluate_deal_evidence_action_text(result.evidence_review)),
     )
@@ -2265,6 +2483,15 @@ def evaluate_deal(
                 f"{_evaluate_deal_evidence_audit_text(result.evidence_audit)}. "
                 "Evidence completeness means whether saved source records cover the "
                 "key facts needed for the decision."
+            )
+        )
+    if result.diligence_question_queue is not None:
+        renderables.append(
+            _plain(
+                "Diligence questions saved "
+                f"{_evaluate_deal_diligence_questions_text(result.diligence_question_queue)} "
+                f"at {result.diligence_question_queue_path}. "
+                "Diligence means checking unanswered facts before investing."
             )
         )
     if result.warnings:
@@ -2925,6 +3152,18 @@ def _evaluate_deal_evidence_audit_text(
     if warning_count:
         parts.append(_research_count_phrase(warning_count, "warning"))
     return ", ".join(parts)
+
+
+def _evaluate_deal_diligence_questions_text(
+    queue: DiligenceQuestionQueue | None,
+) -> str:
+    if queue is None:
+        return "not saved"
+    question_word = "question" if len(queue.questions) == 1 else "questions"
+    return (
+        f"{len(queue.questions)} {question_word}, "
+        f"{queue.resolved_count} resolved, {queue.unresolved_count} unresolved"
+    )
 
 
 def _evaluate_deal_evidence_action_text(
