@@ -386,6 +386,7 @@ def evaluate_deal_folder(
             created_at=packet_created_at,
             source_documents=deal.documents,
             quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+            action_summary=action_application.summary,
         )
         packets_by_role = {
             packet_file.agent_role: _packet_from_file(packet_file.path)
@@ -416,6 +417,7 @@ def evaluate_deal_folder(
                 source_documents=deal.documents,
                 committee_context=committee_context,
                 quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+                action_summary=action_application.summary,
             )
             final_packet_path = packet_paths_by_role[AgentRole.FINAL_DECISION]
             _write_private_text(
@@ -1136,6 +1138,7 @@ def _write_agent_packets(
     created_at: datetime,
     source_documents: Sequence[IngestedDocument],
     quote_only_evidence_ids: set[str],
+    action_summary: EvidenceActionSummary,
 ) -> list[AgentPacketFile]:
     output_dir = config.data_dir / "agent-packets"
     _ensure_private_directory(output_dir, private_root=config.data_dir, description="agent packet")
@@ -1148,6 +1151,7 @@ def _write_agent_packets(
             created_at=created_at,
             source_documents=source_documents,
             quote_only_evidence_ids=quote_only_evidence_ids,
+            action_summary=action_summary,
         )
         packet_path = output_dir / f"{slugify(store.company_name)}-{store.deal_id}-{role}.json"
         _write_private_text(

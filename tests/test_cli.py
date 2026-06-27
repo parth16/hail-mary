@@ -1215,6 +1215,76 @@ def test_review_evidence_summarizes_review_issues_and_conflicts(tmp_path: Path) 
     assert "warning" in normalized_output
 
 
+def test_review_evidence_applies_exclusions_before_health_summary(
+    tmp_path: Path,
+) -> None:
+    first_evidence = _review_evidence_record(
+        "ev_cap_low",
+        "Valuation cap $8M.",
+        deal_id="deal_actions",
+    )
+    second_evidence = _review_evidence_record(
+        "ev_cap_high",
+        "Valuation cap $10M.",
+        deal_id="deal_actions",
+    )
+    first_claim = _review_claim(
+        "valuation cap",
+        "$8M",
+        first_evidence,
+        status=VerificationStatus.CONFLICTED,
+    )
+    second_claim = _review_claim(
+        "valuation cap",
+        "$10M",
+        second_evidence,
+        status=VerificationStatus.CONFLICTED,
+    )
+    store = _review_store(
+        deal_id="deal_actions",
+        company_name="ActionCo",
+        evidence=[first_evidence, second_evidence],
+        claims=[first_claim, second_claim],
+        conflicts=[
+            ClaimConflict(
+                id="conflict_valuation_cap",
+                deal_id="deal_actions",
+                claim_type=ClaimType.DEAL_TERM,
+                label="valuation cap",
+                normalized_values=["valuation cap:$8M", "valuation cap:$10M"],
+                claim_ids=[first_claim.id, second_claim.id],
+                notes="Synthetic conflicting valuation caps.",
+            )
+        ],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    action_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "exclude",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_actions",
+            "--claim-id",
+            first_claim.id,
+        ],
+    )
+    review_result = runner.invoke(
+        app,
+        ["review-evidence", "--data-dir", str(data_dir), "--deal-id", "deal_actions"],
+    )
+    normalized_output = " ".join(review_result.output.split())
+
+    assert action_result.exit_code == 0, action_result.output
+    assert review_result.exit_code == 0, review_result.output
+    assert "No conflicts" in normalized_output
+    assert "active_conflicts" not in normalized_output
+    assert "excluded_actions" in normalized_output
+
+
 def test_review_evidence_shows_table_index_with_page_number(tmp_path: Path) -> None:
     evidence = _review_evidence_record(
         "ev_table",

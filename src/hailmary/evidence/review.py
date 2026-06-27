@@ -14,7 +14,7 @@ from hailmary.evidence.actions import (
     EvidenceActionError,
     EvidenceActionStatus,
     EvidenceActionSummary,
-    summarize_evidence_actions,
+    apply_evidence_actions,
 )
 from hailmary.evidence.store import verify_citation
 from hailmary.ingest.ocr import LOW_OCR_CONFIDENCE_THRESHOLD
@@ -183,7 +183,7 @@ def review_evidence(
         )
         store = _load_evidence_store(store_path, company_name=deal.company_name)
         try:
-            action_summary = summarize_evidence_actions(config=config, store=store)
+            action_application = apply_evidence_actions(config=config, store=store)
         except EvidenceActionError as exc:
             raise EvidenceReviewError(str(exc)) from exc
         if evidence_id is not None and any(
@@ -193,11 +193,11 @@ def review_evidence(
         deal_reviews.append(
             build_deal_evidence_review(
                 deal,
-                store,
+                action_application.store,
                 evidence_store_path=store_path,
                 evidence_id=evidence_id,
                 recommendation_evidence_ids=recommendation_evidence_ids,
-                action_summary=action_summary,
+                action_summary=action_application.summary,
             )
         )
 

@@ -147,3 +147,4 @@ Rules for all future Codex runs:
 - PR #63: Final memo tables must escape every dynamic cell, keep model-only findings display-only, and derive evidence quality, missing data, diligence ranking, portfolio impact, and return math from deterministic source-linked state.
 - PR #67 loop 1: Evidence action write paths must validate generated-data folders before saving local notes, review output must expose claim IDs when actions accept claim IDs, and excluding a claim should suppress its cited evidence from model packets.
 - PR #67 loop 2: Claim-level exclusions should not remove shared evidence needed by surviving claims; keep scoring-store filtering separate from packet excerpt suppression.
+- PR #67 loop 3: Quote-only packet excerpts must never fall back to raw source text, review health should use the same action-filtered store as scoring, and model packets should carry needs-review action warnings.
