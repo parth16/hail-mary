@@ -199,8 +199,13 @@ NEGATED_TRACTION_PATTERNS = (
     re.compile(
         rf"\bwithout\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
         rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
-        rf"(?:(?:(?:\s*,\s*(?:(?:or|and)\s+)?)|\s+(?:or|and)\s+)"
+        rf"(?:(?:\s+(?:or|and)\s+|\s*,\s*(?:or|and)\s+)"
         rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)|"
+        rf"(?:\s*,\s*{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b))+"
+        rf"\s*,?\s*(?:or|and)\s+{TRACTION_NEGATED_QUALIFIERS}"
+        rf"{TRACTION_NEGATED_SIGNAL}\b"
         rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b))*",
         re.IGNORECASE,
     ),
