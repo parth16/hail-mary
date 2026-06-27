@@ -15,6 +15,7 @@ from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder, openai_review_messages
 from hailmary.evidence import (
+    DiligenceQuestionQueue,
     EvidenceAuditFinding,
     EvidenceAuditFindingKind,
     EvidenceAuditReadiness,
@@ -1899,6 +1900,142 @@ def test_evaluate_deal_evidence_audit_blocker_overrides_local_invest(
     commentary = evaluation.build_evaluate_deal_cli_commentary(result)
     assert "evidence completeness found blocking gaps" in commentary.decisive_factor
     assert any("Missing price or valuation" in risk for risk in commentary.risks)
+
+
+def test_evaluate_deal_audit_blocker_does_not_claim_force_when_score_already_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        evaluation,
+        "build_evidence_completeness_audit",
+        _blocking_evidence_audit,
+    )
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="AuditAlreadyPassCo",
+        body="Round size $1M. No customers, no revenue, and no retention yet.",
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+        run_research=False,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.PASS
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+    assert "Evidence completeness audit forced PASS/$0" not in result.final_recommendation.reason
+    assert all(
+        "Evidence completeness audit forced PASS/$0" not in limitation
+        for limitation in result.operator_limitations
+    )
+    assert any(
+        "Evidence completeness audit found blocking gaps" in limitation
+        for limitation in result.operator_limitations
+    )
+
+
+def test_evaluate_deal_writes_diligence_question_queue_and_applies_answers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="DiligenceLoopCo")
+    config = AppConfig(data_dir=tmp_path / "data", local_only=True)
+
+    initial = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+
+    assert initial.diligence_question_queue_path is not None
+    assert initial.diligence_question_queue_path.exists()
+    assert initial.diligence_question_queue is not None
+    assert initial.diligence_question_queue.questions
+    first_question = initial.diligence_question_queue.questions[0]
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    evidence_id = store.evidence[0].id
+
+    bad_evidence_result = runner.invoke(
+        app,
+        [
+            "diligence",
+            "answer",
+            "--data-dir",
+            str(config.data_dir),
+            "--question-id",
+            first_question.question_id,
+            "--answer",
+            "Synthetic answer with a missing evidence ID.",
+            "--evidence-id",
+            "ev_missing",
+        ],
+    )
+    assert bad_evidence_result.exit_code == 1
+    assert "No evidence record ev_missing" in bad_evidence_result.output
+
+    answer_result = runner.invoke(
+        app,
+        [
+            "diligence",
+            "answer",
+            "--data-dir",
+            str(config.data_dir),
+            "--question-id",
+            first_question.question_id,
+            "--answer",
+            "Synthetic operator checked this item and attached current evidence.",
+            "--evidence-id",
+            evidence_id,
+        ],
+    )
+    assert answer_result.exit_code == 0, answer_result.output
+    assert "Synthetic operator checked" not in answer_result.output
+
+    hidden_list = runner.invoke(
+        app,
+        ["diligence", "list", "--data-dir", str(config.data_dir)],
+    )
+    assert hidden_list.exit_code == 0, hidden_list.output
+    assert "1 resolved" in hidden_list.output
+    assert "Synthetic operator checked" not in hidden_list.output
+
+    shown_list = runner.invoke(
+        app,
+        ["diligence", "list", "--data-dir", str(config.data_dir), "--show-answers"],
+    )
+    assert shown_list.exit_code == 0, shown_list.output
+    assert "Synthetic operator checked this item" in shown_list.output
+
+    rerun = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+
+    assert rerun.diligence_question_queue is not None
+    answered_question = next(
+        question
+        for question in rerun.diligence_question_queue.questions
+        if question.question_id == first_question.question_id
+    )
+    assert answered_question.answer_status.value == "resolved"
+    assert answered_question.answer_evidence_ids == [evidence_id]
+    memo_text = rerun.final_memo_path.read_text(encoding="utf-8")
+    assert "## Operator Diligence Loop" in memo_text
+    assert "1 resolved" in memo_text
+    assert rerun.diligence_question_queue_path is not None
+    queue = DiligenceQuestionQueue.model_validate_json(
+        rerun.diligence_question_queue_path.read_text(encoding="utf-8")
+    )
+    assert queue.resolved_count == 1
 
 
 def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(

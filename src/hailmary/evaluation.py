@@ -19,12 +19,17 @@ from hailmary.agents.packets import (
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig, ConfigError, create_local_state, validate_local_state
 from hailmary.evidence import (
+    DiligenceLoopError,
+    DiligenceQuestionQueue,
     EvidenceAuditReadiness,
     EvidenceAuditSeverity,
     EvidenceCompletenessAudit,
     ReviewIssueSeverity,
     build_deal_evidence_review,
+    build_diligence_question_queue,
     build_evidence_completeness_audit,
+    load_diligence_answer_log,
+    write_diligence_question_queue,
 )
 from hailmary.evidence.actions import (
     EvidenceActionError,
@@ -278,6 +283,8 @@ class DealEvaluationResult:
     final_memo_path: Path
     agent_output_dir: Path
     ocr_status: str
+    diligence_question_queue_path: Path | None = None
+    diligence_question_queue: DiligenceQuestionQueue | None = None
     research_run: EvaluationResearchRun | None = None
     research_imported_count: int = 0
     evidence_audit: EvidenceCompletenessAudit | None = None
@@ -957,6 +964,26 @@ def evaluate_deal_folder(
                 )
         final_review_was_model = False
 
+    _stage(stage_callback, "diligence question queue")
+    try:
+        diligence_answer_log = load_diligence_answer_log(config=config, deal_id=deal.id)
+        diligence_question_queue = build_diligence_question_queue(
+            scored_deal,
+            evidence_audit=evidence_audit,
+            final_output=final_output,
+            specialist_outputs=[
+                result.output for result in specialist_results if result.output is not None
+            ],
+            answer_log=diligence_answer_log,
+            created_at=packet_created_at,
+        )
+        diligence_question_queue_path = write_diligence_question_queue(
+            config=config,
+            queue=diligence_question_queue,
+        )
+    except DiligenceLoopError as exc:
+        raise EvaluationError(f"Could not update local diligence questions: {exc}") from exc
+
     _stage(stage_callback, "evidence health review")
     evidence_review = _build_evaluate_deal_evidence_review(
         deal,
@@ -1005,6 +1032,7 @@ def evaluate_deal_folder(
             research_run=research_run,
             evidence_audit=evidence_audit,
             evidence_review=evidence_review,
+            diligence_question_queue=diligence_question_queue,
             quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
         ),
         description="final evaluation memo",
@@ -1027,6 +1055,8 @@ def evaluate_deal_folder(
         final_memo_path=final_memo_path,
         agent_output_dir=output_dir,
         ocr_status=_ocr_status(config, deal),
+        diligence_question_queue_path=diligence_question_queue_path,
+        diligence_question_queue=diligence_question_queue,
         research_run=research_run,
         research_imported_count=research_run.imported_count if research_run else 0,
         evidence_audit=evidence_audit,
@@ -1317,7 +1347,11 @@ def _rule_based_final_decision(
     )
     final_confidence = scored_deal.confidence
     unsupported = not references
-    audit_guardrail_reason = _evidence_audit_guardrail_reason(evidence_audit)
+    audit_guardrail_reason = (
+        _evidence_audit_guardrail_reason(evidence_audit)
+        if scored_deal.recommendation == Recommendation.INVEST
+        else None
+    )
     if scored_deal.recommendation == Recommendation.INVEST and audit_guardrail_reason:
         final_recommendation = Recommendation.PASS
         final_check_size = 0
@@ -1417,6 +1451,7 @@ def render_final_evaluation_memo(
     research_run: EvaluationResearchRun | None = None,
     evidence_audit: EvidenceCompletenessAudit | None = None,
     evidence_review: DealEvidenceReview | None = None,
+    diligence_question_queue: DiligenceQuestionQueue | None = None,
     quote_only_evidence_ids: set[str] | None = None,
 ) -> str:
     verified_claims = validated_verified_claims(store)
@@ -1488,6 +1523,9 @@ def render_final_evaluation_memo(
 
     lines.extend(["", "## Missing Data"])
     lines.extend(_missing_data_memo_lines(scored_deal, evidence_review=evidence_review))
+
+    lines.extend(["", "## Operator Diligence Loop"])
+    lines.extend(_diligence_question_queue_memo_lines(diligence_question_queue))
 
     lines.extend(["", "## Model Committee Findings"])
     successful_results = [result for result in specialist_results if result.output is not None]
@@ -3561,6 +3599,48 @@ def _ranked_diligence_question_lines(
     if not rows:
         return ["- No diligence questions were recorded."]
     return _markdown_table(["Rank", "Source", "Question", "Reason", "Evidence IDs"], rows)
+
+
+def _diligence_question_queue_memo_lines(
+    queue: DiligenceQuestionQueue | None,
+) -> list[str]:
+    if queue is None:
+        return ["- No local diligence question queue was written for this run."]
+    lines = [
+        "- Diligence means checking unanswered facts before investing.",
+        (
+            f"- Current questions: {len(queue.questions)} total, "
+            f"{queue.resolved_count} resolved, {queue.unresolved_count} unresolved."
+        ),
+    ]
+    if not queue.questions:
+        lines.append("- No diligence questions were recorded.")
+        return lines
+    rows = [
+        [
+            question.question_id,
+            question.answer_status.value,
+            question.source.value.replace("_", " "),
+            str(question.priority),
+            question.question,
+            _evidence_id_cell(question.answer_evidence_ids or question.evidence_ids),
+        ]
+        for question in queue.questions[:10]
+    ]
+    lines.extend(
+        _markdown_table(
+            ["Question ID", "Status", "Source", "Priority", "Question", "Evidence IDs"],
+            rows,
+        )
+    )
+    if len(queue.questions) > 10:
+        lines.append(f"- {len(queue.questions) - 10} more questions are saved locally.")
+    if queue.resolved_count:
+        lines.append(
+            "- Operator answers are treated as local diligence notes. They do not change "
+            "the rule-based score unless supporting evidence is also present."
+        )
+    return lines
 
 
 def _markdown_table(headers: Sequence[object], rows: Sequence[Sequence[object]]) -> list[str]:
