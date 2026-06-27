@@ -56,6 +56,17 @@ class ScoreSupportStatus(StrEnum):
     UNVERIFIED = "unverified"
 
 
+class DiligenceQuestionCategory(StrEnum):
+    COMPANY = "company"
+    PRODUCT = "product"
+    CUSTOMERS = "customers"
+    MARKET = "market"
+    TEAM = "team"
+    FINANCING_TERMS = "financing terms"
+    LEGAL_COMPLIANCE = "legal/compliance"
+    PORTFOLIO_FIT = "portfolio fit"
+
+
 class NetReturnEstimate(BaseModel):
     entry_valuation: int | None = None
     estimated_ownership_percent: float | None = None
@@ -93,6 +104,28 @@ class DiligenceQuestion(BaseModel):
     reason: str
     evidence_ids: list[str] = Field(default_factory=list)
     support_status: ScoreSupportStatus = ScoreSupportStatus.NEEDS_DILIGENCE
+    category: DiligenceQuestionCategory = DiligenceQuestionCategory.COMPANY
+    rank_score: int = Field(default=0, ge=0)
+    materiality_score: int = Field(default=0, ge=0, le=5)
+    decision_impact_score: int = Field(default=0, ge=0, le=5)
+    missing_evidence_score: int = Field(default=0, ge=0, le=5)
+    confidence_gap_score: int = Field(default=0, ge=0, le=5)
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    conflicting_evidence_ids: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+
+
+class DiligenceResearchContext(BaseModel):
+    planned_task_count: int = Field(default=0, ge=0)
+    imported_record_count: int = Field(default=0, ge=0)
+    failed_provider_count: int = Field(default=0, ge=0)
+    incomplete_search_count: int = Field(default=0, ge=0)
+    no_exact_result_provider_count: int = Field(default=0, ge=0)
+    manual_needed_provider_count: int = Field(default=0, ge=0)
+    not_run_provider_count: int = Field(default=0, ge=0)
+    stale_record_count: int = Field(default=0, ge=0)
+    warning_count: int = Field(default=0, ge=0)
+    no_prepared_result_companies: list[str] = Field(default_factory=list)
 
 
 class ScoredDeal(BaseModel):
