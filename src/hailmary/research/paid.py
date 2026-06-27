@@ -161,6 +161,7 @@ def collect_paid_research_results(
             deals=deal_summaries,
         )
 
+    _ensure_paid_collection_allowed(config)
     _ensure_paid_credentials(selected_providers)
     clients_by_provider = dict(clients or {})
     _ensure_paid_clients(selected_providers, clients_by_provider)
@@ -321,6 +322,20 @@ def _clean_provider_ids(provider_ids: list[str]) -> list[str]:
         seen.add(normalized)
         cleaned.append(normalized)
     return cleaned
+
+
+def _ensure_paid_collection_allowed(config: AppConfig) -> None:
+    if config.local_only:
+        raise ResearchCollectionError(
+            "Paid provider collection is disabled while local-only mode is on. Set "
+            "HAILMARY_LOCAL_ONLY=false and HAILMARY_ENABLE_WEB_RESEARCH=true before "
+            "using paid provider clients."
+        )
+    if not config.enable_web_research:
+        raise ResearchCollectionError(
+            "Paid provider collection is disabled because web research is disabled. "
+            "Set HAILMARY_ENABLE_WEB_RESEARCH=true before using paid provider clients."
+        )
 
 
 def _ensure_paid_credentials(providers: list[ResearchProvider]) -> None:

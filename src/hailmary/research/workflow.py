@@ -54,9 +54,17 @@ CollectionKind = Literal["local_public", "live_public", "web", "paid_optional"]
 
 LIVE_PROVIDER_IDS = {"company_website", "sec_form_d", "usaspending", "sbir", "github"}
 MANUAL_OR_LOCAL_PROVIDER_IDS = {"sam_gov", "uspto", "public_web"}
-PRIVACY_NOTES = [
+NO_PAID_OUTPUTS_PRIVACY_NOTE = (
     "No screenshots, cookies, browser profiles, raw portal HTML, hidden authenticated data, "
-    "signed URLs, or paid-source outputs are saved by this workflow.",
+    "signed URLs, or paid-source outputs are saved by this workflow."
+)
+PAID_OUTPUTS_PRIVACY_NOTE = (
+    "No screenshots, cookies, browser profiles, raw portal HTML, hidden authenticated data, "
+    "or signed URLs are saved by this workflow. When explicit paid clients are supplied, "
+    "paid-provider facts may be saved only as generated research-result JSON for import preview."
+)
+PRIVACY_NOTES = [
+    NO_PAID_OUTPUTS_PRIVACY_NOTE,
     "Every imported external fact still needs provider, retrieval time, exact URL or API source, "
     "confidence, and licensing notes.",
 ]
@@ -355,10 +363,11 @@ def run_research_workflow(
                 )
             )
 
-    if include_paid:
+    paid_company_names = list(company_names or [])
+    if include_paid and paid_company_names:
         paid_summary = _prepare_paid_optional_sources(
             config=config,
-            company_names=[deal.company_name for deal in plan_result.plan.deals],
+            company_names=paid_company_names,
             clients=paid_clients,
             collected_at=created_at,
         )
@@ -455,6 +464,7 @@ def run_research_workflow(
         collections=collections,
         import_previews=import_previews,
         issues=issues,
+        privacy_notes=_privacy_notes_for_collections(collections),
         live_collection_enabled=live_collection_enabled,
     )
 
@@ -606,7 +616,12 @@ def _prepare_paid_optional_sources(
     clients: Mapping[str, PaidProviderClient] | None,
     collected_at: datetime,
 ) -> ResearchWorkflowCollectionSummary | None:
-    if not config.enabled_paid_providers or not clients:
+    if (
+        not config.enabled_paid_providers
+        or not clients
+        or config.local_only
+        or not config.enable_web_research
+    ):
         return None
     try:
         result = collect_paid_research_results(
@@ -632,6 +647,18 @@ def _prepare_paid_optional_sources(
         result=result,
         skipped_non_exact_company_names=result.skipped_non_exact_company_names,
     )
+
+
+def _privacy_notes_for_collections(
+    collections: list[ResearchWorkflowCollectionSummary],
+) -> list[str]:
+    notes = list(PRIVACY_NOTES)
+    if any(
+        collection.kind == "paid_optional" and collection.output_path is not None
+        for collection in collections
+    ):
+        notes[0] = PAID_OUTPUTS_PRIVACY_NOTE
+    return notes
 
 
 def _run_live_collectors(

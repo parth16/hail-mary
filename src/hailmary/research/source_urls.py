@@ -113,6 +113,8 @@ def validate_provider_source_url(
 ) -> None:
     validate_http_url(url, field_name=field_name)
     host_rule = PUBLIC_SOURCE_HOSTS.get(provider_id)
+    if provider_id == "newsapi" and field_name == "source_url":
+        return
     if host_rule is None:
         return
     allowed_suffix, description = host_rule

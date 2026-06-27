@@ -315,6 +315,8 @@ def test_paid_provider_collection_reports_missing_credentials(
         collect_paid_research_results(
             config=AppConfig(
                 data_dir=tmp_path / "data",
+                local_only=False,
+                enable_web_research=True,
                 enabled_paid_providers=("crunchbase",),
             ),
             company_names=["Acme AI"],
@@ -323,13 +325,42 @@ def test_paid_provider_collection_reports_missing_credentials(
         )
 
 
+def test_paid_provider_collection_respects_local_only_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRUNCHBASE_API_KEY", "synthetic-test-key")
+    client = _FakePaidProviderClient(
+        provider_id="crunchbase",
+        facts=[_paid_fact(company_name="Acme AI")],
+    )
+
+    with pytest.raises(ResearchCollectionError, match="local-only mode is on"):
+        collect_paid_research_results(
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                enabled_paid_providers=("crunchbase",),
+            ),
+            company_names=["Acme AI"],
+            clients={"crunchbase": client},
+            collected_at=BUILT_AT,
+        )
+    assert client.calls == []
+
+
 def test_paid_provider_collection_writes_importable_mock_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CRUNCHBASE_API_KEY", "synthetic-test-key")
     config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
-    config = config.model_copy(update={"enabled_paid_providers": ("crunchbase",)})
+    config = config.model_copy(
+        update={
+            "local_only": False,
+            "enable_web_research": True,
+            "enabled_paid_providers": ("crunchbase",),
+        }
+    )
     client = _FakePaidProviderClient(
         provider_id="crunchbase",
         facts=[
@@ -371,6 +402,56 @@ def test_paid_provider_collection_writes_importable_mock_result(
     assert dry_run.imported_count == 1
 
 
+def test_paid_provider_collection_allows_newsapi_article_source_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEWSAPI_KEY", "synthetic-test-key")
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    config = config.model_copy(
+        update={
+            "local_only": False,
+            "enable_web_research": True,
+            "enabled_paid_providers": ("newsapi",),
+        }
+    )
+    client = _FakePaidProviderClient(
+        provider_id="newsapi",
+        facts=[
+            _paid_fact(
+                company_name="Acme AI",
+                title="Acme AI synthetic news article",
+                text="Acme AI announced a synthetic customer launch in a news article.",
+                source_url="https://techcrunch.com/2025/12/31/acme-ai-launch",
+                source_api="https://newsapi.org/v2/everything?q=Acme%20AI",
+                licensing_notes=(
+                    "Licensed NewsAPI account permits saving this short article summary."
+                ),
+            )
+        ],
+    )
+
+    result = collect_paid_research_results(
+        config=config,
+        company_names=["Acme AI"],
+        clients={"newsapi": client},
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["source_url"] == (
+        "https://techcrunch.com/2025/12/31/acme-ai-launch"
+    )
+    dry_run = import_research_results(
+        config=config,
+        results_path=result.output_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+    assert dry_run.imported_count == 1
+
+
 def test_paid_provider_collection_rejects_unsafe_source_api(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -394,6 +475,8 @@ def test_paid_provider_collection_rejects_unsafe_source_api(
         collect_paid_research_results(
             config=AppConfig(
                 data_dir=tmp_path / "data",
+                local_only=False,
+                enable_web_research=True,
                 enabled_paid_providers=("crunchbase",),
             ),
             company_names=["Acme AI"],
@@ -422,6 +505,8 @@ def test_paid_provider_collection_rejects_unsafe_source_url(
         collect_paid_research_results(
             config=AppConfig(
                 data_dir=tmp_path / "data",
+                local_only=False,
+                enable_web_research=True,
                 enabled_paid_providers=("crunchbase",),
             ),
             company_names=["Acme AI"],
@@ -444,6 +529,8 @@ def test_paid_provider_collection_rejects_placeholder_licensing_notes(
         collect_paid_research_results(
             config=AppConfig(
                 data_dir=tmp_path / "data",
+                local_only=False,
+                enable_web_research=True,
                 enabled_paid_providers=("crunchbase",),
             ),
             company_names=["Acme AI"],
@@ -465,6 +552,8 @@ def test_paid_provider_collection_skips_related_name_matches(
     result = collect_paid_research_results(
         config=AppConfig(
             data_dir=tmp_path / "data",
+            local_only=False,
+            enable_web_research=True,
             enabled_paid_providers=("crunchbase",),
         ),
         company_names=["Acme AI"],
@@ -484,7 +573,13 @@ def test_research_workflow_collects_enabled_paid_provider_with_fake_client(
 ) -> None:
     monkeypatch.setenv("CRUNCHBASE_API_KEY", "synthetic-test-key")
     config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
-    config = config.model_copy(update={"enabled_paid_providers": ("crunchbase",)})
+    config = config.model_copy(
+        update={
+            "local_only": False,
+            "enable_web_research": True,
+            "enabled_paid_providers": ("crunchbase",),
+        }
+    )
     client = _FakePaidProviderClient(
         provider_id="crunchbase",
         facts=[_paid_fact(company_name="Acme AI")],
@@ -495,6 +590,16 @@ def test_research_workflow_collects_enabled_paid_provider_with_fake_client(
         company_names=["Acme AI"],
         include_paid=True,
         paid_clients={"crunchbase": client},
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
         created_at=BUILT_AT,
     )
 
@@ -503,7 +608,12 @@ def test_research_workflow_collects_enabled_paid_provider_with_fake_client(
         collection for collection in result.collections if collection.source_id == "paid_optional"
     )
     assert paid_collection.result_count == 1
-    assert result.ready_to_import_count == 1
+    paid_preview = next(
+        preview
+        for preview in result.import_previews
+        if preview.input_path == paid_collection.output_path
+    )
+    assert paid_preview.imported_count == 1
     crunchbase_status = next(
         status
         for status in result.summary.provider_statuses
@@ -512,6 +622,8 @@ def test_research_workflow_collects_enabled_paid_provider_with_fake_client(
     assert crunchbase_status.provider_name == "Crunchbase"
     assert crunchbase_status.status == ResearchProviderRunStatus.PLANNED
     assert crunchbase_status.collected_count == 1
+    assert result.privacy_notes[0].startswith("No screenshots, cookies, browser profiles")
+    assert "paid-provider facts may be saved" in result.privacy_notes[0]
 
 
 def test_research_workflow_leaves_paid_sources_manual_without_clients(
@@ -531,6 +643,70 @@ def test_research_workflow_leaves_paid_sources_manual_without_clients(
 
     assert all(collection.source_id != "paid_optional" for collection in result.collections)
     assert not any(issue.source == "optional paid providers" for issue in result.issues)
+
+
+def test_research_workflow_does_not_call_paid_clients_in_local_only_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRUNCHBASE_API_KEY", "synthetic-test-key")
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    config = config.model_copy(update={"enabled_paid_providers": ("crunchbase",)})
+    client = _FakePaidProviderClient(
+        provider_id="crunchbase",
+        facts=[_paid_fact(company_name="Acme AI")],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        include_paid=True,
+        paid_clients={"crunchbase": client},
+        created_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert all(collection.source_id != "paid_optional" for collection in result.collections)
+    assert "paid-source outputs are saved" in result.privacy_notes[0]
+
+
+def test_research_workflow_requires_explicit_company_names_for_paid_clients(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRUNCHBASE_API_KEY", "synthetic-test-key")
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    config = config.model_copy(
+        update={
+            "local_only": False,
+            "enable_web_research": True,
+            "enabled_paid_providers": ("crunchbase",),
+        }
+    )
+    client = _FakePaidProviderClient(
+        provider_id="crunchbase",
+        facts=[_paid_fact(company_name="Acme AI")],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        include_paid=True,
+        paid_clients={"crunchbase": client},
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+        created_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert all(collection.source_id != "paid_optional" for collection in result.collections)
 
 
 def test_research_workflow_command_creates_artifacts_and_reports_status(
