@@ -205,6 +205,98 @@ def test_exclusion_preserves_unrelated_missing_evidence_claim(
     assert claims_by_id["claim_missing"].citations[0].verification_status == (
         VerificationStatus.EVIDENCE_NOT_FOUND
     )
+    assert application.store.conflicts == []
+
+
+def test_excluded_evidence_prunes_only_that_citation_from_multi_cited_claim(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    first_evidence = _evidence("ev_first_terms", "Valuation cap $8M.")
+    second_evidence = _evidence("ev_second_terms", "Valuation cap $8M.")
+    second_quote = second_evidence.text
+    multi_cited_claim = _claim("claim_multi_terms", "$8M", first_evidence).model_copy(
+        update={
+            "citations": [
+                EvidenceCitation(
+                    evidence_id=first_evidence.id,
+                    quote=first_evidence.text,
+                    source_span_start=0,
+                    source_span_end=len(first_evidence.text),
+                    verification_status=VerificationStatus.VERIFIED,
+                ),
+                EvidenceCitation(
+                    evidence_id=second_evidence.id,
+                    quote=second_quote,
+                    source_span_start=0,
+                    source_span_end=len(second_quote),
+                    verification_status=VerificationStatus.VERIFIED,
+                ),
+            ],
+        }
+    )
+    store = EvidenceStore(
+        deal_id="deal_action",
+        company_name="ActionCo",
+        created_at=BUILT_AT,
+        evidence=[first_evidence, second_evidence],
+        claims=[multi_cited_claim],
+    )
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                _action(
+                    action_id="act_exclude_first",
+                    target_id=first_evidence.id,
+                    status=EvidenceActionStatus.EXCLUDED,
+                )
+            ],
+        ),
+    )
+
+    application = apply_evidence_actions(config=config, store=store)
+    surviving_claim = application.store.claims[0]
+
+    assert surviving_claim.id == "claim_multi_terms"
+    assert [citation.evidence_id for citation in surviving_claim.citations] == [
+        second_evidence.id
+    ]
+    assert surviving_claim.verification_status == VerificationStatus.VERIFIED
+
+
+def test_action_refresh_preserves_verified_claim_confidence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store()
+    low_confidence_terms = store.claims[1].model_copy(
+        update={
+            "quality": store.claims[1].quality.model_copy(update={"confidence": 0.31})
+        }
+    )
+    store = store.model_copy(update={"claims": [store.claims[0], low_confidence_terms]})
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                _action(
+                    action_id="act_exclude_traction",
+                    target_id="ev_traction",
+                    status=EvidenceActionStatus.EXCLUDED,
+                )
+            ],
+        ),
+    )
+
+    application = apply_evidence_actions(config=config, store=store)
+    surviving_claim = application.store.claims[0]
+
+    assert surviving_claim.id == "claim_terms"
+    assert surviving_claim.verification_status == VerificationStatus.VERIFIED
+    assert surviving_claim.quality.confidence == 0.31
 
 
 def test_excluded_conflict_side_resets_surviving_score_impact(

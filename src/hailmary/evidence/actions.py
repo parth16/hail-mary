@@ -486,14 +486,20 @@ def apply_evidence_actions(
     remaining_evidence = [
         evidence for evidence in store.evidence if evidence.id not in excluded_evidence_ids
     ]
-    remaining_claims = [
-        claim
-        for claim in store.claims
-        if claim.id not in excluded_claim_ids
-        and not any(
-            citation.evidence_id in excluded_evidence_ids for citation in claim.citations
+    remaining_claims = []
+    for claim in store.claims:
+        if claim.id in excluded_claim_ids:
+            continue
+        kept_citations = [
+            citation
+            for citation in claim.citations
+            if citation.evidence_id not in excluded_evidence_ids
+        ]
+        if not kept_citations and claim.citations:
+            continue
+        remaining_claims.append(
+            claim.model_copy(update={"citations": kept_citations})
         )
-    ]
     filtered_store = refresh_existing_claim_conflicts(
         store.model_copy(
             update={

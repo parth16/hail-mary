@@ -157,12 +157,9 @@ def refresh_existing_claim_conflicts(store: EvidenceStore) -> EvidenceStore:
         claim_status = _claim_verification_status(citations)
         quality_updates: dict[str, object] = {
             "verification_status": claim_status,
-            "confidence": (
-                0.72
-                if claim_status == VerificationStatus.VERIFIED
-                else 0.35
-            ),
         }
+        if claim_status != VerificationStatus.VERIFIED:
+            quality_updates["confidence"] = 0.35
         if (
             claim_status != VerificationStatus.CONFLICTED
             and claim.quality.score_impact == "excluded_until_conflict_is_resolved"
@@ -178,7 +175,14 @@ def refresh_existing_claim_conflicts(store: EvidenceStore) -> EvidenceStore:
             )
         )
 
-    conflicts = _find_conflicts(store.deal_id, refreshed_claims)
+    conflicts = _find_conflicts(
+        store.deal_id,
+        [
+            claim
+            for claim in refreshed_claims
+            if claim.verification_status == VerificationStatus.VERIFIED
+        ],
+    )
     refreshed_claims = _mark_conflicted_claims(refreshed_claims, conflicts)
     notes = _refresh_store_notes(
         store.notes,

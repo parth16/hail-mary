@@ -440,7 +440,12 @@ def evaluate_deal_folder(
                     "Hail Mary did not write a final memo."
                 )
             final_output = final_result.output
-            guarded_decision = _guard_final_decision(scored_deal, store, final_output)
+            guarded_decision = _guard_final_decision(
+                scored_deal,
+                store,
+                final_output,
+                quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+            )
             final_review_was_model = True
         else:
             _stage(stage_callback, "final decision")
@@ -455,6 +460,7 @@ def evaluate_deal_folder(
                 scored_deal,
                 store,
                 mode=mode,
+                quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
             )
         else:
             final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
@@ -803,10 +809,12 @@ def _rule_based_final_decision(
     store: EvidenceStore,
     *,
     mode: EvaluationMode,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> tuple[AgentReviewOutput, GuardedFinalDecision]:
     evidence_selection = _deterministic_recommendation_evidence_selection(
         store,
         scored_deal,
+        quote_only_evidence_ids=quote_only_evidence_ids,
     )
     references = evidence_selection.references
     citation_limitation = None
@@ -1439,6 +1447,8 @@ def _guard_final_decision(
     scored_deal: ScoredDeal,
     store: EvidenceStore,
     final_output: AgentReviewOutput,
+    *,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> GuardedFinalDecision:
     model_recommendation = final_output.recommendation
     if model_recommendation is None:
@@ -1451,6 +1461,7 @@ def _guard_final_decision(
         evidence_selection = _deterministic_recommendation_evidence_selection(
             store,
             scored_deal,
+            quote_only_evidence_ids=quote_only_evidence_ids,
         )
         forced_pass_warning = (
             "The final model recommended "
@@ -1562,21 +1573,33 @@ def _no_evidence_final_decision(
 def _deterministic_recommendation_evidence(
     store: EvidenceStore,
     scored_deal: ScoredDeal,
+    *,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> list[AgentEvidenceReference]:
-    return _deterministic_recommendation_evidence_selection(store, scored_deal).references
+    return _deterministic_recommendation_evidence_selection(
+        store,
+        scored_deal,
+        quote_only_evidence_ids=quote_only_evidence_ids,
+    ).references
 
 
 def _deterministic_recommendation_evidence_selection(
     store: EvidenceStore,
     scored_deal: ScoredDeal,
+    *,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> DeterministicEvidenceSelection:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    quote_only_ids = quote_only_evidence_ids or set()
     references: list[AgentEvidenceReference] = []
     for evidence_id in _deterministic_support_evidence_ids(store, scored_deal):
         evidence = evidence_by_id.get(evidence_id)
         if evidence is None:
             continue
-        references.append(_reference_for_evidence(evidence))
+        if evidence_id in quote_only_ids:
+            references.append(AgentEvidenceReference(evidence_id=evidence_id))
+        else:
+            references.append(_reference_for_evidence(evidence))
     safe_references = _validated_deterministic_recommendation_references(
         references,
         store,

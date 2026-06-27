@@ -860,16 +860,19 @@ def _action_issue_summaries(
 ) -> list[ReviewIssueSummary]:
     if action_summary is None:
         return []
+    evidence_ids = {evidence.id for evidence in store.evidence}
     claim_by_id = {claim.id: claim for claim in store.claims}
     needs_review_evidence_ids = {
         evidence_id
         for evidence_id, state in action_summary.evidence_states.items()
         if state.status == EvidenceActionStatus.NEEDS_REVIEW
+        and evidence_id in evidence_ids
     }
     needs_review_claim_ids = {
         claim_id
         for claim_id, state in action_summary.claim_states.items()
         if state.status == EvidenceActionStatus.NEEDS_REVIEW
+        and claim_id in claim_by_id
     }
     cited_needs_review_claim_ids = {
         claim_id
@@ -903,7 +906,7 @@ def _action_issue_summaries(
             "needs_review_actions",
             ReviewIssueSeverity.WARNING,
             "Evidence actions need review",
-            action_summary.needs_review_count,
+            len(needs_review_evidence_ids) + len(needs_review_claim_ids),
             "One or more evidence records or claims are marked needs review. They remain "
             "usable until excluded, but the final memo should be treated as limited.",
         ),

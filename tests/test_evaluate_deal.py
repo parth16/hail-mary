@@ -1035,6 +1035,61 @@ def test_deterministic_citation_validation_uses_full_evidence_text() -> None:
     ]
 
 
+def test_local_only_quote_only_evidence_does_not_render_deterministic_quote() -> None:
+    sensitive_opening = "Sensitive excluded-claim wording should stay hidden"
+    evidence = _evidence_record(
+        "ev-shared",
+        f"{sensitive_opening}. Valuation cap $8M.",
+        "memo.txt",
+    )
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="SharedEvidenceCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence],
+        claims=[],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="SharedEvidenceCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=45,
+        one_line_reason="Rule-based scoring found limited support.",
+        score_factors=[
+            ScoreFactor(
+                name="Synthetic support",
+                score=4,
+                max_score=20,
+                explanation="Synthetic factor for quote-only citation handling.",
+                evidence_ids=[evidence.id],
+            )
+        ],
+    )
+
+    final_output, guarded = evaluation._rule_based_final_decision(
+        scored_deal,
+        store,
+        mode=evaluation.EvaluationMode(
+            name="local-only",
+            model_backed=False,
+            explanation="Local-only mode was used.",
+            limitation="Local-only mode was used.",
+        ),
+        quote_only_evidence_ids={evidence.id},
+    )
+
+    assert guarded.recommendation.evidence == [
+        AgentEvidenceReference(evidence_id=evidence.id)
+    ]
+    assert final_output.summary[0].evidence == [
+        AgentEvidenceReference(evidence_id=evidence.id)
+    ]
+    assert sensitive_opening not in evaluation._citation_text(
+        guarded.recommendation.evidence
+    )
+
+
 def test_deterministic_quote_preserves_source_whitespace_for_validation() -> None:
     opening_quote = "Opening sentence\nsupports the investment case"
     evidence_text = f"{opening_quote}. Valuation cap $8M."
