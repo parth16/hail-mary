@@ -40,6 +40,7 @@ from hailmary.schemas.scoring import (
     FundabilityRisk,
     KillGate,
     PMFLevel,
+    PortfolioExposureDimension,
     Recommendation,
     ScoredDeal,
     ScoreFactor,
@@ -1626,6 +1627,76 @@ def test_score_evidence_store_explains_risk_cap_below_minimum_check() -> None:
     assert "minimum check" in no_check_gate.reason
 
 
+def test_score_evidence_store_lowers_check_for_company_exposure_limit() -> None:
+    scored = score_evidence_store(
+        _high_confidence_store(deal_id="deal_exposure", company_name="ExposureCo"),
+        config=AppConfig(
+            data_dir=Path("data"),
+            capital_budget=100_000,
+            max_company_exposure_percent=Decimal("5"),
+        ),
+    )
+
+    company_check = next(
+        check
+        for check in scored.check_sizing.exposure_checks
+        if check.dimension == PortfolioExposureDimension.COMPANY
+    )
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.check_size == 5_000
+    assert scored.check_size in {0, 1_000, 2_500, 5_000, 7_500, 10_000}
+    assert scored.check_sizing.exposure_cap == 5_000
+    assert "exposure_limit_applied" in scored.check_sizing.reason_codes
+    assert company_check.key == "exposureco"
+    assert company_check.available_capacity == 5_000
+
+
+def test_score_evidence_store_blocks_when_exposure_limit_below_minimum() -> None:
+    scored = score_evidence_store(
+        _high_confidence_store(deal_id="deal_blocked", company_name="BlockedCo"),
+        config=AppConfig(
+            data_dir=Path("data"),
+            capital_budget=100_000,
+            max_company_exposure_percent=Decimal("0.5"),
+        ),
+    )
+
+    no_check_gate = next(
+        gate
+        for gate in scored.triggered_kill_gates
+        if gate.name == "No available check size"
+    )
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert scored.check_sizing.exposure_cap == 500
+    assert "exposure_cap_below_minimum" in scored.check_sizing.reason_codes
+    assert scored.check_sizing.exposure_checks[0].blocking is True
+    assert "exposure limits" in no_check_gate.reason
+
+
+def test_score_evidence_store_treats_missing_exposure_key_as_unknown_bucket() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_unknown_category", company_name="Unknown Category"),
+        config=AppConfig(
+            data_dir=Path("data"),
+            capital_budget=100_000,
+            max_category_exposure_percent=Decimal("0.5"),
+        ),
+    )
+
+    category_check = next(
+        check
+        for check in scored.check_sizing.exposure_checks
+        if check.dimension == PortfolioExposureDimension.CATEGORY
+    )
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert category_check.key == "unknown"
+    assert category_check.applied is True
+    assert category_check.blocking is True
+    assert "exposure_cap_below_minimum" in scored.check_sizing.reason_codes
+
+
 def test_score_evidence_store_caps_high_fundability_risk_check_size() -> None:
     evidence = [
         _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
@@ -2869,6 +2940,9 @@ def test_score_latest_ingestion_allocates_after_reserve_percent(
     assert "Reserve: $2,500 (50% reserve)" in report
     assert "Allocatable capital after reserve: $2,500" in report
     assert "No allocatable capital remained for an allowed nonzero check." in report
+    assert scored_by_company["Alpha Reserve"].allocation_scenario.follow_on_reserve == 2_500
+    assert scored_by_company["Alpha Reserve"].allocation_scenario.capital_before_check == 2_500
+    assert scored_by_company["Alpha Reserve"].allocation_scenario.capital_after_check == 0
 
 
 def test_score_latest_ingestion_subtracts_recorded_portfolio_investments(
@@ -2900,6 +2974,95 @@ def test_score_latest_ingestion_subtracts_recorded_portfolio_investments(
     assert "Recorded existing investments: $2,500" in report
     assert "Allocatable capital for new checks: $2,500" in report
     assert "Net return math uses recorded investments plus newly allocated checks" in report
+
+
+def test_score_latest_ingestion_uses_prior_investments_for_company_exposure(
+    tmp_path: Path,
+) -> None:
+    store = _high_confidence_store(deal_id="deal_same_company", company_name="SameCo")
+    _write_ingestion_summary(tmp_path, [store])
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        capital_budget=100_000,
+        max_company_exposure_percent=Decimal("5"),
+        max_category_exposure_percent=Decimal("5"),
+    )
+    add_portfolio_investment(
+        config=config,
+        company_name="SameCo",
+        amount=2_500,
+        invested_on=date(2026, 6, 23),
+    )
+
+    result = score_latest_ingestion(config=config)
+
+    scored = result.scored_deals[0]
+    company_check = next(
+        check
+        for check in scored.check_sizing.exposure_checks
+        if check.dimension == PortfolioExposureDimension.COMPANY
+    )
+    category_check = next(
+        check
+        for check in scored.check_sizing.exposure_checks
+        if check.dimension == PortfolioExposureDimension.CATEGORY
+    )
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.check_size == 2_500
+    assert scored.capital_remaining_before == 97_500
+    assert company_check.exposure_before == 2_500
+    assert company_check.available_capacity == 2_500
+    assert category_check.key == "fintech"
+    assert category_check.exposure_before == 2_500
+    assert category_check.available_capacity == 2_500
+
+
+def test_score_latest_ingestion_applies_category_stage_and_confidence_exposure(
+    tmp_path: Path,
+) -> None:
+    stores = [
+        _category_stage_store(deal_id="deal_alpha_group", company_name="Alpha Group"),
+        _category_stage_store(deal_id="deal_zeta_group", company_name="Zeta Group"),
+    ]
+    _write_ingestion_summary(tmp_path, stores)
+
+    result = score_latest_ingestion(
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            capital_budget=100_000,
+            max_category_exposure_percent=Decimal("2.5"),
+            max_stage_exposure_percent=Decimal("2.5"),
+            max_medium_confidence_exposure_percent=Decimal("2.5"),
+        )
+    )
+
+    scored_by_company = {deal.company_name: deal for deal in result.scored_deals}
+    alpha = scored_by_company["Alpha Group"]
+    zeta = scored_by_company["Zeta Group"]
+    assert alpha.recommendation == Recommendation.INVEST
+    assert alpha.check_size == 2_500
+    assert zeta.recommendation == Recommendation.PASS
+    assert zeta.check_size == 0
+    assert zeta.check_size in {0, 1_000, 2_500, 5_000, 7_500, 10_000}
+
+    zeta_checks = {
+        check.dimension: check
+        for check in zeta.check_sizing.exposure_checks
+        if check.applied
+    }
+    assert zeta_checks[PortfolioExposureDimension.CATEGORY].key == "fintech"
+    assert zeta_checks[PortfolioExposureDimension.CATEGORY].exposure_before == 2_500
+    assert zeta_checks[PortfolioExposureDimension.CATEGORY].available_capacity == 0
+    assert zeta_checks[PortfolioExposureDimension.STAGE].key == "pre_seed"
+    assert zeta_checks[PortfolioExposureDimension.STAGE].exposure_before == 2_500
+    assert zeta_checks[PortfolioExposureDimension.SOURCE_CONFIDENCE].key == "medium"
+    assert zeta_checks[
+        PortfolioExposureDimension.SOURCE_CONFIDENCE
+    ].available_capacity == 0
+    assert "exposure_cap_below_minimum" in zeta.check_sizing.reason_codes
+    assert result.portfolio_report_path is not None
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    assert "Exposure limits left no room for an allowed nonzero check." in report
 
 
 def test_score_latest_ingestion_ceils_high_precision_reserve_percent(
@@ -3705,6 +3868,64 @@ def _strong_store(*, deal_id: str, company_name: str) -> EvidenceStore:
         deal_id=deal_id,
         company_name=company_name,
     )
+
+
+def _high_confidence_store(*, deal_id: str, company_name: str) -> EvidenceStore:
+    evidence = [
+        _evidence(
+            "ev_terms_a",
+            "Seed stage. Valuation cap $8M. Investor ownership 100%.",
+            deal_id=deal_id,
+            document_id="doc_terms_a",
+        ),
+        _evidence(
+            "ev_terms_b",
+            "Discount 20%. Round size $1M. Estimated dilution 20%. "
+            "SPV expenses 5%. Carry 20%. Exit value $1B.",
+            deal_id=deal_id,
+            document_id="doc_terms_b",
+        ),
+        _evidence(
+            "ev_traction",
+            "ARR revenue growth with paid customers and retention.",
+            deal_id=deal_id,
+            document_id="doc_traction",
+        ),
+        _evidence(
+            "ev_funding",
+            "Lead investor committed and institutional seed round is active.",
+            deal_id=deal_id,
+            document_id="doc_funding",
+        ),
+        _evidence(
+            "ev_category",
+            "Category: fintech.",
+            deal_id=deal_id,
+            document_id="doc_category",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms_a", deal_id=deal_id),
+        _claim("discount", "20%", "ev_terms_b", deal_id=deal_id),
+        _claim("round size", "$1M", "ev_terms_b", deal_id=deal_id),
+    ]
+    return _store(
+        evidence=evidence,
+        claims=claims,
+        deal_id=deal_id,
+        company_name=company_name,
+    )
+
+
+def _category_stage_store(*, deal_id: str, company_name: str) -> EvidenceStore:
+    store = _strong_store(deal_id=deal_id, company_name=company_name)
+    category_stage_evidence = _evidence(
+        f"ev_category_{deal_id}",
+        "Pre-seed company. Category: fintech.",
+        deal_id=deal_id,
+        document_id=f"doc_category_{deal_id}",
+    )
+    return store.model_copy(update={"evidence": [*store.evidence, category_stage_evidence]})
 
 
 def _store_without_funding_signal(*, deal_id: str, company_name: str) -> EvidenceStore:

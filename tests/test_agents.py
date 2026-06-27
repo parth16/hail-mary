@@ -60,6 +60,7 @@ from hailmary.schemas.evidence import (
 from hailmary.schemas.scoring import (
     ConfidenceLevel,
     NetReturnEstimate,
+    PortfolioExposureDimension,
     Recommendation,
     ScoreFactor,
     ScoreSupportStatus,
@@ -106,6 +107,72 @@ def test_build_agent_input_packet_uses_validated_evidence_ids_only() -> None:
     assert "post-money valuation" not in {
         claim.label for claim in packet.verified_claims
     }
+
+
+def test_build_agent_input_packet_includes_structured_check_sizing() -> None:
+    store = _strong_store(company_name="Packet Allocation")
+    scored_deal = score_evidence_store(
+        store,
+        config=AppConfig(
+            data_dir=Path("data"),
+            max_company_exposure_percent=Decimal("2.5"),
+        ),
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.PORTFOLIO,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert packet.score.allocation_scenario.current_check == scored_deal.check_size
+    assert packet.score.check_sizing.selected_tier == scored_deal.check_size
+    assert packet.score.check_sizing.allowed_tiers == [1_000, 2_500]
+    assert "exposure_limit_applied" in packet.score.check_sizing.reason_codes
+    assert any(
+        check.dimension == PortfolioExposureDimension.COMPANY
+        and check.key == "packet allocation"
+        and check.available_capacity == 2_500
+        for check in packet.score.check_sizing.exposure_checks
+    )
+
+
+def test_build_agent_input_packet_hides_omitted_source_derived_exposure_key() -> None:
+    store = _strong_store(company_name="Packet Category")
+    category_evidence = _evidence(
+        "ev_category",
+        "Category: fintech.",
+        deal_id=store.deal_id,
+        document_id="doc_category",
+    )
+    store = store.model_copy(update={"evidence": [*store.evidence, category_evidence]})
+    scored_deal = score_evidence_store(
+        store,
+        config=AppConfig(
+            data_dir=Path("data"),
+            max_category_exposure_percent=Decimal("2.5"),
+        ),
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.PORTFOLIO,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        max_evidence_records=1,
+    )
+
+    category_check = next(
+        check
+        for check in packet.score.check_sizing.exposure_checks
+        if check.dimension == PortfolioExposureDimension.CATEGORY
+    )
+    assert "ev_category" not in packet.allowed_evidence_ids
+    assert category_check.key == "omitted"
+    assert category_check.applied is False
+    assert category_check.evidence_ids == []
+    assert category_check.reason_code == "category_exposure_omitted_from_packet"
 
 
 def test_build_agent_input_packet_quote_suppresses_excluded_claim_text(

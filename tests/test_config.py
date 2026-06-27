@@ -14,6 +14,7 @@ from hailmary.config import (
     ConfigError,
     create_local_state,
     load_config,
+    validate_investment_settings,
 )
 
 
@@ -645,6 +646,12 @@ def test_load_config_reads_portfolio_scenario_settings(
                 "platform_fee_percent: 2.5",
                 "carry_percent: 10",
                 "gross_return_multiple: '7.25'",
+                "max_company_exposure_percent: 10",
+                "max_category_exposure_percent: 20",
+                "max_stage_exposure_percent: 30",
+                "max_low_confidence_exposure_percent: 5",
+                "max_medium_confidence_exposure_percent: 15",
+                "max_high_confidence_exposure_percent: 25",
             ]
         ),
         encoding="utf-8",
@@ -658,6 +665,12 @@ def test_load_config_reads_portfolio_scenario_settings(
     assert config.platform_fee_percent == Decimal("2.5")
     assert config.carry_percent == Decimal("10")
     assert config.gross_return_multiple == Decimal("7.25")
+    assert config.max_company_exposure_percent == Decimal("10")
+    assert config.max_category_exposure_percent == Decimal("20")
+    assert config.max_stage_exposure_percent == Decimal("30")
+    assert config.max_low_confidence_exposure_percent == Decimal("5")
+    assert config.max_medium_confidence_exposure_percent == Decimal("15")
+    assert config.max_high_confidence_exposure_percent == Decimal("25")
 
 
 def test_portfolio_scenario_env_overrides_saved_config(
@@ -973,6 +986,31 @@ def test_portfolio_percent_above_100_is_rejected(
 
     with pytest.raises(ConfigError, match="platform fee percent must be between 0 and 100"):
         load_config()
+
+
+def test_exposure_percent_above_100_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_MAX_COMPANY_EXPOSURE_PERCENT", "100.01")
+
+    with pytest.raises(
+        ConfigError,
+        match="maximum company exposure percent must be between 0 and 100",
+    ):
+        load_config()
+
+
+def test_extreme_exposure_percent_precision_is_rejected() -> None:
+    with pytest.raises(
+        ConfigError,
+        match="maximum category exposure percent is too long",
+    ):
+        validate_investment_settings(
+            AppConfig(
+                max_category_exposure_percent=Decimal(f"0.{'0' * 200}1"),
+            )
+        )
 
 
 def test_negative_gross_return_multiple_is_rejected(

@@ -11,11 +11,13 @@ from hailmary.config import CHECK_SIZE_TIERS
 from hailmary.schemas.documents import DocumentType, SourceKind
 from hailmary.schemas.evidence import ClaimType, EvidenceKind, SourceFreshness
 from hailmary.schemas.scoring import (
+    CheckSizingDecision,
     CompanyStage,
     ConfidenceLevel,
     FundabilityRisk,
     NetReturnEstimate,
     PMFLevel,
+    PortfolioAllocationScenario,
     Recommendation,
     ScoreSupportStatus,
     ValuationRisk,
@@ -85,6 +87,10 @@ class AgentScoreSnapshot(BaseModel):
     company_stage: CompanyStage = CompanyStage.UNKNOWN
     valuation_risk: ValuationRisk = ValuationRisk.UNKNOWN
     net_return: NetReturnEstimate = Field(default_factory=NetReturnEstimate)
+    allocation_scenario: PortfolioAllocationScenario = Field(
+        default_factory=PortfolioAllocationScenario
+    )
+    check_sizing: CheckSizingDecision = Field(default_factory=CheckSizingDecision)
 
 
 class AgentScoreFactorItem(BaseModel):
