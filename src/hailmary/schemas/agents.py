@@ -93,6 +93,7 @@ class AgentScoreFactorItem(BaseModel):
     max_score: int
     explanation: str
     evidence_ids: list[str] = Field(default_factory=list)
+    omitted_evidence_count: int = 0
     support_status: ScoreSupportStatus = ScoreSupportStatus.INFERRED
     missing_inputs: list[str] = Field(default_factory=list)
 
@@ -101,6 +102,9 @@ class AgentKillGateItem(BaseModel):
     name: str
     triggered: bool
     reason: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    omitted_evidence_count: int = 0
+    support_status: ScoreSupportStatus = ScoreSupportStatus.NEEDS_DILIGENCE
 
 
 class AgentConflictItem(BaseModel):
@@ -111,40 +115,62 @@ class AgentConflictItem(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
-class AgentInputPacket(BaseModel):
-    created_at: datetime
-    deal_id: str
-    company_name: str
-    agent_role: AgentRole
-    allowed_evidence_ids: list[str] = Field(default_factory=list)
-    allowed_claim_ids: list[str] = Field(default_factory=list)
-    instructions: list[str] = Field(default_factory=list)
-    output_schema_name: str = "AgentReviewOutput"
-    output_schema: dict[str, Any] = Field(default_factory=dict)
-    score: AgentScoreSnapshot
-    score_factors: list[AgentScoreFactorItem] = Field(default_factory=list)
-    triggered_kill_gates: list[AgentKillGateItem] = Field(default_factory=list)
-    conflicts: list[AgentConflictItem] = Field(default_factory=list)
-    packet_limitations: list[str] = Field(default_factory=list)
-    evidence: list[AgentEvidenceItem] = Field(default_factory=list)
-    verified_claims: list[AgentClaimItem] = Field(default_factory=list)
-    diligence_questions: list[str] = Field(default_factory=list)
+class AgentEvidenceHealthMetricItem(BaseModel):
+    label: str
+    count: int
 
 
-class AgentPacketFile(BaseModel):
-    deal_id: str
-    company_name: str
-    agent_role: AgentRole
-    path: Path
+class AgentEvidenceHealthIssueItem(BaseModel):
+    code: str
+    severity: str
+    issue: str
+    count: int
+    guidance: str
 
 
-class AgentPacketRunSummary(BaseModel):
-    output_dir: Path
-    packets: list[AgentPacketFile] = Field(default_factory=list)
+class AgentEvidenceHealthContext(BaseModel):
+    evidence_count: int
+    claim_count: int
+    conflict_count: int
+    source_kinds: list[AgentEvidenceHealthMetricItem] = Field(default_factory=list)
+    verification_statuses: list[AgentEvidenceHealthMetricItem] = Field(default_factory=list)
+    recency: list[AgentEvidenceHealthMetricItem] = Field(default_factory=list)
+    source_lineage: list[AgentEvidenceHealthMetricItem] = Field(default_factory=list)
+    issues: list[AgentEvidenceHealthIssueItem] = Field(default_factory=list)
 
-    @property
-    def packet_count(self) -> int:
-        return len(self.packets)
+
+class AgentScoringSupportFactorContext(BaseModel):
+    name: str
+    support_status: ScoreSupportStatus
+    missing_inputs: list[str] = Field(default_factory=list)
+    selected_evidence_ids: list[str] = Field(default_factory=list)
+    omitted_evidence_count: int = 0
+
+
+class AgentScoringSupportKillGateContext(BaseModel):
+    name: str
+    triggered: bool
+    support_status: ScoreSupportStatus
+    selected_evidence_ids: list[str] = Field(default_factory=list)
+    omitted_evidence_count: int = 0
+
+
+class AgentScoringSupportContext(BaseModel):
+    deterministic_recommendation: Recommendation
+    deterministic_check_size: int
+    selected_evidence_count: int
+    total_evidence_count: int
+    omitted_evidence_count: int
+    capital_remaining_before: int | None = None
+    capital_remaining_after: int | None = None
+    score_factors: list[AgentScoringSupportFactorContext] = Field(default_factory=list)
+    triggered_kill_gates: list[AgentScoringSupportKillGateContext] = Field(
+        default_factory=list
+    )
+    net_return_support_status: ScoreSupportStatus = ScoreSupportStatus.NEEDS_DILIGENCE
+    net_return_missing_inputs: list[str] = Field(default_factory=list)
+    net_return_selected_evidence_ids: list[str] = Field(default_factory=list)
+    net_return_omitted_evidence_count: int = 0
 
 
 class StrictAgentOutputModel(BaseModel):
@@ -206,6 +232,65 @@ class AgentReviewOutput(StrictAgentOutputModel):
     diligence_questions: list[AgentDiligenceQuestion] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     recommendation: AgentRecommendationRationale | None = None
+
+
+class AgentSpecialistCommitteeContext(BaseModel):
+    role: AgentRole
+    summary: list[AgentSummaryPoint] = Field(default_factory=list)
+    findings: list[AgentFinding] = Field(default_factory=list)
+    diligence_questions: list[AgentDiligenceQuestion] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class AgentFailedSpecialistContext(BaseModel):
+    role: AgentRole
+    limitation: str
+
+
+class AgentCommitteeContext(BaseModel):
+    supported_specialist_findings: list[AgentSpecialistCommitteeContext] = Field(
+        default_factory=list
+    )
+    failed_specialist_roles: list[AgentFailedSpecialistContext] = Field(default_factory=list)
+
+
+class AgentInputPacket(BaseModel):
+    created_at: datetime
+    deal_id: str
+    company_name: str
+    agent_role: AgentRole
+    allowed_evidence_ids: list[str] = Field(default_factory=list)
+    allowed_claim_ids: list[str] = Field(default_factory=list)
+    instructions: list[str] = Field(default_factory=list)
+    output_schema_name: str = "AgentReviewOutput"
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+    score: AgentScoreSnapshot
+    score_factors: list[AgentScoreFactorItem] = Field(default_factory=list)
+    triggered_kill_gates: list[AgentKillGateItem] = Field(default_factory=list)
+    evidence_health: AgentEvidenceHealthContext | None = None
+    scoring_support: AgentScoringSupportContext | None = None
+    committee_context: AgentCommitteeContext | None = None
+    conflicts: list[AgentConflictItem] = Field(default_factory=list)
+    packet_limitations: list[str] = Field(default_factory=list)
+    evidence: list[AgentEvidenceItem] = Field(default_factory=list)
+    verified_claims: list[AgentClaimItem] = Field(default_factory=list)
+    diligence_questions: list[str] = Field(default_factory=list)
+
+
+class AgentPacketFile(BaseModel):
+    deal_id: str
+    company_name: str
+    agent_role: AgentRole
+    path: Path
+
+
+class AgentPacketRunSummary(BaseModel):
+    output_dir: Path
+    packets: list[AgentPacketFile] = Field(default_factory=list)
+
+    @property
+    def packet_count(self) -> int:
+        return len(self.packets)
 
 
 class AgentValidationIssue(BaseModel):

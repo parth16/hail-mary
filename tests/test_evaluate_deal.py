@@ -172,6 +172,9 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert fake_client.api_key == "test-openai-key"
     serialized_payloads = "\n".join(fake_client.request_payloads)
     assert "Valuation cap $8M" in serialized_payloads
+    assert "evidence_health" in serialized_payloads
+    assert "scoring_support" in serialized_payloads
+    assert "deterministic_recommendation" in serialized_payloads
     assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in serialized_payloads
     assert local_path_text not in serialized_payloads
     assert "input_file" not in serialized_payloads
@@ -1028,8 +1031,21 @@ def test_evaluate_deal_specialist_validation_failure_retries_then_records_limita
         "Team Execution model review failed validation" in warning
         for warning in result.warnings
     )
+    final_calls = [
+        call for call in client.calls if call[0].agent_role == AgentRole.FINAL_DECISION
+    ]
+    final_packet = final_calls[-1][0]
+    assert final_packet.committee_context is not None
+    assert [
+        failed.role for failed in final_packet.committee_context.failed_specialist_roles
+    ] == [AgentRole.TEAM_EXECUTION]
+    assert (
+        "Unknown evidence ID"
+        in final_packet.committee_context.failed_specialist_roles[0].limitation
+    )
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "Team Execution model review failed validation after one repair attempt" in memo_text
+    assert "Unknown evidence ID" in memo_text
     assert len(list(result.agent_output_dir.glob("team_execution-attempt-*-invalid.json"))) == 2
 
 
@@ -1090,13 +1106,62 @@ def test_evaluate_deal_committee_context_excludes_unsupported_findings(
     final_calls = [
         call for call in client.calls if call[0].agent_role == AgentRole.FINAL_DECISION
     ]
+    final_packet = final_calls[-1][0]
+    assert final_packet.committee_context is not None
+    final_packet_json = final_packet.model_dump_json()
+    assert "Supported traction" in final_packet_json
+    assert "Missing customer cohort evidence" in final_packet_json
+    assert "MODEL_LIMITATION_PRIVATE_TAIL" not in final_packet_json
+    assert "Unsupported hype" not in final_packet_json
+    assert "Unsupported risk" not in final_packet_json
+    assert final_packet.evidence_health is not None
+    assert final_packet.scoring_support is not None
     committee_context = final_calls[-1][2]
     context_payload = json.loads(committee_context)
     assert "supported_specialist_findings" in context_payload
     assert "Supported traction" in committee_context
     assert "Missing customer cohort evidence" in committee_context
+    assert "MODEL_LIMITATION_PRIVATE_TAIL" not in committee_context
     assert "Unsupported hype" not in committee_context
     assert "Unsupported risk" not in committee_context
+    persisted_final_packets = list(
+        (tmp_path / "data" / "agent-packets").glob("*-final_decision.json")
+    )
+    assert len(persisted_final_packets) == 1
+    persisted_final_packet = AgentInputPacket.model_validate_json(
+        persisted_final_packets[0].read_text(encoding="utf-8")
+    )
+    assert persisted_final_packet.committee_context is not None
+    assert "Supported traction" in persisted_final_packet.model_dump_json()
+    assert "MODEL_LIMITATION_PRIVATE_TAIL" not in persisted_final_packet.model_dump_json()
+
+
+def test_committee_context_preserves_citation_quote_whitespace() -> None:
+    quote = "ARR revenue\nretention"
+    output = AgentReviewOutput(
+        deal_id="deal-1",
+        company_name="WhitespaceCo",
+        agent_role=AgentRole.PRODUCT_CUSTOMER_TRACTION,
+        summary=[
+            AgentSummaryPoint(
+                summary="Source-backed traction summary.",
+                evidence=[AgentEvidenceReference(evidence_id="ev-traction", quote=quote)],
+            )
+        ],
+    )
+
+    context = evaluation._committee_context(
+        [
+            evaluation.RoleReviewResult(
+                role=AgentRole.PRODUCT_CUSTOMER_TRACTION,
+                packet_path=Path("packet.json"),
+                output=output,
+            )
+        ]
+    )
+
+    preserved_quote = context.supported_specialist_findings[0].summary[0].evidence[0].quote
+    assert preserved_quote == quote
 
 
 def test_evaluate_deal_warnings_include_ingestion_ocr_warnings() -> None:
@@ -2190,7 +2255,11 @@ def _mixed_committee_output_json(packet: AgentInputPacket) -> str:
                 unsupported=True,
             ),
         ],
-        limitations=["Missing customer cohort evidence should reach final context."],
+        limitations=[
+            "Missing customer cohort evidence should reach final context. "
+            + ("bounded context " * 60)
+            + "MODEL_LIMITATION_PRIVATE_TAIL"
+        ],
     ).model_dump_json()
 
 

@@ -46,18 +46,22 @@ from hailmary.research import (
 )
 from hailmary.research.web import WebResearchClient
 from hailmary.schemas.agents import (
+    AgentCommitteeContext,
+    AgentDiligenceQuestion,
     AgentEvidenceReference,
+    AgentFailedSpecialistContext,
     AgentFinding,
     AgentInputPacket,
     AgentPacketFile,
     AgentRecommendationRationale,
     AgentReviewOutput,
     AgentRole,
+    AgentSpecialistCommitteeContext,
     AgentSummaryPoint,
     AgentValidationIssue,
     AgentValidationResult,
 )
-from hailmary.schemas.documents import IngestedDeal, IngestionSummary
+from hailmary.schemas.documents import IngestedDeal, IngestedDocument, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal
 from hailmary.scoring.scorer import (
@@ -68,6 +72,8 @@ from hailmary.scoring.scorer import (
 from hailmary.utils.slug import slugify
 
 DEFAULT_EVALUATION_MAX_CONCURRENCY = 3
+MAX_COMMITTEE_CONTEXT_TEXT_CHARS = 500
+MAX_COMMITTEE_CONTEXT_QUOTE_CHARS = 240
 SPECIALIST_AGENT_ROLES: tuple[AgentRole, ...] = tuple(
     role for role in DEFAULT_AGENT_ROLES if role != AgentRole.FINAL_DECISION
 )
@@ -361,6 +367,7 @@ def evaluate_deal_folder(
             scored_deal,
             config=config,
             created_at=packet_created_at,
+            source_documents=deal.documents,
         )
         packets_by_role = {
             packet_file.agent_role: _packet_from_file(packet_file.path)
@@ -382,12 +389,28 @@ def evaluate_deal_folder(
             )
 
             _stage(stage_callback, "final model review")
+            committee_context = _committee_context(specialist_results)
+            final_packet = build_agent_input_packet(
+                store,
+                scored_deal,
+                role=AgentRole.FINAL_DECISION,
+                created_at=packet_created_at,
+                source_documents=deal.documents,
+                committee_context=committee_context,
+            )
+            final_packet_path = packet_paths_by_role[AgentRole.FINAL_DECISION]
+            _write_private_text(
+                final_packet_path,
+                final_packet.model_dump_json(indent=2),
+                description="agent packet",
+            )
+            packets_by_role[AgentRole.FINAL_DECISION] = final_packet
             final_result = _run_packet_with_repair(
                 review_client,
                 final_packet,
-                packet_path=packet_paths_by_role[AgentRole.FINAL_DECISION],
+                packet_path=final_packet_path,
                 output_dir=output_dir,
-                committee_context=_committee_context_text(specialist_results),
+                committee_context=_committee_context_text(committee_context),
                 fail_on_model_error=True,
             )
             if final_result.output is None:
@@ -1090,6 +1113,7 @@ def _write_agent_packets(
     *,
     config: AppConfig,
     created_at: datetime,
+    source_documents: Sequence[IngestedDocument],
 ) -> list[AgentPacketFile]:
     output_dir = config.data_dir / "agent-packets"
     _ensure_private_directory(output_dir, private_root=config.data_dir, description="agent packet")
@@ -1100,6 +1124,7 @@ def _write_agent_packets(
             scored_deal,
             role=role,
             created_at=created_at,
+            source_documents=source_documents,
         )
         packet_path = output_dir / f"{slugify(store.company_name)}-{store.deal_id}-{role}.json"
         _write_private_text(
@@ -1261,53 +1286,123 @@ def _parse_and_validate_agent_output(
     return output, validation.issues
 
 
-def _committee_context_text(results: Sequence[RoleReviewResult]) -> str:
-    payload = {
-        "supported_specialist_findings": [
+def _committee_context(results: Sequence[RoleReviewResult]) -> AgentCommitteeContext:
+    return AgentCommitteeContext(
+        supported_specialist_findings=[
             _supported_committee_output(result)
             for result in results
             if result.output is not None
         ],
-        "failed_specialist_roles": [
-            {
-                "role": result.role,
-                "limitation": result.limitation or "The role failed validation.",
-            }
+        failed_specialist_roles=[
+            AgentFailedSpecialistContext(
+                role=result.role,
+                limitation=_bounded_committee_context_text(
+                    result.limitation or "The role failed validation."
+                ),
+            )
             for result in results
             if result.failed
         ],
-    }
-    return json.dumps(payload, indent=2, sort_keys=True)
+    )
 
 
-def _supported_committee_output(result: RoleReviewResult) -> dict[str, object]:
+def _committee_context_text(context: AgentCommitteeContext) -> str:
+    return context.model_dump_json(indent=2)
+
+
+def _supported_committee_output(result: RoleReviewResult) -> AgentSpecialistCommitteeContext:
     output = result.output
     if output is None:
-        return {
-            "role": result.role,
-            "summary": [],
-            "findings": [],
-            "diligence_questions": [],
-            "limitations": [],
-        }
-    return {
-        "role": result.role,
-        "summary": [
-            summary.model_dump(mode="json")
+        return AgentSpecialistCommitteeContext(role=result.role)
+    return AgentSpecialistCommitteeContext(
+        role=result.role,
+        summary=[
+            _committee_summary(summary)
             for summary in output.summary
             if not summary.unsupported and summary.evidence
         ],
-        "findings": [
-            finding.model_dump(mode="json")
+        findings=[
+            _committee_finding(finding)
             for finding in output.findings
             if not finding.unsupported and finding.evidence
         ],
-        "diligence_questions": [
-            question.model_dump(mode="json")
+        diligence_questions=[
+            _committee_diligence_question(question)
             for question in output.diligence_questions
         ],
-        "limitations": list(output.limitations),
-    }
+        limitations=[
+            _bounded_committee_context_text(limitation)
+            for limitation in output.limitations
+        ],
+    )
+
+
+def _committee_summary(summary: AgentSummaryPoint) -> AgentSummaryPoint:
+    return summary.model_copy(
+        update={
+            "summary": _bounded_committee_context_text(summary.summary),
+            "evidence": _committee_evidence_references(summary.evidence),
+        }
+    )
+
+
+def _committee_finding(finding: AgentFinding) -> AgentFinding:
+    return finding.model_copy(
+        update={
+            "title": _bounded_committee_context_text(finding.title),
+            "finding": _bounded_committee_context_text(finding.finding),
+            "materiality": _bounded_committee_context_text(finding.materiality),
+            "evidence": _committee_evidence_references(finding.evidence),
+        }
+    )
+
+
+def _committee_diligence_question(
+    question: AgentDiligenceQuestion,
+) -> AgentDiligenceQuestion:
+    return question.model_copy(
+        update={
+            "question": _bounded_committee_context_text(question.question),
+            "reason": _bounded_committee_context_text(question.reason),
+            "evidence": _committee_evidence_references(question.evidence),
+        }
+    )
+
+
+def _committee_evidence_references(
+    references: Sequence[AgentEvidenceReference],
+) -> list[AgentEvidenceReference]:
+    return [
+        reference.model_copy(
+            update={
+                "quote": (
+                    _bounded_committee_context_quote(
+                        reference.quote,
+                    )
+                    if reference.quote is not None
+                    else None
+                )
+            }
+        )
+        for reference in references
+    ]
+
+
+def _bounded_committee_context_text(
+    text: str,
+    *,
+    max_chars: int = MAX_COMMITTEE_CONTEXT_TEXT_CHARS,
+) -> str:
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return collapsed[:max_chars].rstrip()
+
+
+def _bounded_committee_context_quote(text: str) -> str:
+    if len(text) <= MAX_COMMITTEE_CONTEXT_QUOTE_CHARS:
+        return text
+    return text[:MAX_COMMITTEE_CONTEXT_QUOTE_CHARS].rstrip()
 
 
 def _guard_final_decision(
@@ -2044,6 +2139,8 @@ def _packet_request_text(
         "Review this Hail Mary agent packet and return AgentReviewOutput JSON.",
         "Do not use raw pitch decks, local source documents, local file paths, or outside facts.",
         "Use only the selected evidence excerpts in this packet.",
+        "Use evidence_health, scoring_support, and committee_context as bounded context. "
+        "Factual claims still need allowed evidence IDs from the packet.",
         "Packet JSON:",
         packet_payload,
     ]
