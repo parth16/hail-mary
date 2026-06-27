@@ -1569,6 +1569,7 @@ def test_score_evidence_store_ignores_common_negative_traction_phrases(
     "traction_text",
     [
         "The plan shows projected revenue next year.",
+        "The plan shows projected ARR growth next year.",
         "The roadmap targets future customers after launch.",
         "The company has not-yet customers.",
     ],
@@ -1727,6 +1728,37 @@ def test_fundability_factor_cites_stale_traction_when_it_drives_risk() -> None:
     fundability_factor = _score_factor(scored, "Next-round fundability")
     assert scored.fundability_risk == FundabilityRisk.HIGH
     assert fundability_factor.evidence_ids == ["ev_funding", "ev_traction"]
+    assert "current customer, revenue, retention, or usage evidence" in (
+        fundability_factor.missing_inputs
+    )
+
+
+def test_fundability_risk_is_high_for_stale_traction_without_funding() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_traction",
+            "ARR revenue growth with paid customers and retention.",
+            source_freshness=SourceFreshness.STALE,
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    fundability_factor = _score_factor(scored, "Next-round fundability")
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+    assert fundability_factor.evidence_ids == ["ev_traction"]
+    assert "lead investor, institutional investor, or follow-on financing evidence" in (
+        fundability_factor.missing_inputs
+    )
     assert "current customer, revenue, retention, or usage evidence" in (
         fundability_factor.missing_inputs
     )

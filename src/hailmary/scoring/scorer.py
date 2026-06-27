@@ -155,11 +155,11 @@ NEGATED_GROSS_EXIT_PATTERNS = (
     ),
 )
 TRACTION_NEGATED_SIGNAL = (
-    r"(?:customers?|revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)"
+    r"(?:customers?|revenue|arr|usage|retention|growth|pilots?|beta|lois?|waitlist)"
 )
 TRACTION_NEGATED_QUALIFIERS = (
     r"(?:(?:any|actual|customer|meaningful|material|measurable|real|recurring|commercial|signed|"
-    r"active|current|clear|validated|paying|paid|confirmed|contracted|"
+    r"active|current|clear|validated|paying|paid|confirmed|contracted|annual|"
     r"production|live)\s+){0,3}"
 )
 BENIGN_NEGATED_TRACTION_NOUNS = r"(?:issues?|concerns?|problems?|churn|complaints?)"
@@ -167,7 +167,8 @@ NEGATED_TRACTION_PATTERNS = (
     re.compile(r"\bpre[-\s]?revenue\b", re.IGNORECASE),
     re.compile(
         rf"\b(?:planned|projected|expected|future|target|targeted)\s+"
-        rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b",
+        rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?:\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b)*",
         re.IGNORECASE,
     ),
     re.compile(
@@ -1408,9 +1409,9 @@ def _fundability_risk(
     )
     if has_missing_funding_signal:
         return FundabilityRisk.HIGH
+    if has_terms and has_traction and has_only_non_current_support:
+        return FundabilityRisk.HIGH
     if has_terms and has_traction and has_funding_signal:
-        if has_only_non_current_support:
-            return FundabilityRisk.HIGH
         return FundabilityRisk.LOW
     if has_terms and has_traction:
         return FundabilityRisk.MEDIUM
