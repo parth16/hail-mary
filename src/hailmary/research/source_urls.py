@@ -3,6 +3,28 @@ from __future__ import annotations
 from urllib.parse import parse_qsl, unquote, urlparse
 
 PUBLIC_SOURCE_HOSTS: dict[str, tuple[str, str]] = {
+    "crunchbase": (
+        "crunchbase.com",
+        "a Crunchbase website or API host such as www.crunchbase.com",
+    ),
+    "people_data_labs": (
+        "peopledatalabs.com",
+        "a People Data Labs website or API host such as api.peopledatalabs.com",
+    ),
+    "newsapi": ("newsapi.org", "a NewsAPI host such as newsapi.org"),
+    "similarweb": (
+        "similarweb.com",
+        "a Similarweb website or API host such as api.similarweb.com",
+    ),
+    "sensor_tower": (
+        "sensortower.com",
+        "a Sensor Tower website or API host such as api.sensortower.com",
+    ),
+    "pitchbook": ("pitchbook.com", "a PitchBook website host such as my.pitchbook.com"),
+    "cb_insights": (
+        "cbinsights.com",
+        "a CB Insights website host such as app.cbinsights.com",
+    ),
     "sec_form_d": ("sec.gov", "an SEC website host such as www.sec.gov or data.sec.gov"),
     "sam_gov": ("sam.gov", "a SAM.gov website host such as sam.gov or www.sam.gov"),
     "usaspending": (
@@ -91,6 +113,8 @@ def validate_provider_source_url(
 ) -> None:
     validate_http_url(url, field_name=field_name)
     host_rule = PUBLIC_SOURCE_HOSTS.get(provider_id)
+    if provider_id == "newsapi" and field_name == "source_url":
+        return
     if host_rule is None:
         return
     allowed_suffix, description = host_rule

@@ -54,6 +54,13 @@ from hailmary.research.meridian import (
     MeridianWorkflowRunSummary,
     prepare_meridian_workflow,
 )
+from hailmary.research.paid import (
+    PaidProviderClient,
+    PaidProviderFact,
+    PaidProviderSearchRequest,
+    PaidProviderSearchResponse,
+    collect_paid_research_results,
+)
 from hailmary.research.planner import ResearchPlanError, prepare_research_plan
 from hailmary.research.providers import (
     builtin_provider_adapters,
@@ -103,6 +110,10 @@ __all__ = [
     "MeridianWorkflow",
     "MeridianWorkflowError",
     "MeridianWorkflowRunSummary",
+    "PaidProviderClient",
+    "PaidProviderFact",
+    "PaidProviderSearchRequest",
+    "PaidProviderSearchResponse",
     "LocalPublicSourceSearchClient",
     "PublicSourceFileAdapter",
     "PublicSourceSearchResult",
@@ -172,6 +183,7 @@ __all__ = [
     "best_company_match",
     "classify_company_match",
     "collect_github_repositories",
+    "collect_paid_research_results",
     "collect_sbir_awards",
     "collect_sec_form_d_filings",
     "collect_usaspending_awards",

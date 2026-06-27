@@ -40,6 +40,7 @@ class AppConfig(BaseModel):
     meridian_profile_dir: Path = Field(default=Path("./data/browser-profiles/meridian"))
     enable_ocr: bool = False
     enable_web_research: bool = False
+    enabled_paid_providers: tuple[str, ...] = Field(default_factory=tuple)
     mock_llm: bool = True
     llm_specialist_token_budget: int | None = None
     llm_final_token_budget: int | None = None
@@ -311,6 +312,11 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         ),
         enable_ocr=enable_ocr,
         enable_web_research=enable_web_research,
+        enabled_paid_providers=_setting_csv(
+            env_name="HAILMARY_ENABLED_PAID_PROVIDERS",
+            config_values=saved_values,
+            config_name="enabled_paid_providers",
+        ),
         mock_llm=mock_llm,
         llm_specialist_token_budget=_setting_optional_int(
             env_name="HAILMARY_LLM_SPECIALIST_TOKEN_BUDGET",
@@ -359,6 +365,41 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
 def _env_setting_is_present(name: str) -> bool:
     value = os.getenv(name)
     return value is not None and value.strip() != ""
+
+
+def _setting_csv(
+    *,
+    env_name: str,
+    config_values: dict[str, str],
+    config_name: str,
+) -> tuple[str, ...]:
+    env_value = os.getenv(env_name)
+    if env_value is not None:
+        return _parse_csv_setting(env_value, source=env_name)
+    config_value = config_values.get(config_name)
+    if config_value is None:
+        return ()
+    return _parse_csv_setting(
+        config_value,
+        source=f".hailmary/config.yaml field {config_name}",
+    )
+
+
+def _parse_csv_setting(value: str, *, source: str) -> tuple[str, ...]:
+    if not value.strip():
+        return ()
+    parsed: list[str] = []
+    seen: set[str] = set()
+    for raw_part in value.split(","):
+        stripped = raw_part.strip()
+        if not stripped:
+            raise ConfigError(f"{source} cannot include blank comma-separated entries.")
+        normalized = stripped.casefold().replace("-", "_")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        parsed.append(normalized)
+    return tuple(parsed)
 
 
 def validate_investment_settings(config: AppConfig) -> AppConfig:
@@ -1100,6 +1141,7 @@ gross_return_multiple: {_decimal_text(config.gross_return_multiple)}
 meridian_profile_dir: {_yaml_string(config.meridian_profile_dir.as_posix())}
 enable_ocr: {enable_ocr}
 enable_web_research: {web_research}
+enabled_paid_providers: ""
 mock_llm: {mock_llm}
 llm_specialist_token_budget: {_optional_int_text(config.llm_specialist_token_budget)}
 llm_final_token_budget: {_optional_int_text(config.llm_final_token_budget)}

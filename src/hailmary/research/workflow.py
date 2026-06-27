@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -29,6 +29,7 @@ from .collection import (
 from .importer import ResearchImportError, import_research_results
 from .matching import CompanyMatch
 from .meridian import clean_meridian_url, prepare_meridian_workflow
+from .paid import PaidProviderClient, collect_paid_research_results
 from .planner import prepare_research_plan
 from .providers import builtin_research_providers
 from .schemas import (
@@ -49,13 +50,21 @@ class ResearchWorkflowError(RuntimeError):
 
 
 IssueSeverity = Literal["warning", "error"]
-CollectionKind = Literal["local_public", "live_public", "web"]
+CollectionKind = Literal["local_public", "live_public", "web", "paid_optional"]
 
 LIVE_PROVIDER_IDS = {"company_website", "sec_form_d", "usaspending", "sbir", "github"}
 MANUAL_OR_LOCAL_PROVIDER_IDS = {"sam_gov", "uspto", "public_web"}
-PRIVACY_NOTES = [
+NO_PAID_OUTPUTS_PRIVACY_NOTE = (
     "No screenshots, cookies, browser profiles, raw portal HTML, hidden authenticated data, "
-    "signed URLs, or paid-source outputs are saved by this workflow.",
+    "signed URLs, or paid-source outputs are saved by this workflow."
+)
+PAID_OUTPUTS_PRIVACY_NOTE = (
+    "No screenshots, cookies, browser profiles, raw portal HTML, hidden authenticated data, "
+    "or signed URLs are saved by this workflow. When explicit paid clients are supplied, "
+    "paid-provider facts may be saved only as generated research-result JSON for import preview."
+)
+PRIVACY_NOTES = [
+    NO_PAID_OUTPUTS_PRIVACY_NOTE,
     "Every imported external fact still needs provider, retrieval time, exact URL or API source, "
     "confidence, and licensing notes.",
 ]
@@ -270,6 +279,7 @@ def run_research_workflow(
     sbir_client: SbirAwardsClient | None = None,
     sec_form_d_client: SecFormDFilingsClient | None = None,
     github_client: GitHubRepositorySearchClient | None = None,
+    paid_clients: Mapping[str, PaidProviderClient] | None = None,
 ) -> ResearchWorkflowRunSummary:
     created_at = _as_utc(created_at or datetime.now(UTC))
     try:
@@ -353,6 +363,27 @@ def run_research_workflow(
                 )
             )
 
+    paid_company_names = list(company_names or [])
+    if include_paid and paid_company_names:
+        paid_summary = _prepare_paid_optional_sources(
+            config=config,
+            company_names=paid_company_names,
+            clients=paid_clients,
+            collected_at=created_at,
+        )
+        if paid_summary is not None:
+            collections.append(paid_summary)
+            if paid_summary.output_path is not None:
+                result_paths.append(paid_summary.output_path)
+            if paid_summary.error is not None:
+                issues.append(
+                    ResearchWorkflowIssue(
+                        severity="error",
+                        source="optional paid providers",
+                        message=paid_summary.error,
+                    )
+                )
+
     live_collection_enabled = not config.local_only and config.enable_web_research
     if live_collection_enabled:
         live_summaries = _run_live_collectors(
@@ -433,6 +464,7 @@ def run_research_workflow(
         collections=collections,
         import_previews=import_previews,
         issues=issues,
+        privacy_notes=_privacy_notes_for_collections(collections),
         live_collection_enabled=live_collection_enabled,
     )
 
@@ -575,6 +607,58 @@ def _prepare_local_public_sources(
         result=result,
         skipped_non_exact_company_names=result.skipped_non_exact_company_names,
     )
+
+
+def _prepare_paid_optional_sources(
+    *,
+    config: AppConfig,
+    company_names: list[str],
+    clients: Mapping[str, PaidProviderClient] | None,
+    collected_at: datetime,
+) -> ResearchWorkflowCollectionSummary | None:
+    if (
+        not config.enabled_paid_providers
+        or not clients
+        or config.local_only
+        or not config.enable_web_research
+    ):
+        return None
+    try:
+        result = collect_paid_research_results(
+            config=config,
+            company_names=company_names,
+            clients=clients,
+            collected_at=collected_at,
+        )
+    except Exception as exc:
+        return ResearchWorkflowCollectionSummary(
+            kind="paid_optional",
+            source_id="paid_optional",
+            source_name="Optional paid providers",
+            status=ResearchProviderRunStatus.FAILED,
+            error=str(exc),
+        )
+    if not result.provider_ids:
+        return None
+    return _collection_summary_from_result(
+        kind="paid_optional",
+        source_id="paid_optional",
+        source_name="Optional paid providers",
+        result=result,
+        skipped_non_exact_company_names=result.skipped_non_exact_company_names,
+    )
+
+
+def _privacy_notes_for_collections(
+    collections: list[ResearchWorkflowCollectionSummary],
+) -> list[str]:
+    notes = list(PRIVACY_NOTES)
+    if any(
+        collection.kind == "paid_optional" and collection.output_path is not None
+        for collection in collections
+    ):
+        notes[0] = PAID_OUTPUTS_PRIVACY_NOTE
+    return notes
 
 
 def _run_live_collectors(
@@ -779,7 +863,7 @@ def _collection_summary_from_result(
                 provider_result_counts=provider_result_counts,
                 provider_company_result_counts=provider_company_result_counts,
             )
-            if kind == "local_public"
+            if kind in {"local_public", "paid_optional"}
             else []
         ),
         incomplete_search=incomplete_search,
@@ -939,7 +1023,7 @@ def _web_provider_statuses(
 def _provider_display_name(provider_id: str) -> str:
     provider = {
         provider.id: provider
-        for provider in builtin_research_providers()
+        for provider in builtin_research_providers(include_paid=True)
     }.get(provider_id)
     return provider.name if provider is not None else provider_id
 
