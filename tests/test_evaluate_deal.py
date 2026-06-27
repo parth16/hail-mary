@@ -1586,6 +1586,67 @@ def test_final_memo_evidence_quality_revalidates_stale_claim_status() -> None:
     assert "- ev-stale:" in memo_text
 
 
+def test_final_memo_evidence_quality_recomputes_stale_conflict_status() -> None:
+    evidence_a = _evidence_record("ev-live", "Valuation cap $8M.", "memo-a.txt")
+    evidence_b = _evidence_record("ev-stale-conflict", "Valuation cap $10M.", "memo-b.txt")
+    claim_a = _claim_record("claim-live", evidence_a, normalized_value="8000000")
+    claim_b = _claim_record("claim-stale-conflict", evidence_b, normalized_value="10000000")
+    stale_citation = claim_b.citations[0].model_copy(
+        update={"quote": "Valuation cap $12M."}
+    )
+    claim_b = claim_b.model_copy(update={"citations": [stale_citation]})
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="StaleConflictCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence_a, evidence_b],
+        claims=[claim_a, claim_b],
+        conflicts=[
+            ClaimConflict(
+                id="conflict-1",
+                deal_id="deal-1",
+                claim_type=ClaimType.DEAL_TERM,
+                label="valuation cap",
+                normalized_values=["8000000", "10000000"],
+                claim_ids=[claim_a.id, claim_b.id],
+                notes="Synthetic stale conflict.",
+            )
+        ],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="StaleConflictCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Synthetic stale conflict test.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Synthetic stale conflict test.",
+    )
+    final_output = AgentReviewOutput(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        store,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+
+    assert "| deal\\_term | local\\_file | verified |" in memo_text
+    assert "| deal\\_term | local\\_file | quote\\_mismatch |" in memo_text
+    assert "score factor: Deal terms; score factor: Valuation and net return" in memo_text
+
+
 def test_final_memo_evidence_quality_citations_are_in_evidence_cited() -> None:
     evidence = _evidence_record("ev-quality-only", "Unverified side note.", "note.txt")
     claim = _claim_record("claim-quality-only", evidence, normalized_value="side-note")

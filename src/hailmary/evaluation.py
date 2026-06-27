@@ -2034,10 +2034,17 @@ def _evidence_quality_memo_lines(
     if not store.claims:
         return ["- No claim-level evidence quality rows were available."]
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    live_conflict_claim_ids = {
+        claim_id for conflict in validated_conflicts(store) for claim_id in conflict.claim_ids
+    }
     rows: list[list[object]] = []
     for claim in store.claims:
         quality = claim.quality
-        verification_status = _claim_live_verification_status(claim, evidence_by_id)
+        verification_status = _claim_live_verification_status(
+            claim,
+            evidence_by_id,
+            live_conflict_claim_ids=live_conflict_claim_ids,
+        )
         rows.append(
             [
                 quality.claim_type,
@@ -2122,6 +2129,8 @@ def _claim_is_pricing(claim: ClaimRecord) -> bool:
 def _claim_live_verification_status(
     claim: ClaimRecord,
     evidence_by_id: Mapping[str, EvidenceRecord],
+    *,
+    live_conflict_claim_ids: set[str],
 ) -> VerificationStatus:
     if not claim.citations:
         return VerificationStatus.MISSING_CITATION
@@ -2137,7 +2146,12 @@ def _claim_live_verification_status(
             return VerificationStatus.SPAN_MISMATCH
         if evidence.text[start:end] != citation.quote:
             return VerificationStatus.QUOTE_MISMATCH
-    if claim.verification_status == VerificationStatus.CONFLICTED:
+    if claim.verification_status not in {
+        VerificationStatus.VERIFIED,
+        VerificationStatus.CONFLICTED,
+    }:
+        return claim.verification_status
+    if claim.id in live_conflict_claim_ids:
         return VerificationStatus.CONFLICTED
     return VerificationStatus.VERIFIED
 
