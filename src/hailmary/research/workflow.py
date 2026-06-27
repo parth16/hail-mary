@@ -998,11 +998,16 @@ def _web_task_needs_manual_work(task: WebResearchTaskSummary) -> bool:
 def _research_workflow_summary(
     workflow: ResearchWorkflowRunSummary,
 ) -> ResearchWorkflowSummary:
+    provider_ids_with_ready_results = _provider_ids_with_ready_results(workflow)
     statuses = {
         source.provider_id: ResearchProviderStatusSummary(
             provider_id=source.provider_id,
             provider_name=source.provider_name,
-            status=_initial_provider_status(source, workflow),
+            status=_initial_provider_status(
+                source,
+                workflow,
+                provider_ids_with_ready_results=provider_ids_with_ready_results,
+            ),
             planned_count=source.planned_count,
         )
         for source in workflow.source_summaries
@@ -1171,24 +1176,17 @@ def _merge_provider_status_summary(
     existing: ResearchProviderStatusSummary,
     incoming: ResearchProviderStatusSummary,
 ) -> ResearchProviderRunStatus:
-    lower_priority_statuses = {
-        ResearchProviderRunStatus.NO_EXACT_RESULTS,
-        ResearchProviderRunStatus.MANUAL_NEEDED,
-        ResearchProviderRunStatus.NOT_RUN,
-        ResearchProviderRunStatus.PLANNED,
-    }
-    if (
-        incoming.status == ResearchProviderRunStatus.PLANNED
-        and incoming.collected_count > 0
-        and existing.status in lower_priority_statuses
-    ):
-        return ResearchProviderRunStatus.PLANNED
-    if (
-        existing.status == ResearchProviderRunStatus.PLANNED
-        and existing.collected_count > 0
-        and incoming.status in lower_priority_statuses
-    ):
-        return ResearchProviderRunStatus.PLANNED
+    if _has_ready_results(existing) or _has_ready_results(incoming):
+        higher_priority_statuses = {
+            ResearchProviderRunStatus.FAILED,
+            ResearchProviderRunStatus.INCOMPLETE_SEARCH,
+            ResearchProviderRunStatus.IMPORTED,
+        }
+        if (
+            existing.status not in higher_priority_statuses
+            and incoming.status not in higher_priority_statuses
+        ):
+            return ResearchProviderRunStatus.PLANNED
     if (
         ResearchProviderRunStatus.NO_EXACT_RESULTS
         in {existing.status, incoming.status}
@@ -1199,10 +1197,49 @@ def _merge_provider_status_summary(
     return _merge_provider_status(existing.status, incoming.status)
 
 
+def _has_ready_results(status: ResearchProviderStatusSummary) -> bool:
+    return (
+        status.status == ResearchProviderRunStatus.PLANNED
+        and status.collected_count > 0
+    )
+
+
+def _provider_ids_with_ready_results(
+    workflow: ResearchWorkflowRunSummary,
+) -> set[str]:
+    provider_ids = {
+        provider_status.provider_id
+        for collection in workflow.collections
+        for provider_status in collection.provider_statuses
+        if provider_status.collected_count > 0
+    }
+    collection_output_paths = {
+        collection.output_path.resolve(strict=False)
+        for collection in workflow.collections
+        if collection.output_path is not None
+    }
+    for preview in workflow.import_previews:
+        if preview.input_path.resolve(strict=False) in collection_output_paths:
+            continue
+        provider_ids.update(
+            provider_status.provider_id
+            for provider_status in _import_preview_provider_statuses(
+                preview,
+                plan=workflow.plan,
+            )
+            if provider_status.collected_count > 0
+        )
+    return provider_ids
+
+
 def _initial_provider_status(
     source: ResearchWorkflowSourceSummary,
     workflow: ResearchWorkflowRunSummary,
+    *,
+    provider_ids_with_ready_results: set[str],
 ) -> ResearchProviderRunStatus:
+    if source.provider_id in provider_ids_with_ready_results:
+        return ResearchProviderRunStatus.PLANNED
     if source.manual_count:
         return ResearchProviderRunStatus.MANUAL_NEEDED
     if _source_not_run_by_live_gate(source, workflow):
