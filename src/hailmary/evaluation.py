@@ -510,6 +510,7 @@ def evaluate_deal_folder(
             final_review_was_model=final_review_was_model,
             research_run=research_run,
             evidence_review=evidence_review,
+            quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
         ),
         description="final evaluation memo",
     )
@@ -908,6 +909,7 @@ def render_final_evaluation_memo(
     final_review_was_model: bool = True,
     research_run: EvaluationResearchRun | None = None,
     evidence_review: DealEvidenceReview | None = None,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> str:
     verified_claims = validated_verified_claims(store)
     lines = [
@@ -1050,6 +1052,7 @@ def render_final_evaluation_memo(
         specialist_results=specialist_results,
         final_output=final_output,
         final_recommendation=final_recommendation,
+        quote_only_evidence_ids=quote_only_evidence_ids,
     )
     if evidence_lines:
         lines.extend(evidence_lines)
@@ -2833,8 +2836,11 @@ def _cited_evidence_lines(
     specialist_results: Sequence[RoleReviewResult],
     final_output: AgentReviewOutput,
     final_recommendation: AgentRecommendationRationale,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> list[str]:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    quote_only_ids = quote_only_evidence_ids or set()
+    preferred_quotes = _preferred_memo_quotes_by_evidence_id(store)
     cited_ids: list[str] = []
 
     def add_id(evidence_id: str) -> None:
@@ -2868,8 +2874,28 @@ def _cited_evidence_lines(
         if evidence is None:
             lines.append(f"- {_memo_text(evidence_id)}: NEEDS_DILIGENCE missing evidence record.")
             continue
-        lines.append(_evidence_line(evidence))
+        lines.append(
+            _evidence_line(
+                evidence,
+                quote_only=evidence.id in quote_only_ids,
+                preferred_quotes=preferred_quotes.get(evidence.id, []),
+            )
+        )
     return lines
+
+
+def _preferred_memo_quotes_by_evidence_id(
+    store: EvidenceStore,
+) -> dict[str, list[str]]:
+    quotes_by_id: dict[str, list[str]] = {}
+    for claim in validated_verified_claims(store):
+        for citation in claim.citations:
+            if not citation.quote:
+                continue
+            quotes = quotes_by_id.setdefault(citation.evidence_id, [])
+            if citation.quote not in quotes:
+                quotes.append(citation.quote)
+    return quotes_by_id
 
 
 def _all_agent_references(
@@ -2902,7 +2928,12 @@ def _output_references(output: AgentReviewOutput) -> list[AgentEvidenceReference
     return references
 
 
-def _evidence_line(evidence: EvidenceRecord) -> str:
+def _evidence_line(
+    evidence: EvidenceRecord,
+    *,
+    quote_only: bool = False,
+    preferred_quotes: Sequence[str] = (),
+) -> str:
     locator = (
         f"page {evidence.page_number}"
         if evidence.page_number is not None
@@ -2910,9 +2941,12 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
         if evidence.table_index is not None
         else "document"
     )
-    excerpt = _memo_text(evidence.text[:500])
-    if len(evidence.text) > 500:
-        excerpt = f"{excerpt}..."
+    excerpt = _memo_evidence_excerpt(
+        evidence,
+        quote_only=quote_only,
+        preferred_quotes=preferred_quotes,
+        max_chars=500,
+    )
     source_parts = [
         f"document: {_memo_text(str(evidence.document_path))}",
         f"locator: {locator}",
@@ -2944,6 +2978,34 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
         f"- {_memo_text(evidence.id)}: {'; '.join(source_parts)}. "
         f"Quote/excerpt: \"{excerpt}\""
     )
+
+
+def _memo_evidence_excerpt(
+    evidence: EvidenceRecord,
+    *,
+    quote_only: bool,
+    preferred_quotes: Sequence[str],
+    max_chars: int,
+) -> str:
+    if quote_only:
+        valid_quotes = [
+            quote for quote in preferred_quotes if quote and quote in evidence.text
+        ]
+        if not valid_quotes:
+            return (
+                "Only selected claim quotes are shown because another claim on this "
+                "evidence was excluded; no surviving quote was available."
+            )
+        quote_text = "\n...\n".join(valid_quotes)
+        excerpt = _memo_text(quote_text[:max_chars])
+        if len(quote_text) > max_chars:
+            excerpt = f"{excerpt}..."
+        return excerpt
+
+    excerpt = _memo_text(evidence.text[:max_chars])
+    if len(evidence.text) > max_chars:
+        excerpt = f"{excerpt}..."
+    return excerpt
 
 
 def _format_ocr_confidence(confidence: float) -> str:

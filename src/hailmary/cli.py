@@ -39,6 +39,7 @@ from hailmary.evidence import (
     EvidenceActionSummary,
     EvidenceActionTarget,
     EvidenceReviewError,
+    prune_stale_evidence_actions,
     record_evidence_action,
     select_action_context,
     summarize_evidence_actions,
@@ -968,6 +969,61 @@ def evidence_actions_note_command(
         claim_id=claim_id,
         status=None,
         note=note,
+    )
+
+
+@evidence_actions_app.command("prune-stale")
+def evidence_actions_prune_stale_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where Hail Mary should write private actions."),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="Prune actions for one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="Prune actions for one exact ingested company name."),
+    ] = None,
+) -> None:
+    """Remove saved actions whose evidence or claim IDs no longer exist."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = prune_stale_evidence_actions(
+            config=config,
+            deal_id=deal_id,
+            company_name=company,
+        )
+    except EvidenceActionError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    target_word = "target" if result.removed_target_count == 1 else "targets"
+    action_word = "action" if result.removed_action_count == 1 else "actions"
+    if result.removed_action_count:
+        summary = (
+            f"Removed {result.removed_action_count} stale {action_word} across "
+            f"{result.removed_target_count} obsolete {target_word}."
+        )
+    else:
+        summary = "No stale evidence actions were found."
+    state_line = (
+        f"Saved private action state to {result.action_file_path}."
+        if result.removed_action_count
+        else f"Private action state path: {result.action_file_path}."
+    )
+    _print_panel(
+        "Stale evidence actions pruned",
+        [
+            _plain(f"Company: {result.company_name}."),
+            _plain(f"Deal ID: {result.deal_id}."),
+            _plain(summary),
+            _plain(state_line),
+            _plain("No evidence text was copied into the action file."),
+        ],
+        border_style="green",
     )
 
 

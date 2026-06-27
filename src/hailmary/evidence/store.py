@@ -155,21 +155,25 @@ def refresh_existing_claim_conflicts(store: EvidenceStore) -> EvidenceStore:
             for citation in claim.citations
         ]
         claim_status = _claim_verification_status(citations)
+        quality_updates: dict[str, object] = {
+            "verification_status": claim_status,
+            "confidence": (
+                0.72
+                if claim_status == VerificationStatus.VERIFIED
+                else 0.35
+            ),
+        }
+        if (
+            claim_status != VerificationStatus.CONFLICTED
+            and claim.quality.score_impact == "excluded_until_conflict_is_resolved"
+        ):
+            quality_updates["score_impact"] = "not_scored_yet"
         refreshed_claims.append(
             claim.model_copy(
                 update={
                     "citations": citations,
                     "verification_status": claim_status,
-                    "quality": claim.quality.model_copy(
-                        update={
-                            "verification_status": claim_status,
-                            "confidence": (
-                                0.72
-                                if claim_status == VerificationStatus.VERIFIED
-                                else 0.35
-                            ),
-                        }
-                    ),
+                    "quality": claim.quality.model_copy(update=quality_updates),
                 }
             )
         )

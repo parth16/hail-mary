@@ -16,6 +16,7 @@ from hailmary.evidence.actions import (
     action_log_path,
     apply_evidence_actions,
     load_action_log,
+    prune_stale_evidence_actions,
     record_evidence_action,
     summarize_evidence_actions,
     write_action_log,
@@ -163,6 +164,129 @@ def test_excluded_claim_preserves_evidence_for_packet_quote_suppression(
     assert [claim.id for claim in application.store.claims] == ["claim_traction"]
 
 
+def test_exclusion_preserves_unrelated_missing_evidence_claim(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store()
+    missing_claim = _claim("claim_missing", "$12M", store.evidence[1]).model_copy(
+        update={
+            "citations": [
+                EvidenceCitation(
+                    evidence_id="ev_missing",
+                    quote="Valuation cap $12M.",
+                    source_span_start=0,
+                    source_span_end=len("Valuation cap $12M."),
+                    verification_status=VerificationStatus.VERIFIED,
+                )
+            ],
+        }
+    )
+    store = store.model_copy(update={"claims": [*store.claims, missing_claim]})
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                _action(
+                    action_id="act_exclude_traction",
+                    target_id="ev_traction",
+                    status=EvidenceActionStatus.EXCLUDED,
+                )
+            ],
+        ),
+    )
+
+    application = apply_evidence_actions(config=config, store=store)
+    claims_by_id = {claim.id: claim for claim in application.store.claims}
+
+    assert "claim_traction" not in claims_by_id
+    assert "claim_terms" in claims_by_id
+    assert claims_by_id["claim_missing"].citations[0].verification_status == (
+        VerificationStatus.EVIDENCE_NOT_FOUND
+    )
+
+
+def test_excluded_conflict_side_resets_surviving_score_impact(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    low_evidence = _evidence("ev_low", "Valuation cap $8M.")
+    high_evidence = _evidence("ev_high", "Valuation cap $10M.")
+    low_claim = _conflicted_claim(_claim("claim_low", "$8M", low_evidence))
+    high_claim = _conflicted_claim(_claim("claim_high", "$10M", high_evidence))
+    store = EvidenceStore(
+        deal_id="deal_action",
+        company_name="ActionCo",
+        created_at=BUILT_AT,
+        evidence=[low_evidence, high_evidence],
+        claims=[low_claim, high_claim],
+    )
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                _action(
+                    action_id="act_exclude_high",
+                    target_type=EvidenceActionTarget.CLAIM,
+                    target_id="claim_high",
+                    status=EvidenceActionStatus.EXCLUDED,
+                )
+            ],
+        ),
+    )
+
+    application = apply_evidence_actions(config=config, store=store)
+    surviving_claim = application.store.claims[0]
+
+    assert surviving_claim.id == "claim_low"
+    assert surviving_claim.verification_status == VerificationStatus.VERIFIED
+    assert surviving_claim.quality.score_impact == "not_scored_yet"
+
+
+def test_prune_stale_evidence_actions_removes_obsolete_targets(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = _store()
+    _write_ingestion_summary(tmp_path, store)
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                _action(
+                    action_id="act_valid",
+                    target_id="ev_terms",
+                    status=EvidenceActionStatus.APPROVED,
+                ),
+                _action(
+                    action_id="act_stale_evidence",
+                    target_id="ev_missing",
+                    status=EvidenceActionStatus.NEEDS_REVIEW,
+                    note="Stale note stays private.",
+                ),
+                _action(
+                    action_id="act_stale_claim",
+                    target_type=EvidenceActionTarget.CLAIM,
+                    target_id="claim_missing",
+                    status=EvidenceActionStatus.EXCLUDED,
+                ),
+            ],
+        ),
+    )
+
+    result = prune_stale_evidence_actions(config=config, deal_id=store.deal_id)
+    loaded = load_action_log(config=config, deal_id=store.deal_id)
+    summary = summarize_evidence_actions(config=config, store=store)
+
+    assert result.removed_action_count == 2
+    assert result.removed_target_count == 2
+    assert [action.action_id for action in loaded.actions] == ["act_valid"]
+    assert summary.stale_action_count == 0
+
+
 def test_unknown_evidence_id_is_rejected_before_writing(tmp_path: Path) -> None:
     config = _config(tmp_path)
     _write_ingestion_summary(tmp_path, _store())
@@ -305,6 +429,21 @@ def _claim(claim_id: str, value: str, evidence: EvidenceRecord) -> ClaimRecord:
             confidence=0.72,
             materiality="high",
         ),
+    )
+
+
+def _conflicted_claim(claim: ClaimRecord) -> ClaimRecord:
+    return claim.model_copy(
+        update={
+            "verification_status": VerificationStatus.CONFLICTED,
+            "quality": claim.quality.model_copy(
+                update={
+                    "verification_status": VerificationStatus.CONFLICTED,
+                    "confidence": 0.2,
+                    "score_impact": "excluded_until_conflict_is_resolved",
+                }
+            ),
+        }
     )
 
 

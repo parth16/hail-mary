@@ -183,6 +183,15 @@ class EvidenceActionWriteResult:
     action_file_path: Path
 
 
+@dataclass(frozen=True)
+class EvidenceActionPruneResult:
+    deal_id: str
+    company_name: str
+    removed_action_count: int
+    removed_target_count: int
+    action_file_path: Path
+
+
 def action_log_path(*, config: AppConfig, deal_id: str) -> Path:
     data_dir = _absolute_path(config.data_dir)
     action_root = data_dir / "evidence-actions"
@@ -350,6 +359,55 @@ def record_evidence_action(
     )
 
 
+def prune_stale_evidence_actions(
+    *,
+    config: AppConfig,
+    deal_id: str | None = None,
+    company_name: str | None = None,
+) -> EvidenceActionPruneResult:
+    try:
+        config = validate_local_state(config)
+    except ConfigError as exc:
+        raise EvidenceActionError(
+            f"Local generated-data setup failed: {exc}"
+        ) from exc
+    context = select_action_context(
+        config=config,
+        deal_id=deal_id,
+        company_name=company_name,
+    )
+    log = load_action_log(config=config, deal_id=context.deal.id)
+    summary = summarize_evidence_actions(config=config, store=context.store)
+    stale_targets = {
+        (state.target_type, state.target_id) for state in summary.stale_states
+    }
+    if not stale_targets:
+        return EvidenceActionPruneResult(
+            deal_id=context.deal.id,
+            company_name=context.deal.company_name,
+            removed_action_count=0,
+            removed_target_count=0,
+            action_file_path=summary.action_file_path,
+        )
+
+    kept_actions = [
+        action
+        for action in log.actions
+        if (action.target_type, action.target_id) not in stale_targets
+    ]
+    path = write_action_log(
+        config=config,
+        log=EvidenceActionLog(deal_id=log.deal_id, actions=kept_actions),
+    )
+    return EvidenceActionPruneResult(
+        deal_id=context.deal.id,
+        company_name=context.deal.company_name,
+        removed_action_count=len(log.actions) - len(kept_actions),
+        removed_target_count=len(stale_targets),
+        action_file_path=path,
+    )
+
+
 def summarize_evidence_actions(
     *,
     config: AppConfig,
@@ -428,12 +486,13 @@ def apply_evidence_actions(
     remaining_evidence = [
         evidence for evidence in store.evidence if evidence.id not in excluded_evidence_ids
     ]
-    remaining_evidence_ids = {evidence.id for evidence in remaining_evidence}
     remaining_claims = [
         claim
         for claim in store.claims
         if claim.id not in excluded_claim_ids
-        and all(citation.evidence_id in remaining_evidence_ids for citation in claim.citations)
+        and not any(
+            citation.evidence_id in excluded_evidence_ids for citation in claim.citations
+        )
     ]
     filtered_store = refresh_existing_claim_conflicts(
         store.model_copy(

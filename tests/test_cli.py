@@ -11,7 +11,14 @@ from typer.testing import CliRunner
 
 from hailmary.cli import _format_dollars, app
 from hailmary.config import AppConfig
-from hailmary.evidence.actions import action_log_path
+from hailmary.evidence.actions import (
+    EvidenceActionLog,
+    EvidenceActionRecord,
+    EvidenceActionStatus,
+    EvidenceActionTarget,
+    action_log_path,
+    write_action_log,
+)
 from hailmary.ingest import folder_loader
 from hailmary.ingest.extractors import ExtractionResult
 from hailmary.ingest.extractors import extract_document as real_extract_document
@@ -763,6 +770,85 @@ def test_evidence_actions_cli_writes_private_action_and_hides_notes_by_default(
     assert notes_result.exit_code == 0, notes_result.output
     assert "Operator checked the source locally" in notes_result.output
     assert "SECRET CUSTOMER LIST" not in notes_result.output
+
+
+def test_evidence_actions_cli_prunes_stale_actions(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_secret",
+        "SECRET CUSTOMER LIST. Valuation cap $8M.",
+        deal_id="deal_secret",
+    )
+    store = _review_store(
+        deal_id="deal_secret",
+        company_name="SecretCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+    write_action_log(
+        config=AppConfig(data_dir=data_dir),
+        log=EvidenceActionLog(
+            deal_id="deal_secret",
+            actions=[
+                EvidenceActionRecord(
+                    action_id="act_stale",
+                    deal_id="deal_secret",
+                    target_type=EvidenceActionTarget.EVIDENCE,
+                    target_id="ev_missing",
+                    status=EvidenceActionStatus.NEEDS_REVIEW,
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    operator_note="Private stale note.",
+                )
+            ],
+        ),
+    )
+
+    list_before = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "list",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+        ],
+    )
+    prune_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "prune-stale",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+        ],
+    )
+    list_after = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "list",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+        ],
+    )
+
+    assert list_before.exit_code == 0, list_before.output
+    assert "stale" in list_before.output
+    assert "Private stale note" not in list_before.output
+    assert "SECRET CUSTOMER LIST" not in list_before.output
+    assert prune_result.exit_code == 0, prune_result.output
+    assert "Removed 1 stale action" in prune_result.output
+    assert "Private stale note" not in prune_result.output
+    assert "SECRET CUSTOMER LIST" not in prune_result.output
+    assert list_after.exit_code == 0, list_after.output
+    assert "No evidence actions have been saved" in list_after.output
 
 
 def test_review_evidence_shows_action_status_but_hides_notes_by_default(

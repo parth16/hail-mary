@@ -438,6 +438,58 @@ def test_evaluate_deal_excludes_actioned_evidence_before_scoring_and_packets(
     assert "EXCLUDED_MARKER" not in memo_text
 
 
+def test_evaluate_deal_claim_exclusion_suppresses_final_memo_excerpt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = tmp_path / "SharedClaimCo"
+    company_dir.mkdir()
+    (company_dir / "shared-terms.txt").write_text(
+        "Valuation cap $8M. EXCLUDED_MEMO_MARKER Discount 20%. "
+        "Round size $1M. Minimum investment $1,000. "
+        "Lead investor committed and seed round is active.",
+        encoding="utf-8",
+    )
+    config = AppConfig(data_dir=tmp_path / "data", local_only=True)
+    initial = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    excluded_claim = next(claim for claim in store.claims if claim.label == "discount")
+    shared_evidence_id = excluded_claim.citations[0].evidence_id
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        claim_id=excluded_claim.id,
+        status=EvidenceActionStatus.EXCLUDED,
+        note="Synthetic claim exclusion.",
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+
+    assert result.evidence_count == initial.evidence_count
+    assert result.evidence_review is not None
+    assert any(
+        evidence.id == shared_evidence_id
+        for evidence in result.evidence_review.evidence_records
+    )
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Valuation cap $8M" in memo_text
+    assert "Round size $1M" in memo_text
+    assert "EXCLUDED_MEMO_MARKER" not in memo_text
+    assert "Discount 20%" not in memo_text
+
+
 def test_evaluate_deal_surfaces_needs_review_evidence_actions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
