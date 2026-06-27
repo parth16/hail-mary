@@ -448,6 +448,18 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="evidence-actions-v1",
+                category=EvalCategory.MEMO_SNAPSHOT,
+                name="Evidence action workflow",
+                description=(
+                    "Checks that local evidence actions exclude evidence before scoring "
+                    "and surface needs-review status without leaking notes."
+                ),
+            ),
+            run=fixtures.run_evidence_actions_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="privacy-output-guards",
                 category=EvalCategory.PRIVACY,
                 name="Private output and ignored-folder guardrails",

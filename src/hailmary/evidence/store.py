@@ -140,6 +140,64 @@ def refresh_deal_term_claims(store: EvidenceStore) -> EvidenceStore:
     )
 
 
+def refresh_existing_claim_conflicts(store: EvidenceStore) -> EvidenceStore:
+    """Rebuild conflict metadata after a caller filters stored evidence or claims."""
+
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    refreshed_claims: list[ClaimRecord] = []
+    for claim in store.claims:
+        citations = [
+            citation.model_copy(
+                update={
+                    "verification_status": verify_citation(citation, evidence_by_id),
+                }
+            )
+            for citation in claim.citations
+        ]
+        claim_status = _claim_verification_status(citations)
+        quality_updates: dict[str, object] = {
+            "verification_status": claim_status,
+        }
+        if claim_status != VerificationStatus.VERIFIED:
+            quality_updates["confidence"] = 0.35
+        if (
+            claim_status != VerificationStatus.CONFLICTED
+            and claim.quality.score_impact == "excluded_until_conflict_is_resolved"
+        ):
+            quality_updates["score_impact"] = "not_scored_yet"
+        refreshed_claims.append(
+            claim.model_copy(
+                update={
+                    "citations": citations,
+                    "verification_status": claim_status,
+                    "quality": claim.quality.model_copy(update=quality_updates),
+                }
+            )
+        )
+
+    conflicts = _find_conflicts(
+        store.deal_id,
+        [
+            claim
+            for claim in refreshed_claims
+            if claim.verification_status == VerificationStatus.VERIFIED
+        ],
+    )
+    refreshed_claims = _mark_conflicted_claims(refreshed_claims, conflicts)
+    notes = _refresh_store_notes(
+        store.notes,
+        has_evidence=bool(store.evidence),
+        conflicts=conflicts,
+    )
+    return store.model_copy(
+        update={
+            "claims": refreshed_claims,
+            "conflicts": conflicts,
+            "notes": notes,
+        }
+    )
+
+
 def _mark_conflicted_claims(
     claims: list[ClaimRecord],
     conflicts: list[ClaimConflict],

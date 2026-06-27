@@ -5,9 +5,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from hailmary.evidence import (
+    EvidenceActionStatus,
+    EvidenceActionSummary,
     ReviewIssueSeverity,
     build_deal_evidence_review,
     build_evidence_health,
+)
+from hailmary.evidence.actions import (
+    EvidenceActionState,
+    EvidenceActionStatusCount,
+    EvidenceActionTarget,
 )
 from hailmary.evidence.review import EvidenceHealthMetric, ReviewIssueSummary
 from hailmary.schemas.documents import (
@@ -335,6 +342,58 @@ def test_deal_evidence_review_filters_record_table_without_hiding_health() -> No
 
     assert [evidence.id for evidence in review.evidence_records] == ["ev_second"]
     assert _metric_counts(review.health.source_kinds) == {"local file": 2}
+
+
+def test_evidence_health_counts_needs_review_only_for_surviving_action_targets() -> None:
+    kept_evidence = _evidence("ev_kept", "Valuation cap $8M.")
+    removed_evidence_state = EvidenceActionState(
+        action_id="act_removed_evidence",
+        target_type=EvidenceActionTarget.EVIDENCE,
+        target_id="ev_removed",
+        status=EvidenceActionStatus.NEEDS_REVIEW,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    removed_claim_state = EvidenceActionState(
+        action_id="act_removed_claim",
+        target_type=EvidenceActionTarget.CLAIM,
+        target_id="claim_removed",
+        status=EvidenceActionStatus.NEEDS_REVIEW,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    action_summary = EvidenceActionSummary(
+        action_file_path=Path("data/evidence-actions/deal.json"),
+        action_count=3,
+        valid_action_count=3,
+        stale_action_count=0,
+        status_counts=[
+            EvidenceActionStatusCount(
+                status=EvidenceActionStatus.NEEDS_REVIEW,
+                count=3,
+            )
+        ],
+        evidence_states={
+            kept_evidence.id: EvidenceActionState(
+                action_id="act_kept_evidence",
+                target_type=EvidenceActionTarget.EVIDENCE,
+                target_id=kept_evidence.id,
+                status=EvidenceActionStatus.NEEDS_REVIEW,
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            "ev_removed": removed_evidence_state,
+        },
+        claim_states={"claim_removed": removed_claim_state},
+        stale_states=[],
+    )
+
+    health = build_evidence_health(
+        _store(evidence=[kept_evidence]),
+        [],
+        recommendation_evidence_ids=[kept_evidence.id, "ev_removed"],
+        action_summary=action_summary,
+    )
+
+    assert _issue_by_code(health.issues, "needs_review_actions").count == 1
+    assert _issue_by_code(health.issues, "needs_review_cited").count == 1
 
 
 def _metric_counts(metrics: Sequence[EvidenceHealthMetric]) -> dict[str, int]:

@@ -18,6 +18,7 @@ from hailmary.evaluation import (
     openai_review_messages,
     render_final_evaluation_memo,
 )
+from hailmary.evidence.actions import EvidenceActionStatus, record_evidence_action
 from hailmary.ingest.extractors import extract_document
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.ingest.ocr import LocalOcrResult
@@ -42,6 +43,7 @@ from hailmary.research import (
     run_research_workflow,
 )
 from hailmary.schemas.agents import (
+    AgentDiligenceQuestion,
     AgentEvidenceItem,
     AgentEvidenceReference,
     AgentFinding,
@@ -67,6 +69,7 @@ from hailmary.schemas.evidence import (
 )
 from hailmary.schemas.scoring import (
     CompanyStage,
+    DiligenceQuestion,
     FundabilityRisk,
     PMFLevel,
     Recommendation,
@@ -2962,6 +2965,32 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "Expected evaluate-deal to persist parseable packet artifacts for every role.",
         missing_roles=", ".join(missing_packet_roles),
     )
+    final_packet = next(
+        (packet for packet in parsed_packets if packet.agent_role == AgentRole.FINAL_DECISION),
+        None,
+    )
+    _expect(
+        final_packet is not None,
+        "Expected a persisted final-decision packet artifact.",
+    )
+    if final_packet is None:
+        raise EvalFixtureFailure("Expected a persisted final-decision packet artifact.")
+    _expect(
+        final_packet.evidence_health is not None,
+        "Expected final-decision packet to include evidence-health context.",
+    )
+    _expect(
+        final_packet.scoring_support is not None,
+        "Expected final-decision packet to include scoring-support context.",
+    )
+    _expect(
+        final_packet.committee_context is not None,
+        "Expected final-decision packet to include validated specialist context.",
+    )
+    _expect(
+        "Source-linked synthetic review" in final_packet.model_dump_json(),
+        "Expected specialist findings to be persisted in final-decision packet context.",
+    )
     output_paths = sorted(
         path
         for path in result.agent_output_dir.glob("*.json")
@@ -3014,6 +3043,14 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "Expected final-decision model messages to include specialist committee context.",
     )
     _expect(
+        bool(final_payloads) and "evidence_health" in final_payloads[-1],
+        "Expected final-decision model messages to include evidence-health context.",
+    )
+    _expect(
+        bool(final_payloads) and "scoring_support" in final_payloads[-1],
+        "Expected final-decision model messages to include scoring-support context.",
+    )
+    _expect(
         bool(final_payloads) and "Source-linked synthetic review" in final_payloads[-1],
         "Expected specialist findings to reach final-decision model messages.",
     )
@@ -3051,8 +3088,11 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "## Decision",
         "## Rule-Based Decision And Guardrails",
         "## Score Factors",
+        "## Portfolio Impact And Net Return Math",
         "## External Research",
         "## Evidence Health",
+        "## Evidence Quality",
+        "## Missing Data",
         "## Model Committee Findings",
         "## Final Recommendation",
         "## Evidence Cited",
@@ -3069,6 +3109,12 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "**Recommendation:**",
         "**Suggested check:**",
         "**Score:**",
+        "Unsupported or model-only findings may be shown as diligence notes",
+        "| Metric | Value |",
+        "| Return input | Value |",
+        "| Claim type | Source type | Verification | Recency |",
+        "| What is not known | Why it matters | Confidence effect | Evidence IDs |",
+        "| Rank | Source | Question | Reason | Evidence IDs |",
         "Imported 1 external research evidence record before scoring.",
         (
             "Evidence health means whether saved source records are complete and safe "
@@ -3091,7 +3137,6 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "Expected the final memo to cite the imported research evidence ID.",
         imported_research_id=imported_research_id,
     )
-
     serialized_payloads = "\n".join(client.request_payloads)
     _expect(
         "Synthetic GoldenCo public site reports paid customer growth" in serialized_payloads,
@@ -3108,6 +3153,100 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         leaked_private_markers=", ".join(leaked_private_markers),
     )
 
+
+def run_evidence_actions_fixture(work_dir: Path) -> None:
+    safe_work_dir = work_dir.resolve(strict=False)
+    root = safe_work_dir / "pitch-decks"
+    company = root / "Synthetic ActionCo"
+    company.mkdir(parents=True)
+    excluded_marker = "EXCLUDED_ACTION_MARKER"
+    private_note_marker = "PRIVATE_ACTION_NOTE"
+    (company / "terms.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M. "
+        "Minimum investment $1,000. Lead investor committed and seed round is active.",
+        encoding="utf-8",
+    )
+    (company / "traction.txt").write_text(
+        f"{excluded_marker} ARR revenue growth with paid customers and retention.",
+        encoding="utf-8",
+    )
+
+    config = AppConfig(data_dir=safe_work_dir / "data", local_only=True)
+    initial = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+        created_at=BUILT_AT,
+    )
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    excluded_evidence = next(
+        evidence for evidence in store.evidence if excluded_marker in evidence.text
+    )
+    needs_review_evidence = next(
+        evidence for evidence in store.evidence if evidence.id != excluded_evidence.id
+    )
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        evidence_id=excluded_evidence.id,
+        status=EvidenceActionStatus.EXCLUDED,
+        note=private_note_marker,
+        created_at=BUILT_AT,
+    )
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        evidence_id=needs_review_evidence.id,
+        status=EvidenceActionStatus.NEEDS_REVIEW,
+        note=private_note_marker,
+        created_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    result = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+        created_at=BUILT_AT,
+    )
+
+    _expect_equal(
+        result.evidence_count,
+        initial.evidence_count - 1,
+        "Expected excluded evidence actions to remove one evidence record from scoring.",
+    )
+    _expect(
+        result.evidence_review is not None
+        and result.evidence_review.action_summary is not None
+        and result.evidence_review.action_summary.excluded_evidence_count == 1,
+        "Expected evaluate-deal evidence health to surface excluded evidence actions.",
+    )
+    _expect(
+        any("needs review" in warning for warning in result.warnings),
+        "Expected evaluate-deal warnings to surface needs-review evidence actions.",
+    )
+    _expect(
+        any("needs review" in limitation for limitation in result.operator_limitations),
+        "Expected evaluate-deal limitations to surface needs-review evidence actions.",
+    )
+    memo = result.final_memo_path.read_text(encoding="utf-8")
+    expected_fragments = ["Evidence actions:", "excluded: 1", "needs review"]
+    missing_fragments = [fragment for fragment in expected_fragments if fragment not in memo]
+    _expect(
+        not missing_fragments,
+        "Expected the final memo to summarize evidence actions.",
+        missing_fragments=", ".join(missing_fragments),
+    )
+    _expect(
+        excluded_marker not in memo,
+        "Expected excluded evidence text to stay out of the final memo.",
+    )
+    _expect(
+        private_note_marker not in memo,
+        "Expected private operator notes to stay out of the final memo.",
+    )
 
 def run_memo_v2_score_evidence_fixture() -> None:
     store = _strong_store()
@@ -3127,6 +3266,46 @@ def run_memo_v2_score_evidence_fixture() -> None:
         not missing_fragments,
         "Expected v2 memo score impacts to include stage, valuation, return math, and evidence.",
         missing_fragments=", ".join(missing_fragments),
+    )
+
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=scored.recommendation,
+        check_size=scored.check_size,
+        reason=scored.one_line_reason,
+        evidence=[AgentEvidenceReference(evidence_id="ev_terms", quote="Valuation cap $8M")],
+    )
+    final_memo = render_final_evaluation_memo(
+        scored,
+        store,
+        specialist_results=[],
+        final_output=AgentReviewOutput(
+            deal_id=store.deal_id,
+            company_name=store.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            recommendation=final_recommendation,
+        ),
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+    expected_final_fragments = [
+        "## Portfolio Impact And Net Return Math",
+        "| Return input | Value |",
+        "Hail Mary did not invent a net return",
+        "## Evidence Quality",
+        "| Claim type | Source type | Verification | Recency |",
+        "score factor: Valuation and net return",
+        "## Missing Data",
+        "gross exit scenario",
+        "| Rank | Source | Question | Reason | Evidence IDs |",
+    ]
+    missing_final_fragments = [
+        fragment for fragment in expected_final_fragments if fragment not in final_memo
+    ]
+    _expect(
+        not missing_final_fragments,
+        "Expected final memo v2 sections to include evidence quality, missing data, "
+        "ranked questions, and return math.",
+        missing_fragments=", ".join(missing_final_fragments),
     )
 
 
@@ -3246,9 +3425,34 @@ def run_memo_output_guards_fixture() -> None:
         }
     )
     evidence.append(late_evidence)
-    store = _store(evidence=evidence, claims=[_claim("valuation cap", "$8M", late_evidence)])
+    unsafe_claim = _claim("valuation cap", "$8M", late_evidence)
+    unsafe_claim = unsafe_claim.model_copy(
+        update={
+            "quality": unsafe_claim.quality.model_copy(
+                update={
+                    "reliability": "source|reliability\n# Bad Reliability",
+                    "materiality": "high|materiality\n# Bad Materiality",
+                    "score_impact": "impact with [bad](x)\n# Bad Impact",
+                }
+            )
+        }
+    )
+    store = _store(evidence=evidence, claims=[unsafe_claim])
     store = store.model_copy(update={"company_name": "Bad|Co\n# Fake Heading"})
     scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored = scored.model_copy(
+        update={
+            "diligence_questions": [
+                *scored.diligence_questions,
+                DiligenceQuestion(
+                    priority=9,
+                    question="Question with [bad](x)\n# Bad Question",
+                    reason="Reason with | pipe\n# Bad Question Reason",
+                    evidence_ids=["ev_29"],
+                ),
+            ]
+        }
+    )
     final_recommendation = AgentRecommendationRationale(
         recommendation=Recommendation.PASS,
         check_size=0,
@@ -3263,6 +3467,12 @@ def run_memo_output_guards_fixture() -> None:
             AgentSummaryPoint(
                 summary="Summary with | pipe\n# bad summary",
                 evidence=[AgentEvidenceReference(evidence_id="ev_29", quote="$8M")],
+            )
+        ],
+        diligence_questions=[
+            AgentDiligenceQuestion(
+                question="Final question | pipe\n# Bad Final Question",
+                reason="Final question reason with [bad](x)\n# Bad Final Reason",
             )
         ],
         recommendation=final_recommendation,
@@ -3291,6 +3501,9 @@ def run_memo_output_guards_fixture() -> None:
         "\n# Bad Provider",
         "\n# Bad Confidence",
         "\n# Bad License",
+        "\n# Bad Reliability",
+        "\n# Bad Question",
+        "\n# Bad Final Question",
     ]
     present_forbidden = [fragment for fragment in forbidden_fragments if fragment in memo]
     _expect(
@@ -3304,6 +3517,11 @@ def run_memo_output_guards_fixture() -> None:
         "source page: https://example.com/source?x=\\[bad\\]\\|value",
         "high\\|confidence \\# Bad Confidence",
         "Allowed notes with \\[bad\\]\\(link\\) \\# Bad License",
+        "source\\|reliability \\# Bad Reliability",
+        "impact with \\[bad\\]\\(x\\) \\# Bad Impact",
+        "Question with \\[bad\\]\\(x\\) \\# Bad Question",
+        "Final question \\| pipe \\# Bad Final Question",
+        "NEEDS\\_DILIGENCE: no source evidence provided",
         "Quote/excerpt: \"Valuation cap $8M. Evidence text with "
         "\\[bad\\]\\(https://example.com\\) markup.\"",
         "Reason with \\[bad\\]\\(https://example.com\\) \\# bad reason",

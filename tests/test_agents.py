@@ -20,6 +20,14 @@ from hailmary.agents.packets import (
 from hailmary.agents.validation import validate_agent_output
 from hailmary.cli import app
 from hailmary.config import AppConfig
+from hailmary.evidence.actions import (
+    EvidenceActionLog,
+    EvidenceActionRecord,
+    EvidenceActionStatus,
+    EvidenceActionTarget,
+    apply_evidence_actions,
+    write_action_log,
+)
 from hailmary.portfolio import add_portfolio_investment
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
@@ -62,7 +70,7 @@ runner = CliRunner()
 _TEST_EVIDENCE_TEXT_BY_ID: dict[str, str] = {}
 
 
-def test_default_agent_roles_are_v2_committee() -> None:
+def test_default_agent_roles_are_v3_committee() -> None:
     assert DEFAULT_AGENT_ROLES == (
         AgentRole.PRODUCT_CUSTOMER_TRACTION,
         AgentRole.MARKET_COMPETITION,
@@ -100,7 +108,137 @@ def test_build_agent_input_packet_uses_validated_evidence_ids_only() -> None:
     }
 
 
-def test_build_agent_input_packet_carries_v2_context_without_provider_metadata() -> None:
+def test_build_agent_input_packet_quote_suppresses_excluded_claim_text(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    config.data_dir.mkdir()
+    store = _strong_store()
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                EvidenceActionRecord(
+                    action_id="act_exclude_claim",
+                    deal_id=store.deal_id,
+                    target_type=EvidenceActionTarget.CLAIM,
+                    target_id="claim_valuation_cap_usd8m",
+                    status=EvidenceActionStatus.EXCLUDED,
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                )
+            ],
+        ),
+    )
+    action_application = apply_evidence_actions(config=config, store=store)
+    filtered_store = action_application.store
+    scored_deal = score_evidence_store(filtered_store, config=config)
+
+    packet = build_agent_input_packet(
+        filtered_store,
+        scored_deal,
+        role=AgentRole.FINANCING_NEXT_ROUND_RISK,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+    )
+    terms_evidence = next(evidence for evidence in packet.evidence if evidence.id == "ev_terms")
+
+    assert "ev_terms" in packet.allowed_evidence_ids
+    assert "claim_valuation_cap_usd8m" not in {claim.id for claim in packet.verified_claims}
+    assert terms_evidence.text == "20%\n...\n$1M"
+    assert "$8M" not in terms_evidence.text
+
+
+def test_build_agent_input_packet_quote_only_overflow_never_uses_raw_context(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    config.data_dir.mkdir()
+    shared_text = (
+        "Allowed first quote that is intentionally long. "
+        "EXCLUDED RAW CLAIM. "
+        "Allowed second quote that is intentionally long."
+    )
+    evidence = [_evidence("ev_shared", shared_text)]
+    claims = [
+        _claim("allowed first", "Allowed first quote that is intentionally long", "ev_shared"),
+        _claim("excluded term", "EXCLUDED RAW CLAIM", "ev_shared"),
+        _claim("allowed second", "Allowed second quote that is intentionally long", "ev_shared"),
+    ]
+    store = _store(evidence=evidence, claims=claims)
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                EvidenceActionRecord(
+                    action_id="act_exclude_claim",
+                    deal_id=store.deal_id,
+                    target_type=EvidenceActionTarget.CLAIM,
+                    target_id="claim_excluded_term_excluded_raw_claim",
+                    status=EvidenceActionStatus.EXCLUDED,
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                )
+            ],
+        ),
+    )
+    action_application = apply_evidence_actions(config=config, store=store)
+    scored_deal = score_evidence_store(action_application.store, config=config)
+
+    packet = build_agent_input_packet(
+        action_application.store,
+        scored_deal,
+        role=AgentRole.GROUNDING_AUDITOR,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        max_evidence_chars=35,
+        quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+    )
+
+    packet_text = packet.evidence[0].text
+    assert "Allowed first quote" in packet_text
+    assert "EXCLUDED RAW CLAIM" not in packet_text
+
+
+def test_build_agent_input_packet_surfaces_needs_review_actions(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    config.data_dir.mkdir()
+    store = _strong_store()
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                EvidenceActionRecord(
+                    action_id="act_needs_review",
+                    deal_id=store.deal_id,
+                    target_type=EvidenceActionTarget.EVIDENCE,
+                    target_id="ev_terms",
+                    status=EvidenceActionStatus.NEEDS_REVIEW,
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                )
+            ],
+        ),
+    )
+    action_application = apply_evidence_actions(config=config, store=store)
+    scored_deal = score_evidence_store(action_application.store, config=config)
+
+    packet = build_agent_input_packet(
+        action_application.store,
+        scored_deal,
+        role=AgentRole.FINAL_DECISION,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        action_summary=action_application.summary,
+    )
+    assert packet.evidence_health is not None
+    issue_codes = {issue.code for issue in packet.evidence_health.issues}
+
+    assert "needs_review_actions" in issue_codes
+    assert "needs_review_cited" in issue_codes
+
+
+def test_build_agent_input_packet_carries_v3_context_without_provider_metadata() -> None:
     evidence_a = _evidence("ev_cap_a", "Valuation cap $8M.").model_copy(
         update={
             "provider_id": "sec",
@@ -143,6 +281,12 @@ def test_build_agent_input_packet_carries_v2_context_without_provider_metadata()
 
     assert packet.score_factors
     assert packet.triggered_kill_gates
+    assert packet.evidence_health is not None
+    assert packet.evidence_health.evidence_count == 2
+    assert packet.scoring_support is not None
+    assert packet.scoring_support.deterministic_recommendation == scored_deal.recommendation
+    assert packet.scoring_support.score_factors
+    assert packet.scoring_support.triggered_kill_gates
     assert packet.conflicts[0].evidence_ids == ["ev_cap_a", "ev_cap_b"]
     assert packet.packet_limitations
     assert any(
@@ -334,6 +478,14 @@ def test_build_agent_input_packet_caps_cited_evidence_records() -> None:
 
     assert len(packet.evidence) == 50
     assert packet.allowed_evidence_ids == [f"ev_{index}" for index in range(50)]
+    assert packet.scoring_support is not None
+    large_factor = packet.scoring_support.score_factors[0]
+    assert large_factor.selected_evidence_ids == [f"ev_{index}" for index in range(50)]
+    assert large_factor.omitted_evidence_count == 10
+    assert any(
+        "omitted 10 deterministic scoring support" in item
+        for item in packet.packet_limitations
+    )
 
 
 def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_records() -> None:
@@ -385,14 +537,28 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
     assert packet.score.net_return.gross_exit_value is None
     assert packet.score.net_return.net_return_multiple is None
     assert packet.score.net_return.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert packet.scoring_support is not None
+    assert packet.scoring_support.net_return_support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert "packet evidence for return math" in packet.scoring_support.net_return_missing_inputs
+    valuation_support = next(
+        factor
+        for factor in packet.scoring_support.score_factors
+        if factor.name == "Valuation and net return"
+    )
+    assert valuation_support.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert valuation_support.missing_inputs == ["packet evidence for return math"]
     assert "packet evidence for return math" in packet.score.net_return.missing_inputs
     valuation_factor = packet.score_factors[0]
     assert valuation_factor.name == "Valuation and net return"
     assert valuation_factor.score == 0
+    assert valuation_factor.omitted_evidence_count == 1
     assert valuation_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
     assert valuation_factor.missing_inputs == ["packet evidence for return math"]
     assert "95x" not in valuation_factor.explanation
     assert "$1B" not in valuation_factor.explanation
+    assert packet.scoring_support is not None
+    assert packet.scoring_support.net_return_selected_evidence_ids == ["ev_return_0"]
+    assert packet.scoring_support.net_return_omitted_evidence_count == 1
 
 
 def test_build_agent_input_packet_clears_return_math_when_support_text_is_truncated() -> None:
