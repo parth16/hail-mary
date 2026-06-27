@@ -161,6 +161,7 @@ class EvidenceActionApplication:
     summary: EvidenceActionSummary
     excluded_evidence_ids: set[str]
     excluded_claim_ids: set[str]
+    packet_quote_only_evidence_ids: set[str]
 
 
 @dataclass(frozen=True)
@@ -408,20 +409,20 @@ def apply_evidence_actions(
         if state.status == EvidenceActionStatus.EXCLUDED
     }
     store_evidence_ids = {evidence.id for evidence in store.evidence}
-    evidence_ids_cited_by_excluded_claims = {
+    packet_quote_only_evidence_ids = {
         citation.evidence_id
         for claim in store.claims
         if claim.id in excluded_claim_ids
         for citation in claim.citations
         if citation.evidence_id in store_evidence_ids
     }
-    excluded_evidence_ids.update(evidence_ids_cited_by_excluded_claims)
     if not excluded_evidence_ids and not excluded_claim_ids:
         return EvidenceActionApplication(
             store=store,
             summary=summary,
             excluded_evidence_ids=set(),
             excluded_claim_ids=set(),
+            packet_quote_only_evidence_ids=set(),
         )
 
     remaining_evidence = [
@@ -447,6 +448,8 @@ def apply_evidence_actions(
         summary=summary,
         excluded_evidence_ids=excluded_evidence_ids,
         excluded_claim_ids=excluded_claim_ids,
+        packet_quote_only_evidence_ids=packet_quote_only_evidence_ids
+        - excluded_evidence_ids,
     )
 
 

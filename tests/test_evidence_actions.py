@@ -131,7 +131,9 @@ def test_last_action_wins_and_excluded_evidence_filters_claims(tmp_path: Path) -
     assert [claim.id for claim in application.store.claims] == ["claim_terms"]
 
 
-def test_excluded_claim_filters_its_cited_evidence(tmp_path: Path) -> None:
+def test_excluded_claim_preserves_evidence_for_packet_quote_suppression(
+    tmp_path: Path,
+) -> None:
     config = _config(tmp_path)
     store = _store()
     write_action_log(
@@ -152,8 +154,12 @@ def test_excluded_claim_filters_its_cited_evidence(tmp_path: Path) -> None:
     application = apply_evidence_actions(config=config, store=store)
 
     assert application.excluded_claim_ids == {"claim_terms"}
-    assert application.excluded_evidence_ids == {"ev_terms"}
-    assert [evidence.id for evidence in application.store.evidence] == ["ev_traction"]
+    assert application.excluded_evidence_ids == set()
+    assert application.packet_quote_only_evidence_ids == {"ev_terms"}
+    assert [evidence.id for evidence in application.store.evidence] == [
+        "ev_traction",
+        "ev_terms",
+    ]
     assert [claim.id for claim in application.store.claims] == ["claim_traction"]
 
 

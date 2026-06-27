@@ -146,3 +146,4 @@ Rules for all future Codex runs:
 - PR #64 loop 1: Final-decision committee context must preserve citation quote whitespace while bounding length, and packet scoring-support context should mirror packet-sanitized score factors and net-return support after evidence caps or truncation.
 - PR #63: Final memo tables must escape every dynamic cell, keep model-only findings display-only, and derive evidence quality, missing data, diligence ranking, portfolio impact, and return math from deterministic source-linked state.
 - PR #67 loop 1: Evidence action write paths must validate generated-data folders before saving local notes, review output must expose claim IDs when actions accept claim IDs, and excluding a claim should suppress its cited evidence from model packets.
+- PR #67 loop 2: Claim-level exclusions should not remove shared evidence needed by surviving claims; keep scoring-store filtering separate from packet excerpt suppression.

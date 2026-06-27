@@ -108,7 +108,7 @@ def test_build_agent_input_packet_uses_validated_evidence_ids_only() -> None:
     }
 
 
-def test_build_agent_input_packet_omits_evidence_cited_by_excluded_claim(
+def test_build_agent_input_packet_quote_suppresses_excluded_claim_text(
     tmp_path: Path,
 ) -> None:
     config = AppConfig(data_dir=tmp_path / "data")
@@ -130,7 +130,8 @@ def test_build_agent_input_packet_omits_evidence_cited_by_excluded_claim(
             ],
         ),
     )
-    filtered_store = apply_evidence_actions(config=config, store=store).store
+    action_application = apply_evidence_actions(config=config, store=store)
+    filtered_store = action_application.store
     scored_deal = score_evidence_store(filtered_store, config=config)
 
     packet = build_agent_input_packet(
@@ -138,12 +139,14 @@ def test_build_agent_input_packet_omits_evidence_cited_by_excluded_claim(
         scored_deal,
         role=AgentRole.FINANCING_NEXT_ROUND_RISK,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
     )
-    packet_json = packet.model_dump_json()
+    terms_evidence = next(evidence for evidence in packet.evidence if evidence.id == "ev_terms")
 
-    assert "ev_terms" not in packet.allowed_evidence_ids
+    assert "ev_terms" in packet.allowed_evidence_ids
     assert "claim_valuation_cap_usd8m" not in {claim.id for claim in packet.verified_claims}
-    assert "Valuation cap $8M. Discount 20%. Round size $1M." not in packet_json
+    assert terms_evidence.text == "20%\n...\n$1M"
+    assert "$8M" not in terms_evidence.text
 
 
 def test_build_agent_input_packet_carries_v3_context_without_provider_metadata() -> None:
