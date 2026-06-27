@@ -216,7 +216,7 @@ NEGATED_FUNDING_PATTERNS = (
     re.compile(
         r"\b(?:planned|projected|expected|future|upcoming|target|targeted)\s+"
         r"(?:lead\s+investor|institutional(?:\s+investors?)?|"
-        r"series\s+a|seed|follow[-\s]?on)\b",
+        r"follow[-\s]?on)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -321,6 +321,7 @@ def score_evidence_store(
         platform_minimum_check=platform_minimum_check,
         capital_remaining=available_capital,
         valuation_risk=valuation_risk,
+        net_return=net_return,
         valuation_evidence_ids=_valuation_gate_evidence_ids(
             store,
             verified_claims,
@@ -496,6 +497,7 @@ def _kill_gates(
     platform_minimum_check: int | None,
     capital_remaining: int,
     valuation_risk: ValuationRisk,
+    net_return: NetReturnEstimate,
     valuation_evidence_ids: list[str],
 ) -> list[KillGate]:
     minimum_above_maximum = (
@@ -518,6 +520,12 @@ def _kill_gates(
     missing_key_terms_evidence_ids = _missing_key_terms_evidence_ids(verified_claims)
     missing_key_terms = has_scorable_deal and not has_pricing_term
     valuation_too_high = has_scorable_deal and valuation_risk == ValuationRisk.HIGH
+    low_verified_return = (
+        has_scorable_deal
+        and net_return.support_status == ScoreSupportStatus.VERIFIED
+        and net_return.net_return_multiple is not None
+        and net_return.net_return_multiple < 1
+    )
     conflict_evidence_ids = _conflict_evidence_ids(store, valid_conflicts)
     return [
         KillGate(
@@ -598,6 +606,21 @@ def _kill_gates(
             support_status=(
                 ScoreSupportStatus.VERIFIED
                 if valuation_too_high
+                else ScoreSupportStatus.INFERRED
+            ),
+        ),
+        KillGate(
+            name="Verified return below capital back",
+            triggered=low_verified_return,
+            reason=(
+                "Verified return math is below 1x capital back."
+                if low_verified_return
+                else "Verified return math is not below 1x capital back."
+            ),
+            evidence_ids=net_return.evidence_ids,
+            support_status=(
+                ScoreSupportStatus.VERIFIED
+                if low_verified_return
                 else ScoreSupportStatus.INFERRED
             ),
         ),
@@ -1207,8 +1230,8 @@ def _net_return_estimate(
     else:
         explanation = (
             f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
-            f"Using cited dilution, fees or carry, and exit value, estimated net return "
-            f"is {net_multiple:g}x."
+            f"Using cited ownership, dilution, fees or carry, and exit value, "
+            f"estimated net return is {net_multiple:g}x."
         )
         support_status = ScoreSupportStatus.VERIFIED
 
@@ -1254,8 +1277,10 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
     for record in evidence:
         ownership_match = RETURN_INPUT_PATTERNS["ownership"].search(record.text)
         if ownership_percent is None and ownership_match:
-            ownership_percent = _float_text(ownership_match.group("value"))
-            evidence_ids.append(record.id)
+            parsed_ownership = _float_text(ownership_match.group("value"))
+            if parsed_ownership is not None and 0 <= parsed_ownership <= 100:
+                ownership_percent = parsed_ownership
+                evidence_ids.append(record.id)
         dilution_match = RETURN_INPUT_PATTERNS["dilution"].search(record.text)
         if dilution_percent is None and dilution_match:
             dilution_percent = _float_text(dilution_match.group("value"))

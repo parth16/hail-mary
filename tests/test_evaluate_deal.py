@@ -291,8 +291,8 @@ def test_evaluate_deal_final_memo_v2_sections_keep_decision_first(
         body=(
             "Valuation cap $8M. Discount 20%. Round size $1M. "
             "Seed round is active. ARR revenue growth with paid customers and retention. "
-            "Lead investor committed. Estimated dilution 20%. Platform fees 2%. "
-            "Carry 20%. Gross exit value $100M."
+            "Lead investor committed. Investor ownership 20%. Estimated dilution 20%. "
+            "Platform fees 2%. Carry 20%. Gross exit value $100M."
         ),
     )
 
@@ -317,6 +317,8 @@ def test_evaluate_deal_final_memo_v2_sections_keep_decision_first(
     assert "| Rank | Source | Question | Reason | Evidence IDs |" in memo_text
     assert "Unsupported or model-only findings may be shown as diligence notes" in memo_text
     assert "Gross exit value" in memo_text
+    assert "Ownership" in memo_text
+    assert "cited ownership" in memo_text
     assert "Net return multiple" in memo_text
 
 

@@ -2063,8 +2063,9 @@ def _net_return_detail_lines(scored_deal: ScoredDeal) -> list[str]:
         )
     else:
         intro = (
-            "Hail Mary estimated net return as gross exit value divided by entry "
-            "valuation, adjusted for dilution and fees or carry."
+            "Hail Mary estimated net return as gross exit value multiplied by "
+            "cited ownership, divided by entry valuation, and adjusted for dilution "
+            "and fees or carry."
         )
     lines = [f"- {intro} {_memo_text(net_return.explanation)}"]
     lines.extend(
@@ -2072,6 +2073,10 @@ def _net_return_detail_lines(scored_deal: ScoredDeal) -> list[str]:
             ["Return input", "Value"],
             [
                 ["Entry valuation", _money_or_unknown(net_return.entry_valuation)],
+                [
+                    "Ownership",
+                    _percent_or_unknown(net_return.estimated_ownership_percent),
+                ],
                 ["Gross exit value", _money_or_unknown(net_return.gross_exit_value)],
                 ["Dilution", _percent_or_unknown(net_return.estimated_dilution_percent)],
                 [
