@@ -110,7 +110,7 @@ STAGE_NEGATED_PATTERNS = (
 RETURN_INPUT_PATTERNS = {
     "ownership": re.compile(
         r"\b(?:(?:investor|investment|spv|fund|platform|check|our|target|"
-        r"expected|estimated|post[-\s]?money|pro[-\s]?forma)\s+ownership|"
+        r"post[-\s]?money|pro[-\s]?forma)\s+ownership|"
         r"ownership\s+(?:target|for\s+(?:our\s+)?(?:check|investment|"
         r"investor|spv|fund|platform)))\b"
         r"\s*(?:is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
@@ -210,6 +210,7 @@ NEGATED_TRACTION_PATTERNS = (
     ),
 )
 BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
+BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 NEGATED_FUNDING_PATTERNS = (
     re.compile(
         r"\b(?:planned|projected|expected|future|upcoming|target|targeted)\s+"
@@ -257,8 +258,18 @@ NEGATED_FUNDING_PATTERNS = (
         rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
         re.IGNORECASE,
     ),
-    re.compile(r"\bno\s+institutional(?:\s+(?:investors?|follow[-\s]?on))?\b", re.IGNORECASE),
-    re.compile(r"\bwithout\s+institutional(?:\s+investors?)?\b", re.IGNORECASE),
+    re.compile(
+        r"\bno\s+institutional"
+        rf"(?!(?:\s+investors?)?\s+{BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS}\b)"
+        r"(?:\s+(?:investors?|follow[-\s]?on))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bwithout\s+institutional"
+        rf"(?!(?:\s+investors?)?\s+{BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS}\b)"
+        r"(?:\s+investors?)?\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bno\s+(?:seed|follow[-\s]?on)(?:\s+\w+){0,3}\b", re.IGNORECASE),
     re.compile(r"\bno\s+(?:\w+\s+){0,3}follow[-\s]?on\b", re.IGNORECASE),
 )
@@ -818,13 +829,16 @@ def _fundability_factor(
     }
     positive_funding_evidence = _positive_funding_evidence(store.evidence)
     negative_funding_evidence = _negative_funding_evidence(store.evidence)
-    matched_evidence = list(
-        {
-            evidence.id: evidence
-            for evidence in [*positive_funding_evidence, *negative_funding_evidence]
-        }.values()
-    )
+    positive_traction_evidence = _positive_traction_evidence(store.evidence)
     positive_funding_is_stale_only = _all_records_stale(positive_funding_evidence)
+    positive_traction_is_stale_only = _all_records_stale(positive_traction_evidence)
+    matched_evidence = _dedupe_evidence_records(
+        [
+            *positive_funding_evidence,
+            *negative_funding_evidence,
+            *(positive_traction_evidence if positive_traction_is_stale_only else []),
+        ]
+    )
     missing_inputs: list[str] = []
     if not positive_funding_evidence:
         missing_inputs.append(
@@ -842,7 +856,7 @@ def _fundability_factor(
         missing_inputs.append("verified deal terms")
     if pmf_level != PMFLevel.DEVELOPING:
         missing_inputs.append("customer, revenue, retention, or usage evidence")
-    elif _all_records_stale(_positive_traction_evidence(store.evidence)):
+    elif positive_traction_is_stale_only:
         missing_inputs.append("current customer, revenue, retention, or usage evidence")
     explanation = f"Next-round fundability risk is {fundability_risk}."
     if negative_funding_evidence and positive_funding_evidence:
@@ -859,6 +873,11 @@ def _fundability_factor(
     elif positive_funding_is_stale_only:
         explanation = (
             "Next-round fundability risk is high because funding support appears only "
+            "in stale evidence."
+        )
+    elif positive_traction_is_stale_only:
+        explanation = (
+            "Next-round fundability risk is high because traction support appears only "
             "in stale evidence."
         )
     return ScoreFactor(
@@ -890,7 +909,10 @@ def _valuation_net_return_factor(
         ValuationRisk.LOW: 13,
     }
     score = score_by_risk[valuation_risk]
-    if net_return.net_return_multiple is not None:
+    if (
+        net_return.net_return_multiple is not None
+        and net_return.support_status == ScoreSupportStatus.VERIFIED
+    ):
         if net_return.net_return_multiple >= 10:
             score += 7
         elif net_return.net_return_multiple >= 5:
@@ -1148,7 +1170,8 @@ def _net_return_estimate(
 
     net_multiple: float | None = None
     if (
-        return_inputs.dilution_percent is not None
+        return_inputs.ownership_percent is not None
+        and return_inputs.dilution_percent is not None
         and return_inputs.fees_and_carry_percent is not None
         and return_inputs.gross_exit_value is not None
         and entry_valuation > 0
@@ -1166,13 +1189,6 @@ def _net_return_estimate(
         explanation = (
             f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
             f"Missing {', '.join(missing_inputs)}, so Hail Mary did not invent a net return."
-        )
-        support_status = ScoreSupportStatus.NEEDS_DILIGENCE
-    elif return_inputs.ownership_percent is None:
-        explanation = (
-            f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
-            f"Using cited dilution, fees or carry, and exit value, estimated net return "
-            f"is {net_multiple:g}x. Ownership is still missing for check-size diligence."
         )
         support_status = ScoreSupportStatus.NEEDS_DILIGENCE
     else:
@@ -1771,6 +1787,10 @@ def _positive_traction_evidence(evidence: list[EvidenceRecord]) -> list[Evidence
             negated_patterns=NEGATED_TRACTION_PATTERNS,
         )
     ]
+
+
+def _dedupe_evidence_records(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
+    return list({record.id: record for record in evidence}.values())
 
 
 def _positive_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:

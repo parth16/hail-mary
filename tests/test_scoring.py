@@ -704,14 +704,24 @@ def test_net_return_math_adds_round_size_to_pre_money_valuation() -> None:
     assert scored.net_return.evidence_ids == ["ev_valuation", "ev_round", "ev_return"]
 
 
-def test_net_return_math_ignores_founder_ownership_as_check_input() -> None:
+@pytest.mark.parametrize(
+    "ownership_text",
+    [
+        "Founder ownership 60%.",
+        "Employee estimated ownership 10%.",
+    ],
+)
+def test_net_return_math_ignores_cap_table_ownership_as_check_input(
+    ownership_text: str,
+) -> None:
     evidence = [
         _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
         _evidence(
             "ev_return",
-            "Founder ownership 60%. Estimated dilution 20%. SPV expenses 5%. "
+            f"{ownership_text} Estimated dilution 20%. SPV expenses 5%. "
             "Carry 20%. Exit value $1B.",
         ),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
     ]
     claims = [
         _claim("valuation cap", "$8M", "ev_terms"),
@@ -725,7 +735,9 @@ def test_net_return_math_ignores_founder_ownership_as_check_input() -> None:
     )
 
     assert scored.net_return.estimated_ownership_percent is None
+    assert scored.net_return.net_return_multiple is None
     assert "ownership" in scored.net_return.missing_inputs
+    assert _score_factor(scored, "Valuation and net return").score == 13
 
 
 def test_net_return_math_needs_round_size_for_pre_money_valuation() -> None:
@@ -1581,6 +1593,35 @@ def test_score_evidence_store_treats_mixed_funding_as_high_risk() -> None:
     )
 
 
+def test_fundability_factor_cites_stale_traction_when_it_drives_risk() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_traction",
+            "ARR revenue growth with paid customers and retention.",
+            source_freshness=SourceFreshness.STALE,
+        ),
+        _evidence("ev_funding", "Lead investor committed."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    fundability_factor = _score_factor(scored, "Next-round fundability")
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+    assert fundability_factor.evidence_ids == ["ev_funding", "ev_traction"]
+    assert "current customer, revenue, retention, or usage evidence" in (
+        fundability_factor.missing_inputs
+    )
+
+
 def test_score_evidence_store_ignores_qualified_negated_funding_language() -> None:
     evidence = [
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
@@ -1700,6 +1741,35 @@ def test_score_evidence_store_keeps_benign_lead_investor_concern_phrases(
     assert _score_factor(scored, "Next-round fundability").evidence_ids == [
         "ev_funding"
     ]
+
+
+def test_score_evidence_store_keeps_benign_institutional_concern_phrases() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers."),
+        _evidence(
+            "ev_funding",
+            "Institutional investor committed. No institutional investor concerns.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    fundability_factor = _score_factor(scored, "Next-round fundability")
+    assert scored.fundability_risk == FundabilityRisk.LOW
+    assert fundability_factor.evidence_ids == ["ev_funding"]
+    assert (
+        "resolved lead investor, institutional investor, or follow-on financing conflict"
+        not in fundability_factor.missing_inputs
+    )
 
 
 def test_score_evidence_store_cites_early_pmf_evidence() -> None:
