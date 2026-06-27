@@ -819,7 +819,7 @@ def _collection_status(
     if _warnings_indicate_incomplete_search(warnings):
         return ResearchProviderRunStatus.INCOMPLETE_SEARCH
     if result_count > 0:
-        return ResearchProviderRunStatus.IMPORTED
+        return ResearchProviderRunStatus.PLANNED
     if no_result_companies:
         return ResearchProviderRunStatus.NO_EXACT_RESULTS
     return ResearchProviderRunStatus.NOT_RUN
@@ -846,9 +846,7 @@ def _web_provider_statuses(
         no_result_companies: list[str] = []
         if warnings:
             status = ResearchProviderRunStatus.FAILED
-        elif fetched_count > 0:
-            status = ResearchProviderRunStatus.IMPORTED
-        elif planned_count > 0:
+        elif fetched_count > 0 or planned_count > 0:
             status = ResearchProviderRunStatus.PLANNED
         elif skipped_count > 0:
             status = (
@@ -988,17 +986,9 @@ def _research_workflow_summary(
             status = ResearchProviderStatusSummary(
                 provider_id=source_id,
                 provider_name=preview.input_path.name,
-                status=ResearchProviderRunStatus.IMPORTED,
+                status=ResearchProviderRunStatus.PLANNED,
             )
-        statuses[source_id] = status.model_copy(
-            update={
-                "status": _merge_provider_status(
-                    status.status,
-                    ResearchProviderRunStatus.IMPORTED,
-                ),
-                "imported_count": status.imported_count + preview.imported_count,
-            }
-        )
+        statuses[source_id] = status
 
     provider_statuses = list(statuses.values())
     warning_count = sum(1 for issue in workflow.issues if issue.severity == "warning")

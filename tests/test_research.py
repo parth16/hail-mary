@@ -490,9 +490,9 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
         for status in result.summary.provider_statuses
         if status.provider_id == "company_website"
     )
-    assert company_website_status.status == ResearchProviderRunStatus.IMPORTED
+    assert company_website_status.status == ResearchProviderRunStatus.PLANNED
     assert company_website_status.collected_count == 1
-    assert company_website_status.imported_count == 1
+    assert company_website_status.imported_count == 0
     sam_status = next(
         status
         for status in result.summary.provider_statuses
@@ -683,7 +683,7 @@ def test_run_research_workflow_reports_local_public_skips_and_no_results(
     )
     assert local_public.result_count == 1
     assert local_public.skipped_non_exact_company_names == ["Acme AI Holdings"]
-    assert local_public.status == ResearchProviderRunStatus.IMPORTED
+    assert local_public.status == ResearchProviderRunStatus.PLANNED
     assert {match.kind for match in local_public.match_details} == {
         CompanyMatchKind.EXACT,
         CompanyMatchKind.RELATED,
@@ -695,7 +695,7 @@ def test_run_research_workflow_reports_local_public_skips_and_no_results(
     assert result.summary.failed_provider_count == 0
     assert any(
         status.provider_id == "local_public"
-        and status.status == ResearchProviderRunStatus.IMPORTED
+        and status.status == ResearchProviderRunStatus.PLANNED
         for status in result.summary.provider_statuses
     )
     operator_lines = " ".join(
@@ -6648,6 +6648,7 @@ def test_import_research_results_requires_plain_english_licensing_notes(
         ("todo", "not a placeholder"),
         ("https://example.com/license", "not only provide a URL"),
         ("[license](https://example.com/license)", "not only contain Markdown"),
+        ("[license](https://example.com/license).", "not only contain Markdown"),
     ],
 )
 def test_import_research_results_rejects_placeholder_or_markdown_only_licensing_notes(

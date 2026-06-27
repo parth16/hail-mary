@@ -618,7 +618,8 @@ def _validate_licensing_notes(
     markdown_stripped = re.sub(r"\[[^\]]+\]\([^)]+\)", "", saved_notes)
     markdown_stripped = re.sub(r"(?m)^\s*[-*#>`_~\s]+", "", markdown_stripped)
     markdown_stripped = re.sub(r"[*_~`#>\-\s]+", "", markdown_stripped)
-    if ("[" in saved_notes or "](" in saved_notes) and not markdown_stripped:
+    markdown_plain_text = re.sub(r"[\W_]+", "", markdown_stripped)
+    if ("[" in saved_notes or "](" in saved_notes) and not markdown_plain_text:
         raise ResearchImportError(
             f"Research result {index} licensing_notes must explain source permissions "
             "in plain English, not only contain Markdown."

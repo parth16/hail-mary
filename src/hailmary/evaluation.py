@@ -1716,6 +1716,10 @@ def _research_provider_status_memo_lines(workflow: ResearchWorkflowRunSummary) -
     lines = ["- Provider statuses:"]
     for status in statuses:
         details: list[str] = []
+        if status.collected_count:
+            details.append(
+                _research_count_phrase(status.collected_count, "ready-to-import result")
+            )
         if status.imported_count:
             details.append(_research_count_phrase(status.imported_count, "imported record"))
         if status.no_exact_result_companies:

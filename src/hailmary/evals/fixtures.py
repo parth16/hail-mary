@@ -1254,8 +1254,8 @@ def run_research_workflow_v4_fixture(work_dir: Path) -> None:
     }
     _expect_equal(
         statuses["local_public"].status,
-        ResearchProviderRunStatus.IMPORTED,
-        "Expected local public-source results to be marked imported after dry-run validation.",
+        ResearchProviderRunStatus.PLANNED,
+        "Expected local public-source results to stay planned after dry-run validation.",
     )
     _expect_equal(
         statuses["sec_form_d"].status,
