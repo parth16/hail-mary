@@ -20,6 +20,14 @@ from hailmary.agents.packets import (
 from hailmary.agents.validation import validate_agent_output
 from hailmary.cli import app
 from hailmary.config import AppConfig
+from hailmary.evidence.actions import (
+    EvidenceActionLog,
+    EvidenceActionRecord,
+    EvidenceActionStatus,
+    EvidenceActionTarget,
+    apply_evidence_actions,
+    write_action_log,
+)
 from hailmary.portfolio import add_portfolio_investment
 from hailmary.schemas.agents import (
     AgentEvidenceReference,
@@ -98,6 +106,44 @@ def test_build_agent_input_packet_uses_validated_evidence_ids_only() -> None:
     assert "post-money valuation" not in {
         claim.label for claim in packet.verified_claims
     }
+
+
+def test_build_agent_input_packet_omits_evidence_cited_by_excluded_claim(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(data_dir=tmp_path / "data")
+    config.data_dir.mkdir()
+    store = _strong_store()
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                EvidenceActionRecord(
+                    action_id="act_exclude_claim",
+                    deal_id=store.deal_id,
+                    target_type=EvidenceActionTarget.CLAIM,
+                    target_id="claim_valuation_cap_usd8m",
+                    status=EvidenceActionStatus.EXCLUDED,
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                )
+            ],
+        ),
+    )
+    filtered_store = apply_evidence_actions(config=config, store=store).store
+    scored_deal = score_evidence_store(filtered_store, config=config)
+
+    packet = build_agent_input_packet(
+        filtered_store,
+        scored_deal,
+        role=AgentRole.FINANCING_NEXT_ROUND_RISK,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    packet_json = packet.model_dump_json()
+
+    assert "ev_terms" not in packet.allowed_evidence_ids
+    assert "claim_valuation_cap_usd8m" not in {claim.id for claim in packet.verified_claims}
+    assert "Valuation cap $8M. Discount 20%. Round size $1M." not in packet_json
 
 
 def test_build_agent_input_packet_carries_v3_context_without_provider_metadata() -> None:

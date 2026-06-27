@@ -1264,6 +1264,7 @@ def _print_deal_evidence_review(
     if external_sources_table is not None:
         console.print(external_sources_table)
     console.print(_claim_review_table(deal_review))
+    console.print(_claim_id_review_table(deal_review))
     console.print(_conflict_review_table(deal_review))
     console.print(_action_review_table(deal_review, show_notes=show_notes))
     if show_notes and deal_review.action_summary is not None:
@@ -1397,6 +1398,49 @@ def _claim_review_table(deal_review: DealEvidenceReview) -> Table:
             _plain(summary.label),
             _plain(_enum_label(summary.verification_status)),
             _plain(str(summary.count)),
+        )
+    return table
+
+
+def _claim_id_review_table(deal_review: DealEvidenceReview) -> Table:
+    table = Table(
+        title="Claim IDs for actions",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Claim ID", style="bold cyan", no_wrap=True)
+    table.add_column("Claim label")
+    table.add_column("Status")
+    table.add_column("Cited evidence IDs", overflow="fold")
+    table.add_column("Action")
+    if not deal_review.claim_records:
+        table.add_row(
+            _plain("No extracted claims"),
+            _plain(""),
+            _plain(""),
+            _plain(""),
+            _plain(""),
+        )
+        return table
+    action_states = (
+        deal_review.action_summary.claim_states
+        if deal_review.action_summary is not None
+        else {}
+    )
+    for claim in deal_review.claim_records:
+        action_state = action_states.get(claim.claim_id)
+        table.add_row(
+            _plain(claim.claim_id),
+            _plain(claim.label),
+            _plain(_enum_label(claim.verification_status)),
+            _plain(", ".join(claim.cited_evidence_ids) or "No cited evidence"),
+            _plain(
+                _action_status_label(action_state.status)
+                if action_state is not None
+                else "no saved action"
+            ),
         )
     return table
 

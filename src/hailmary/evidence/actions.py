@@ -11,7 +11,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from hailmary.config import AppConfig
+from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.evidence.store import refresh_existing_claim_conflicts
 from hailmary.schemas.documents import IngestedDeal, IngestionSummary
 from hailmary.schemas.evidence import EvidenceStore
@@ -294,6 +294,12 @@ def record_evidence_action(
     note: str | None = None,
     created_at: datetime | None = None,
 ) -> EvidenceActionWriteResult:
+    try:
+        config = validate_local_state(config)
+    except ConfigError as exc:
+        raise EvidenceActionError(
+            f"Local generated-data setup failed: {exc}"
+        ) from exc
     context = select_action_context(
         config=config,
         deal_id=deal_id,
@@ -401,6 +407,15 @@ def apply_evidence_actions(
         for claim_id, state in summary.claim_states.items()
         if state.status == EvidenceActionStatus.EXCLUDED
     }
+    store_evidence_ids = {evidence.id for evidence in store.evidence}
+    evidence_ids_cited_by_excluded_claims = {
+        citation.evidence_id
+        for claim in store.claims
+        if claim.id in excluded_claim_ids
+        for citation in claim.citations
+        if citation.evidence_id in store_evidence_ids
+    }
+    excluded_evidence_ids.update(evidence_ids_cited_by_excluded_claims)
     if not excluded_evidence_ids and not excluded_claim_ids:
         return EvidenceActionApplication(
             store=store,

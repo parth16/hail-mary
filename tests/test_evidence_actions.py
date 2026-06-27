@@ -131,6 +131,32 @@ def test_last_action_wins_and_excluded_evidence_filters_claims(tmp_path: Path) -
     assert [claim.id for claim in application.store.claims] == ["claim_terms"]
 
 
+def test_excluded_claim_filters_its_cited_evidence(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = _store()
+    write_action_log(
+        config=config,
+        log=EvidenceActionLog(
+            deal_id=store.deal_id,
+            actions=[
+                _action(
+                    action_id="act_exclude_claim",
+                    target_type=EvidenceActionTarget.CLAIM,
+                    target_id="claim_terms",
+                    status=EvidenceActionStatus.EXCLUDED,
+                ),
+            ],
+        ),
+    )
+
+    application = apply_evidence_actions(config=config, store=store)
+
+    assert application.excluded_claim_ids == {"claim_terms"}
+    assert application.excluded_evidence_ids == {"ev_terms"}
+    assert [evidence.id for evidence in application.store.evidence] == ["ev_traction"]
+    assert [claim.id for claim in application.store.claims] == ["claim_traction"]
+
+
 def test_unknown_evidence_id_is_rejected_before_writing(tmp_path: Path) -> None:
     config = _config(tmp_path)
     _write_ingestion_summary(tmp_path, _store())
@@ -282,11 +308,12 @@ def _action(
     target_id: str,
     status: EvidenceActionStatus,
     note: str | None = None,
+    target_type: EvidenceActionTarget = EvidenceActionTarget.EVIDENCE,
 ) -> EvidenceActionRecord:
     return EvidenceActionRecord(
         action_id=action_id,
         deal_id="deal_action",
-        target_type=EvidenceActionTarget.EVIDENCE,
+        target_type=target_type,
         target_id=target_id,
         status=status,
         created_at=BUILT_AT,

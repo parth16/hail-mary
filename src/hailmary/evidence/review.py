@@ -99,6 +99,14 @@ class ClaimStatusSummary:
 
 
 @dataclass(frozen=True)
+class ClaimReviewRecord:
+    claim_id: str
+    label: str
+    verification_status: VerificationStatus
+    cited_evidence_ids: list[str]
+
+
+@dataclass(frozen=True)
 class ConflictReviewSummary:
     label: str
     status: Literal["active", "stale"]
@@ -119,6 +127,7 @@ class DealEvidenceReview:
     health: EvidenceHealthSummary
     source_documents: list[SourceDocumentEvidenceSummary]
     claim_statuses: list[ClaimStatusSummary]
+    claim_records: list[ClaimReviewRecord]
     conflicts: list[ConflictReviewSummary]
     issues: list[ReviewIssueSummary]
     evidence_records: list[EvidenceRecord]
@@ -237,6 +246,7 @@ def build_deal_evidence_review(
         health=health,
         source_documents=_source_document_summaries(store.evidence, deal.documents),
         claim_statuses=_claim_status_summaries(store),
+        claim_records=_claim_review_records(store),
         conflicts=_conflict_summaries(store),
         issues=health.issues,
         evidence_records=evidence_records,
@@ -545,6 +555,22 @@ def _claim_status_summaries(store: EvidenceStore) -> list[ClaimStatusSummary]:
             key=lambda item: (item[0][0].casefold(), item[0][1].value),
         )
     ]
+
+
+def _claim_review_records(store: EvidenceStore) -> list[ClaimReviewRecord]:
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    records = [
+        ClaimReviewRecord(
+            claim_id=claim.id,
+            label=claim.label,
+            verification_status=_claim_review_status(claim, evidence_by_id),
+            cited_evidence_ids=list(
+                dict.fromkeys(citation.evidence_id for citation in claim.citations)
+            ),
+        )
+        for claim in store.claims
+    ]
+    return sorted(records, key=lambda record: (record.label.casefold(), record.claim_id))
 
 
 def _claim_review_status(

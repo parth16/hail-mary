@@ -683,6 +683,8 @@ def test_review_evidence_single_deal_latest_summary_hides_text_by_default(
     assert "Evidence health summary" in result.output
     assert "Evidence by source document" in result.output
     assert "Claims by label and status" in result.output
+    assert "Claim IDs for actions" in result.output
+    assert "claim_valuation_cap_ev_secret" in result.output
     assert "Evidence text is hidden by default" in result.output
     assert "source span" in result.output
     assert "citation span" in result.output
@@ -843,6 +845,49 @@ def test_evidence_actions_cli_unknown_target_has_plain_english_error(
     assert result.exit_code != 0
     assert "No evidence record missing_ev" in result.output
     assert "Traceback" not in result.output
+
+
+def test_evidence_actions_write_rejects_repo_root_data_dir(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    evidence = _review_evidence_record(
+        "ev_secret",
+        "SECRET CUSTOMER LIST. Valuation cap $8M.",
+        deal_id="deal_secret",
+    )
+    store = _review_store(
+        deal_id="deal_secret",
+        company_name="SecretCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    _write_review_ingestion_summary(tmp_path, [store], data_dir=tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "exclude",
+            "--data-dir",
+            ".",
+            "--deal-id",
+            "deal_secret",
+            "--evidence-id",
+            "ev_secret",
+            "--note",
+            "Keep this private.",
+        ],
+    )
+
+    assert result.exit_code != 0
+    normalized_output = " ".join(result.output.split())
+    assert "Local generated-data setup failed" in normalized_output
+    assert "Choose a generated-data folder" in normalized_output
+    assert "Traceback" not in result.output
+    assert not (tmp_path / "evidence-actions").exists()
 
 
 def test_review_evidence_selects_by_deal_id_company_and_all(tmp_path: Path) -> None:
@@ -1428,8 +1473,9 @@ def _write_review_ingestion_summary(
     stores: list[EvidenceStore],
     *,
     documents_by_deal_id: dict[str, list[IngestedDocument]] | None = None,
+    data_dir: Path | None = None,
 ) -> Path:
-    data_dir = tmp_path / "data"
+    data_dir = data_dir or tmp_path / "data"
     processed_dir = data_dir / "processed"
     processed_dir.mkdir(parents=True)
     deals: list[IngestedDeal] = []
