@@ -2531,7 +2531,10 @@ def _negated_spans(
         for pattern in negated_patterns
         for match in pattern.finditer(text)
     ]
-    if negated_patterns is NEGATED_TRACTION_PATTERNS:
+    if (
+        negated_patterns is NEGATED_TRACTION_PATTERNS
+        or negated_patterns is ABSENCE_TRACTION_PATTERNS
+    ):
         spans.extend(_without_traction_negated_spans(text))
     return spans
 

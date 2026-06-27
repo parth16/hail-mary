@@ -531,6 +531,38 @@ def test_conflicting_traction_creates_high_priority_customer_question() -> None:
     _assert_questions_have_lineage(scored.diligence_questions)
 
 
+def test_without_negative_traction_creates_customer_conflict_question() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_positive_traction",
+            "ARR revenue growth with paid customers and retention.",
+        ),
+        _evidence("ev_negative_traction", "The company operates without customers."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    question = next(
+        question
+        for question in scored.diligence_questions
+        if question.question == "Resolve the conflicting customer traction signals."
+    )
+
+    assert question.supporting_evidence_ids == ["ev_positive_traction"]
+    assert question.conflicting_evidence_ids == ["ev_negative_traction"]
+    assert question.evidence_ids == ["ev_positive_traction", "ev_negative_traction"]
+
+
 def test_conflicting_traction_question_preserves_conflicting_ids_when_support_is_capped() -> None:
     evidence = [
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
