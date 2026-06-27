@@ -499,6 +499,7 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
         update={
             "net_return": NetReturnEstimate(
                 entry_valuation=8_000_000,
+                estimated_ownership_percent=1,
                 estimated_dilution_percent=20,
                 estimated_fees_and_carry_percent=5,
                 gross_exit_value=1_000_000_000,
@@ -532,6 +533,7 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
     assert packet.allowed_evidence_ids == ["ev_return_0"]
     assert packet.score.net_return.evidence_ids == ["ev_return_0"]
     assert packet.score.net_return.entry_valuation is None
+    assert packet.score.net_return.estimated_ownership_percent is None
     assert packet.score.net_return.estimated_dilution_percent is None
     assert packet.score.net_return.estimated_fees_and_carry_percent is None
     assert packet.score.net_return.gross_exit_value is None
@@ -575,6 +577,7 @@ def test_build_agent_input_packet_clears_return_math_when_support_text_is_trunca
         update={
             "net_return": NetReturnEstimate(
                 entry_valuation=8_000_000,
+                estimated_ownership_percent=1,
                 estimated_dilution_percent=20,
                 estimated_fees_and_carry_percent=5,
                 gross_exit_value=1_000_000_000,
@@ -598,6 +601,7 @@ def test_build_agent_input_packet_clears_return_math_when_support_text_is_trunca
     assert "$8M" in packet.evidence[0].text
     assert "Estimated dilution" not in packet.evidence[0].text
     assert packet.score.net_return.entry_valuation == 8_000_000
+    assert packet.score.net_return.estimated_ownership_percent is None
     assert packet.score.net_return.estimated_dilution_percent is None
     assert packet.score.net_return.estimated_fees_and_carry_percent is None
     assert packet.score.net_return.gross_exit_value is None

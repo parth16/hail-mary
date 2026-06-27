@@ -58,6 +58,7 @@ class ScoreSupportStatus(StrEnum):
 
 class NetReturnEstimate(BaseModel):
     entry_valuation: int | None = None
+    estimated_ownership_percent: float | None = None
     estimated_dilution_percent: float | None = None
     estimated_fees_and_carry_percent: float | None = None
     gross_exit_value: int | None = None
