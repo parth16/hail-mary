@@ -82,6 +82,7 @@ class RecordingReviewClient:
         }
         self.calls: list[tuple[AgentInputPacket, tuple[AgentValidationIssue, ...], str]] = []
         self.request_payloads: list[str] = []
+        self.max_output_tokens_by_role: dict[AgentRole, list[int | None]] = {}
 
     def create_review(
         self,
@@ -89,9 +90,13 @@ class RecordingReviewClient:
         *,
         repair_issues: Sequence[AgentValidationIssue] = (),
         committee_context: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> str:
         repair_tuple = tuple(repair_issues)
         self.calls.append((packet, repair_tuple, committee_context or ""))
+        self.max_output_tokens_by_role.setdefault(packet.agent_role, []).append(
+            max_output_tokens
+        )
         self.request_payloads.append(
             json.dumps(
                 openai_review_messages(
@@ -203,6 +208,25 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in serialized_payloads
     assert local_path_text not in serialized_payloads
     assert "input_file" not in serialized_payloads
+    assert all(
+        max_outputs == [None]
+        for max_outputs in fake_client.max_output_tokens_by_role.values()
+    )
+    metadata_paths = sorted(
+        (tmp_path / "data" / "agent-outputs").glob(
+            "*/model-call-metadata/*-attempt-1.json"
+        )
+    )
+    assert metadata_paths
+    serialized_metadata = "\n".join(
+        path.read_text(encoding="utf-8") for path in metadata_paths
+    )
+    assert '"raw_prompt_stored": false' in serialized_metadata
+    assert "estimated_prompt_tokens" in serialized_metadata
+    assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in serialized_metadata
+    assert local_path_text not in serialized_metadata
+    assert "Valuation cap $8M" not in serialized_metadata
+    assert "input_file" not in serialized_metadata
 
 
 @pytest.mark.parametrize(
@@ -289,6 +313,131 @@ def test_evaluate_deal_local_only_succeeds_without_model_env(
     assert "Rule-based scoring means fixed checks over source-linked evidence" in memo_text
     assert "Model review was skipped for this run" in memo_text
     assert "No specialist output passed validation" not in memo_text
+
+
+def test_evaluate_deal_specialist_token_budget_blocks_before_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient()
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            mock_llm=False,
+            llm_specialist_token_budget=1,
+        ),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert [call[0].agent_role for call in client.calls] == [AgentRole.FINAL_DECISION]
+    assert result.failed_specialist_roles == list(evaluation.SPECIALIST_AGENT_ROLES)
+    assert all("token budget" in (item.limitation or "") for item in result.specialist_results)
+    final_packet = client.calls[0][0]
+    assert final_packet.committee_context is not None
+    assert [
+        failed.role for failed in final_packet.committee_context.failed_specialist_roles
+    ] == list(evaluation.SPECIALIST_AGENT_ROLES)
+    assert "token budget" in final_packet.committee_context.failed_specialist_roles[0].limitation
+
+    metadata_payloads = _model_call_metadata_payloads(result.agent_output_dir)
+    blocked_specialists = [
+        payload
+        for payload in metadata_payloads
+        if payload["agent_role"] != AgentRole.FINAL_DECISION
+    ]
+    assert len(blocked_specialists) == len(evaluation.SPECIALIST_AGENT_ROLES)
+    assert {payload["status"] for payload in blocked_specialists} == {"blocked"}
+    assert {payload["failure_reason"] for payload in blocked_specialists} == {
+        "token_budget_exceeded"
+    }
+
+
+def test_evaluate_deal_specialist_cost_budget_blocks_before_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient()
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            mock_llm=False,
+            llm_input_cost_per_million_tokens_cents=1_000_000,
+            llm_output_cost_per_million_tokens_cents=1_000_000,
+            llm_specialist_cost_budget_cents=1,
+        ),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert [call[0].agent_role for call in client.calls] == [AgentRole.FINAL_DECISION]
+    assert result.failed_specialist_roles == list(evaluation.SPECIALIST_AGENT_ROLES)
+    assert all("cost budget" in (item.limitation or "") for item in result.specialist_results)
+    blocked_specialists = [
+        payload
+        for payload in _model_call_metadata_payloads(result.agent_output_dir)
+        if payload["agent_role"] != AgentRole.FINAL_DECISION
+    ]
+    assert len(blocked_specialists) == len(evaluation.SPECIALIST_AGENT_ROLES)
+    assert {payload["status"] for payload in blocked_specialists} == {"blocked"}
+    assert {payload["failure_reason"] for payload in blocked_specialists} == {
+        "cost_budget_exceeded"
+    }
+    assert all(payload["estimated_cost_cents"] is not None for payload in blocked_specialists)
+
+
+def test_evaluate_deal_final_budget_skip_uses_deterministic_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient()
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            mock_llm=False,
+            llm_final_token_budget=1,
+        ),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert AgentRole.FINAL_DECISION not in [call[0].agent_role for call in client.calls]
+    assert result.final_recommendation.recommendation == result.deterministic_score.recommendation
+    assert result.final_recommendation.check_size == result.deterministic_score.check_size
+    assert any("Final Decision model review was skipped" in warning for warning in result.warnings)
+    assert any(
+        "Final Decision model review was skipped" in limitation
+        for limitation in result.operator_limitations
+    )
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Final Decision model review was skipped" in memo_text
+
+    final_metadata = [
+        payload
+        for payload in _model_call_metadata_payloads(result.agent_output_dir)
+        if payload["agent_role"] == AgentRole.FINAL_DECISION
+    ]
+    assert len(final_metadata) == 1
+    assert final_metadata[0]["status"] == "blocked"
+    assert final_metadata[0]["failure_reason"] == "token_budget_exceeded"
 
 
 def test_evaluate_deal_final_memo_v2_sections_keep_decision_first(
@@ -2926,6 +3075,13 @@ def test_evaluate_deal_cli_reports_specialist_failure_without_evidence_text(
     assert "Team Execution model review failed validation" in result.output
     assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
     assert "Valuation cap $8M" not in result.output
+
+
+def _model_call_metadata_payloads(agent_output_dir: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted((agent_output_dir / "model-call-metadata").glob("*.json"))
+    ]
 
 
 def _set_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:

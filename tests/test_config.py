@@ -59,6 +59,49 @@ def test_local_state_uses_owner_only_permissions(
     assert stat.S_IMODE((tmp_path / ".hailmary" / "config.yaml").stat().st_mode) == 0o600
 
 
+def test_model_token_budget_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="model final committee token budget"):
+        create_local_state(
+            AppConfig(data_dir=Path("local-data"), llm_final_token_budget=0),
+            force=True,
+        )
+
+
+def test_model_cost_budget_requires_input_and_output_rates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConfigError, match="both input and output token cost rates"):
+        create_local_state(
+            AppConfig(data_dir=Path("local-data"), llm_specialist_cost_budget_cents=1),
+            force=True,
+        )
+
+
+def test_load_config_reads_model_budget_env_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LLM_SPECIALIST_TOKEN_BUDGET", "3000")
+    monkeypatch.setenv("HAILMARY_LLM_FINAL_MAX_OUTPUT_TOKENS", "700")
+    monkeypatch.setenv("HAILMARY_LLM_INPUT_COST_PER_MILLION_TOKENS_CENTS", "20")
+    monkeypatch.setenv("HAILMARY_LLM_OUTPUT_COST_PER_MILLION_TOKENS_CENTS", "80")
+    monkeypatch.setenv("HAILMARY_LLM_FINAL_COST_BUDGET_CENTS", "5")
+
+    config = load_config(data_dir=Path("local-data"), ignore_saved=True)
+
+    assert config.llm_specialist_token_budget == 3000
+    assert config.llm_final_max_output_tokens == 700
+    assert config.llm_input_cost_per_million_tokens_cents == 20
+    assert config.llm_output_cost_per_million_tokens_cents == 80
+    assert config.llm_final_cost_budget_cents == 5
+
+
 def test_local_state_accepts_research_results_templates_folder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

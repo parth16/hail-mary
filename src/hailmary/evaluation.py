@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from hailmary.agents.packets import (
     DEFAULT_AGENT_ROLES,
+    MAX_PACKET_EVIDENCE_CHARS,
     build_agent_input_packet,
 )
 from hailmary.agents.validation import validate_agent_output
@@ -95,6 +96,9 @@ MAX_COMMITTEE_CONTEXT_TEXT_CHARS = 500
 MAX_COMMITTEE_CONTEXT_QUOTE_CHARS = 240
 MAX_CLI_COMMENTARY_ITEMS = 3
 MAX_CLI_COMMENTARY_CHARS = 220
+TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3
+DEFAULT_RESPONSE_TOKEN_ESTIMATE = 2_000
+MIN_PRIVACY_SOURCE_FRAGMENT_CHARS = 40
 SPECIALIST_AGENT_ROLES: tuple[AgentRole, ...] = tuple(
     role for role in DEFAULT_AGENT_ROLES if role != AgentRole.FINAL_DECISION
 )
@@ -114,6 +118,45 @@ class EvaluationError(RuntimeError):
     """End-to-end deal evaluation could not continue safely."""
 
 
+class ModelReviewCallError(EvaluationError):
+    """A model call was unavailable or blocked before usable output was returned."""
+
+
+@dataclass(frozen=True)
+class AgentReviewResponse:
+    raw_output: str
+    provider: str | None = None
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class ModelRequestPrivacyContext:
+    forbidden_fragments: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ModelCallPlan:
+    provider: str
+    model: str
+    messages: list[dict[str, str]]
+    estimated_prompt_tokens: int
+    estimated_response_tokens: int
+    estimated_total_tokens: int
+    configured_token_budget: int | None
+    configured_max_output_tokens: int | None
+    max_output_tokens: int | None
+    configured_cost_budget_cents: int | None
+    input_cost_per_million_tokens_cents: int | None
+    output_cost_per_million_tokens_cents: int | None
+    estimated_cost_cents: str | None
+    estimated_cost_millionths_of_cent: int | None
+    block_reason: str | None = None
+    block_message: str | None = None
+
+
 class AgentReviewClient(Protocol):
     def create_review(
         self,
@@ -121,8 +164,9 @@ class AgentReviewClient(Protocol):
         *,
         repair_issues: Sequence[AgentValidationIssue] = (),
         committee_context: str | None = None,
-    ) -> str:
-        """Return raw JSON text for one agent review."""
+        max_output_tokens: int | None = None,
+    ) -> AgentReviewResponse | str:
+        """Return model response metadata and raw JSON text for one agent review."""
 
 
 @dataclass(frozen=True)
@@ -546,41 +590,70 @@ class OpenAIAgentReviewClient:
         *,
         repair_issues: Sequence[AgentValidationIssue] = (),
         committee_context: str | None = None,
-    ) -> str:
+        max_output_tokens: int | None = None,
+    ) -> AgentReviewResponse:
+        request_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "input": openai_review_messages(
+                packet,
+                repair_issues=repair_issues,
+                committee_context=committee_context,
+            ),
+            "text_format": AgentReviewOutput,
+            "store": False,
+        }
+        if max_output_tokens is not None:
+            request_kwargs["max_output_tokens"] = max_output_tokens
         try:
-            response = self._client.responses.parse(
-                model=self.model,
-                input=openai_review_messages(
-                    packet,
-                    repair_issues=repair_issues,
-                    committee_context=committee_context,
-                ),
-                text_format=AgentReviewOutput,
-                store=False,
-            )
+            response = self._client.responses.parse(**request_kwargs)
         except Exception as exc:
-            raise EvaluationError(
+            raise ModelReviewCallError(
                 f"OpenAI review call failed for {packet.agent_role}: {exc}"
             ) from exc
 
+        usage = getattr(response, "usage", None)
         output_text = getattr(response, "output_text", None)
         if isinstance(output_text, str) and output_text.strip():
-            return output_text
+            return AgentReviewResponse(
+                raw_output=output_text,
+                provider="openai",
+                model=self.model,
+                input_tokens=_usage_token_count(usage, "input_tokens"),
+                output_tokens=_usage_token_count(usage, "output_tokens"),
+                total_tokens=_usage_token_count(usage, "total_tokens"),
+            )
 
         output_parsed = getattr(response, "output_parsed", None)
         if isinstance(output_parsed, AgentReviewOutput):
-            return output_parsed.model_dump_json(indent=2)
+            return AgentReviewResponse(
+                raw_output=output_parsed.model_dump_json(indent=2),
+                provider="openai",
+                model=self.model,
+                input_tokens=_usage_token_count(usage, "input_tokens"),
+                output_tokens=_usage_token_count(usage, "output_tokens"),
+                total_tokens=_usage_token_count(usage, "total_tokens"),
+            )
         if output_parsed is not None:
             try:
-                return AgentReviewOutput.model_validate(output_parsed).model_dump_json(indent=2)
+                raw_output = AgentReviewOutput.model_validate(output_parsed).model_dump_json(
+                    indent=2
+                )
+                return AgentReviewResponse(
+                    raw_output=raw_output,
+                    provider="openai",
+                    model=self.model,
+                    input_tokens=_usage_token_count(usage, "input_tokens"),
+                    output_tokens=_usage_token_count(usage, "output_tokens"),
+                    total_tokens=_usage_token_count(usage, "total_tokens"),
+                )
             except ValidationError as exc:
                 detail = _validation_error_detail(exc)
-                raise EvaluationError(
+                raise ModelReviewCallError(
                     f"OpenAI returned structured data that Hail Mary could not read. "
                     f"First problem: {detail}"
                 ) from exc
 
-        raise EvaluationError(
+        raise ModelReviewCallError(
             f"OpenAI response for {packet.agent_role} did not include JSON text."
         )
 
@@ -645,11 +718,12 @@ def evaluate_deal_folder(
     mode = _evaluation_mode(config)
     _stage(stage_callback, f"mode selection - {mode.explanation}")
     review_client: AgentReviewClient | None = None
+    llm_settings: LLMSettings | None = None
     if mode.model_backed:
-        settings = load_llm_settings(config)
+        llm_settings = load_llm_settings(config)
         review_client = model_client or OpenAIAgentReviewClient(
-            model=settings.model,
-            api_key=settings.api_key,
+            model=llm_settings.model,
+            api_key=llm_settings.api_key,
         )
 
     _stage(stage_callback, "ingestion")
@@ -713,6 +787,9 @@ def evaluate_deal_folder(
     if mode.model_backed:
         if review_client is None:
             raise EvaluationError("Model-backed evaluation could not start a model client.")
+        if llm_settings is None:
+            raise EvaluationError("Model-backed evaluation could not load model settings.")
+        privacy_context = _model_request_privacy_context(deal.documents)
         _stage(stage_callback, "model review preparation")
         packet_files = _write_agent_packets(
             store,
@@ -740,6 +817,9 @@ def evaluate_deal_folder(
                 packet_paths_by_role=packet_paths_by_role,
                 output_dir=output_dir,
                 max_concurrency=max_concurrency,
+                config=config,
+                llm_settings=llm_settings,
+                privacy_context=privacy_context,
             )
 
             _stage(stage_callback, "final model review")
@@ -768,20 +848,40 @@ def evaluate_deal_folder(
                 output_dir=output_dir,
                 committee_context=_committee_context_text(committee_context),
                 fail_on_model_error=True,
+                config=config,
+                llm_settings=llm_settings,
+                privacy_context=privacy_context,
             )
             if final_result.output is None:
-                raise EvaluationError(
-                    "The final model review did not pass validation after one repair attempt. "
-                    "Hail Mary did not write a final memo."
+                if final_result.failed and final_result.limitation:
+                    final_output, guarded_decision = _rule_based_final_decision(
+                        scored_deal,
+                        store,
+                        mode=EvaluationMode(
+                            name="model-backed",
+                            model_backed=False,
+                            explanation=mode.explanation,
+                            limitation=final_result.limitation,
+                        ),
+                        quote_only_evidence_ids=(
+                            action_application.packet_quote_only_evidence_ids
+                        ),
+                    )
+                    final_review_was_model = False
+                else:
+                    raise EvaluationError(
+                        "The final model review did not pass validation after one repair "
+                        "attempt. Hail Mary did not write a final memo."
+                    )
+            else:
+                final_output = final_result.output
+                guarded_decision = _guard_final_decision(
+                    scored_deal,
+                    store,
+                    final_output,
+                    quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
                 )
-            final_output = final_result.output
-            guarded_decision = _guard_final_decision(
-                scored_deal,
-                store,
-                final_output,
-                quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
-            )
-            final_review_was_model = True
+                final_review_was_model = True
         else:
             _stage(stage_callback, "final decision")
             specialist_results = []
@@ -1532,6 +1632,346 @@ def _packet_from_file(path: Path) -> AgentInputPacket:
         ) from exc
 
 
+def _create_review_with_controls(
+    client: AgentReviewClient,
+    *,
+    packet: AgentInputPacket,
+    config: AppConfig,
+    llm_settings: LLMSettings,
+    privacy_context: ModelRequestPrivacyContext,
+    output_dir: Path,
+    attempt: int,
+    repair_issues: Sequence[AgentValidationIssue],
+    committee_context: str | None,
+) -> tuple[AgentReviewResponse, ModelCallPlan]:
+    call_plan = _model_call_plan(
+        packet,
+        config=config,
+        llm_settings=llm_settings,
+        repair_issues=repair_issues,
+        committee_context=committee_context,
+    )
+    if call_plan.block_message is not None:
+        _write_model_call_metadata(
+            output_dir,
+            packet=packet,
+            attempt=attempt,
+            plan=call_plan,
+            response=None,
+            status="blocked",
+            failure_reason=call_plan.block_reason,
+        )
+        raise ModelReviewCallError(call_plan.block_message)
+
+    privacy_issue = _model_request_privacy_issue(call_plan.messages, privacy_context)
+    if privacy_issue is not None:
+        _write_model_call_metadata(
+            output_dir,
+            packet=packet,
+            attempt=attempt,
+            plan=call_plan,
+            response=None,
+            status="blocked",
+            failure_reason="privacy_check_failed",
+        )
+        raise ModelReviewCallError(privacy_issue)
+
+    try:
+        raw_response = client.create_review(
+            packet,
+            repair_issues=repair_issues,
+            committee_context=committee_context,
+            max_output_tokens=call_plan.max_output_tokens,
+        )
+    except EvaluationError as exc:
+        _write_model_call_metadata(
+            output_dir,
+            packet=packet,
+            attempt=attempt,
+            plan=call_plan,
+            response=None,
+            status="failed",
+            failure_reason="model_call_failed",
+        )
+        raise ModelReviewCallError(str(exc)) from exc
+
+    return _coerce_agent_review_response(
+        raw_response,
+        provider=llm_settings.provider,
+        model=llm_settings.model,
+    ), call_plan
+
+
+def _model_call_plan(
+    packet: AgentInputPacket,
+    *,
+    config: AppConfig,
+    llm_settings: LLMSettings,
+    repair_issues: Sequence[AgentValidationIssue],
+    committee_context: str | None,
+) -> ModelCallPlan:
+    messages = openai_review_messages(
+        packet,
+        repair_issues=repair_issues,
+        committee_context=committee_context,
+    )
+    prompt_tokens = _estimate_message_tokens(messages)
+    token_budget = _role_token_budget(config, packet.agent_role)
+    configured_output_cap = _role_max_output_tokens(config, packet.agent_role)
+    response_tokens = configured_output_cap or DEFAULT_RESPONSE_TOKEN_ESTIMATE
+    estimated_total_tokens = prompt_tokens + response_tokens
+    max_output_tokens = configured_output_cap
+    block_reason: str | None = None
+    block_message: str | None = None
+
+    if token_budget is not None:
+        if estimated_total_tokens > token_budget:
+            block_reason = "token_budget_exceeded"
+            block_message = (
+                f"{_role_title(packet.agent_role)} model review needs about "
+                f"{estimated_total_tokens} tokens before the call, but the configured "
+                f"token budget is {token_budget}. Hail Mary skipped this model call "
+                "before sending evidence. Tokens are chunks of model input or output."
+            )
+        else:
+            remaining_output_tokens = token_budget - prompt_tokens
+            max_output_tokens = (
+                min(configured_output_cap, remaining_output_tokens)
+                if configured_output_cap is not None
+                else remaining_output_tokens
+            )
+
+    cost_budget_cents = _role_cost_budget_cents(config, packet.agent_role)
+    input_cost_rate = config.llm_input_cost_per_million_tokens_cents
+    output_cost_rate = config.llm_output_cost_per_million_tokens_cents
+    estimated_cost_millionths = _model_cost_millionths_of_cent(
+        input_tokens=prompt_tokens,
+        output_tokens=response_tokens,
+        input_rate_cents_per_million=input_cost_rate,
+        output_rate_cents_per_million=output_cost_rate,
+    )
+    estimated_cost_cents = (
+        _format_millionths_of_cent(estimated_cost_millionths)
+        if estimated_cost_millionths is not None
+        else None
+    )
+    if (
+        block_message is None
+        and cost_budget_cents is not None
+        and estimated_cost_millionths is not None
+        and estimated_cost_millionths > cost_budget_cents * 1_000_000
+    ):
+        block_reason = "cost_budget_exceeded"
+        block_message = (
+            f"{_role_title(packet.agent_role)} model review was estimated to cost about "
+            f"{estimated_cost_cents} cents, but the configured cost budget is "
+            f"{cost_budget_cents} cents. Hail Mary skipped this model call before "
+            "sending evidence."
+        )
+
+    return ModelCallPlan(
+        provider=llm_settings.provider,
+        model=llm_settings.model,
+        messages=messages,
+        estimated_prompt_tokens=prompt_tokens,
+        estimated_response_tokens=response_tokens,
+        estimated_total_tokens=estimated_total_tokens,
+        configured_token_budget=token_budget,
+        configured_max_output_tokens=configured_output_cap,
+        max_output_tokens=max_output_tokens,
+        configured_cost_budget_cents=cost_budget_cents,
+        input_cost_per_million_tokens_cents=input_cost_rate,
+        output_cost_per_million_tokens_cents=output_cost_rate,
+        estimated_cost_cents=estimated_cost_cents,
+        estimated_cost_millionths_of_cent=estimated_cost_millionths,
+        block_reason=block_reason,
+        block_message=block_message,
+    )
+
+
+def _coerce_agent_review_response(
+    response: AgentReviewResponse | str,
+    *,
+    provider: str,
+    model: str,
+) -> AgentReviewResponse:
+    if isinstance(response, AgentReviewResponse):
+        return response
+    if isinstance(response, str):
+        return AgentReviewResponse(raw_output=response, provider=provider, model=model)
+    raise ModelReviewCallError("The model client did not return JSON text.")
+
+
+def _estimate_message_tokens(messages: Sequence[Mapping[str, str]]) -> int:
+    payload = json.dumps(messages, sort_keys=True, separators=(",", ":"))
+    return max(
+        1,
+        (len(payload) + TOKEN_ESTIMATE_CHARS_PER_TOKEN - 1)
+        // TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+    )
+
+
+def _role_token_budget(config: AppConfig, role: AgentRole) -> int | None:
+    if role == AgentRole.FINAL_DECISION:
+        return config.llm_final_token_budget
+    return config.llm_specialist_token_budget
+
+
+def _role_max_output_tokens(config: AppConfig, role: AgentRole) -> int | None:
+    if role == AgentRole.FINAL_DECISION:
+        return config.llm_final_max_output_tokens
+    return config.llm_specialist_max_output_tokens
+
+
+def _role_cost_budget_cents(config: AppConfig, role: AgentRole) -> int | None:
+    if role == AgentRole.FINAL_DECISION:
+        return config.llm_final_cost_budget_cents
+    return config.llm_specialist_cost_budget_cents
+
+
+def _model_cost_millionths_of_cent(
+    *,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    input_rate_cents_per_million: int | None,
+    output_rate_cents_per_million: int | None,
+) -> int | None:
+    if (
+        input_tokens is None
+        or output_tokens is None
+        or input_rate_cents_per_million is None
+        or output_rate_cents_per_million is None
+    ):
+        return None
+    return (
+        input_tokens * input_rate_cents_per_million
+        + output_tokens * output_rate_cents_per_million
+    )
+
+
+def _format_millionths_of_cent(value: int) -> str:
+    whole, fraction = divmod(value, 1_000_000)
+    if fraction == 0:
+        return str(whole)
+    return f"{whole}.{fraction:06d}".rstrip("0")
+
+
+def _model_request_privacy_context(
+    source_documents: Sequence[IngestedDocument],
+) -> ModelRequestPrivacyContext:
+    fragments = ["input_file"]
+    for document in source_documents:
+        _add_privacy_fragment(fragments, str(document.source.path))
+        _add_privacy_fragment(fragments, document.source.path.as_posix())
+        _add_privacy_fragment(fragments, str(document.output_path))
+        _add_privacy_fragment(fragments, document.output_path.as_posix())
+        _add_privacy_fragment(fragments, document.source.source_url)
+        for page in document.pages:
+            _add_private_source_text(fragments, page.raw_text)
+            _add_private_source_text(fragments, page.clean_text)
+        for table in document.tables:
+            _add_private_source_text(fragments, table.clean_text)
+    return ModelRequestPrivacyContext(forbidden_fragments=tuple(dict.fromkeys(fragments)))
+
+
+def _add_private_source_text(fragments: list[str], text: str) -> None:
+    if len(text) <= MAX_PACKET_EVIDENCE_CHARS:
+        return
+    _add_privacy_fragment(fragments, text)
+
+
+def _add_privacy_fragment(fragments: list[str], value: str | None) -> None:
+    if value is None:
+        return
+    fragment = " ".join(value.split())
+    if len(fragment) < MIN_PRIVACY_SOURCE_FRAGMENT_CHARS and fragment != "input_file":
+        return
+    fragments.append(fragment)
+
+
+def _model_request_privacy_issue(
+    messages: Sequence[Mapping[str, str]],
+    privacy_context: ModelRequestPrivacyContext,
+) -> str | None:
+    payload = json.dumps(messages, sort_keys=True)
+    collapsed_payload = " ".join(payload.replace("\\n", " ").split())
+    for fragment in privacy_context.forbidden_fragments:
+        if fragment and fragment in collapsed_payload:
+            return (
+                "Model request privacy check blocked this call before sending evidence "
+                "because the request included raw document text, a local file path, or "
+                "a source URL outside the packet excerpts."
+            )
+    return None
+
+
+def _write_model_call_metadata(
+    output_dir: Path,
+    *,
+    packet: AgentInputPacket,
+    attempt: int,
+    plan: ModelCallPlan,
+    response: AgentReviewResponse | None,
+    status: str,
+    failure_reason: str | None = None,
+    validation_issue_count: int | None = None,
+) -> None:
+    metadata_dir = output_dir / "model-call-metadata"
+    _ensure_private_directory(
+        metadata_dir,
+        private_root=output_dir.parent.parent,
+        description="model call metadata",
+    )
+    actual_cost_millionths = (
+        _model_cost_millionths_of_cent(
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            input_rate_cents_per_million=plan.input_cost_per_million_tokens_cents,
+            output_rate_cents_per_million=plan.output_cost_per_million_tokens_cents,
+        )
+        if response is not None
+        else None
+    )
+    payload = {
+        "agent_role": packet.agent_role.value,
+        "attempt": attempt,
+        "provider": response.provider if response and response.provider else plan.provider,
+        "model": response.model if response and response.model else plan.model,
+        "status": status,
+        "failure_reason": failure_reason,
+        "estimated_prompt_tokens": plan.estimated_prompt_tokens,
+        "estimated_response_tokens": plan.estimated_response_tokens,
+        "estimated_total_tokens": plan.estimated_total_tokens,
+        "configured_token_budget": plan.configured_token_budget,
+        "configured_max_output_tokens": plan.configured_max_output_tokens,
+        "max_output_tokens_sent": plan.max_output_tokens,
+        "configured_cost_budget_cents": plan.configured_cost_budget_cents,
+        "input_cost_per_million_tokens_cents": (
+            plan.input_cost_per_million_tokens_cents
+        ),
+        "output_cost_per_million_tokens_cents": (
+            plan.output_cost_per_million_tokens_cents
+        ),
+        "estimated_cost_cents": plan.estimated_cost_cents,
+        "actual_input_tokens": response.input_tokens if response else None,
+        "actual_output_tokens": response.output_tokens if response else None,
+        "actual_total_tokens": response.total_tokens if response else None,
+        "actual_cost_cents": (
+            _format_millionths_of_cent(actual_cost_millionths)
+            if actual_cost_millionths is not None
+            else None
+        ),
+        "validation_issue_count": validation_issue_count,
+        "raw_prompt_stored": False,
+    }
+    metadata_path = metadata_dir / f"{packet.agent_role}-attempt-{attempt}.json"
+    _write_private_text(
+        metadata_path,
+        json.dumps(payload, indent=2, sort_keys=True),
+        description="model call metadata",
+    )
+
+
 def _run_specialist_reviews(
     client: AgentReviewClient,
     *,
@@ -1539,6 +1979,9 @@ def _run_specialist_reviews(
     packet_paths_by_role: Mapping[AgentRole, Path],
     output_dir: Path,
     max_concurrency: int,
+    config: AppConfig,
+    llm_settings: LLMSettings,
+    privacy_context: ModelRequestPrivacyContext,
 ) -> list[RoleReviewResult]:
     results_by_role: dict[AgentRole, RoleReviewResult] = {}
     with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
@@ -1550,6 +1993,9 @@ def _run_specialist_reviews(
                 packet_path=packet_paths_by_role[role],
                 output_dir=output_dir,
                 fail_on_model_error=False,
+                config=config,
+                llm_settings=llm_settings,
+                privacy_context=privacy_context,
             ): role
             for role in SPECIALIST_AGENT_ROLES
         }
@@ -1567,6 +2013,9 @@ def _run_packet_with_repair(
     output_dir: Path,
     committee_context: str | None = None,
     fail_on_model_error: bool,
+    config: AppConfig,
+    llm_settings: LLMSettings,
+    privacy_context: ModelRequestPrivacyContext,
 ) -> RoleReviewResult:
     _ensure_private_directory(
         output_dir,
@@ -1579,10 +2028,26 @@ def _run_packet_with_repair(
 
     for attempt in (1, 2):
         try:
-            raw_output = client.create_review(
-                packet,
+            response, call_plan = _create_review_with_controls(
+                client,
+                packet=packet,
+                config=config,
+                llm_settings=llm_settings,
+                privacy_context=privacy_context,
+                output_dir=output_dir,
+                attempt=attempt,
                 repair_issues=repair_issues,
                 committee_context=committee_context,
+            )
+            raw_output = response.raw_output
+        except ModelReviewCallError as exc:
+            issue = AgentValidationIssue(location="model_call", message=str(exc))
+            return RoleReviewResult(
+                role=packet.agent_role,
+                packet_path=packet_path,
+                issues=[issue],
+                failed=True,
+                limitation=_role_model_call_limitation(packet.agent_role, str(exc)),
             )
         except EvaluationError as exc:
             if fail_on_model_error:
@@ -1598,6 +2063,14 @@ def _run_packet_with_repair(
 
         output, issues = _parse_and_validate_agent_output(raw_output, packet)
         if output is not None and not issues:
+            _write_model_call_metadata(
+                output_dir,
+                packet=packet,
+                attempt=attempt,
+                plan=call_plan,
+                response=response,
+                status="succeeded",
+            )
             output_path = output_dir / f"{packet.agent_role}.json"
             _write_private_text(
                 output_path,
@@ -1612,6 +2085,15 @@ def _run_packet_with_repair(
                 invalid_attempt_paths=invalid_attempt_paths,
             )
 
+        _write_model_call_metadata(
+            output_dir,
+            packet=packet,
+            attempt=attempt,
+            plan=call_plan,
+            response=response,
+            status="invalid_output",
+            validation_issue_count=len(issues),
+        )
         invalid_path = output_dir / f"{packet.agent_role}-attempt-{attempt}-invalid.json"
         _write_private_text(
             invalid_path,
@@ -3217,6 +3699,15 @@ def _issues_text(issues: Sequence[AgentValidationIssue]) -> str:
     if not issues:
         return "No validation detail was available."
     return "\n".join(f"- {issue.location}: {issue.message}" for issue in issues)
+
+
+def _usage_token_count(usage: object, field_name: str) -> int | None:
+    value = getattr(usage, field_name, None)
+    return value if isinstance(value, int) else None
+
+
+def _role_model_call_limitation(role: AgentRole, detail: str) -> str:
+    return f"{_role_title(role)} model review was skipped. {detail}"
 
 
 def _role_failure_limitation(
