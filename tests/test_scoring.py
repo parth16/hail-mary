@@ -1854,6 +1854,9 @@ def test_score_evidence_store_ignores_qualified_negated_traction() -> None:
     [
         "The company is operating without any customers yet.",
         "The company is operating without any revenue yet.",
+        "The company is operating without customers now.",
+        "A company without revenue is not fundable.",
+        "A company without customers or revenue is not fundable.",
         "The company has no actual customers yet.",
         "The company has no customer revenue yet.",
         "The company lacks customers and revenue.",
