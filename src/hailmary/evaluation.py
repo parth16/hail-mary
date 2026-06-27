@@ -1376,9 +1376,8 @@ def _committee_evidence_references(
         reference.model_copy(
             update={
                 "quote": (
-                    _bounded_committee_context_text(
+                    _bounded_committee_context_quote(
                         reference.quote,
-                        max_chars=MAX_COMMITTEE_CONTEXT_QUOTE_CHARS,
                     )
                     if reference.quote is not None
                     else None
@@ -1398,6 +1397,12 @@ def _bounded_committee_context_text(
     if len(collapsed) <= max_chars:
         return collapsed
     return collapsed[:max_chars].rstrip()
+
+
+def _bounded_committee_context_quote(text: str) -> str:
+    if len(text) <= MAX_COMMITTEE_CONTEXT_QUOTE_CHARS:
+        return text
+    return text[:MAX_COMMITTEE_CONTEXT_QUOTE_CHARS].rstrip()
 
 
 def _guard_final_decision(

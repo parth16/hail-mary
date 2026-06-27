@@ -326,6 +326,11 @@ def build_agent_input_packet(
         selected_claims,
         evidence_items,
     )
+    packet_score_factors = _score_factor_items(
+        scored_deal,
+        packet_net_return=packet_net_return,
+        allowed_evidence_ids=allowed_evidence_ids,
+    )
 
     return AgentInputPacket(
         created_at=created_at or datetime.now(UTC),
@@ -349,11 +354,7 @@ def build_agent_input_packet(
             valuation_risk=scored_deal.valuation_risk,
             net_return=packet_net_return,
         ),
-        score_factors=_score_factor_items(
-            scored_deal,
-            packet_net_return=packet_net_return,
-            allowed_evidence_ids=allowed_evidence_ids,
-        ),
+        score_factors=packet_score_factors,
         triggered_kill_gates=_triggered_kill_gate_items(
             scored_deal,
             allowed_evidence_ids=allowed_evidence_ids,
@@ -366,6 +367,8 @@ def build_agent_input_packet(
         scoring_support=_scoring_support_context(
             scored_deal,
             store=store,
+            packet_score_factors=packet_score_factors,
+            packet_net_return=packet_net_return,
             allowed_evidence_ids=allowed_evidence_ids,
         ),
         committee_context=committee_context,
@@ -599,6 +602,8 @@ def _scoring_support_context(
     scored_deal: ScoredDeal,
     *,
     store: EvidenceStore,
+    packet_score_factors: Sequence[AgentScoreFactorItem],
+    packet_net_return: NetReturnEstimate,
     allowed_evidence_ids: set[str],
 ) -> AgentScoringSupportContext:
     return AgentScoringSupportContext(
@@ -614,16 +619,10 @@ def _scoring_support_context(
                 name=factor.name,
                 support_status=factor.support_status,
                 missing_inputs=factor.missing_inputs,
-                selected_evidence_ids=_allowed_ids(
-                    factor.evidence_ids,
-                    allowed_evidence_ids=allowed_evidence_ids,
-                ),
-                omitted_evidence_count=_omitted_evidence_count(
-                    factor.evidence_ids,
-                    allowed_evidence_ids=allowed_evidence_ids,
-                ),
+                selected_evidence_ids=list(factor.evidence_ids),
+                omitted_evidence_count=factor.omitted_evidence_count,
             )
-            for factor in scored_deal.score_factors
+            for factor in packet_score_factors
         ],
         triggered_kill_gates=[
             AgentScoringSupportKillGateContext(
@@ -642,15 +641,12 @@ def _scoring_support_context(
             for gate in scored_deal.kill_gates
             if gate.triggered
         ],
-        net_return_support_status=scored_deal.net_return.support_status,
-        net_return_missing_inputs=scored_deal.net_return.missing_inputs,
-        net_return_selected_evidence_ids=_allowed_ids(
-            scored_deal.net_return.evidence_ids,
-            allowed_evidence_ids=allowed_evidence_ids,
-        ),
+        net_return_support_status=packet_net_return.support_status,
+        net_return_missing_inputs=packet_net_return.missing_inputs,
+        net_return_selected_evidence_ids=list(packet_net_return.evidence_ids),
         net_return_omitted_evidence_count=_omitted_evidence_count(
             scored_deal.net_return.evidence_ids,
-            allowed_evidence_ids=allowed_evidence_ids,
+            allowed_evidence_ids=set(packet_net_return.evidence_ids),
         ),
     )
 

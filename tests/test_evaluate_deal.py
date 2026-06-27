@@ -1136,6 +1136,34 @@ def test_evaluate_deal_committee_context_excludes_unsupported_findings(
     assert "MODEL_LIMITATION_PRIVATE_TAIL" not in persisted_final_packet.model_dump_json()
 
 
+def test_committee_context_preserves_citation_quote_whitespace() -> None:
+    quote = "ARR revenue\nretention"
+    output = AgentReviewOutput(
+        deal_id="deal-1",
+        company_name="WhitespaceCo",
+        agent_role=AgentRole.PRODUCT_CUSTOMER_TRACTION,
+        summary=[
+            AgentSummaryPoint(
+                summary="Source-backed traction summary.",
+                evidence=[AgentEvidenceReference(evidence_id="ev-traction", quote=quote)],
+            )
+        ],
+    )
+
+    context = evaluation._committee_context(
+        [
+            evaluation.RoleReviewResult(
+                role=AgentRole.PRODUCT_CUSTOMER_TRACTION,
+                packet_path=Path("packet.json"),
+                output=output,
+            )
+        ]
+    )
+
+    preserved_quote = context.supported_specialist_findings[0].summary[0].evidence[0].quote
+    assert preserved_quote == quote
+
+
 def test_evaluate_deal_warnings_include_ingestion_ocr_warnings() -> None:
     source = SourceDocument(
         id="doc_ocr",

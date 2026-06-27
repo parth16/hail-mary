@@ -399,6 +399,16 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
     assert packet.score.net_return.gross_exit_value is None
     assert packet.score.net_return.net_return_multiple is None
     assert packet.score.net_return.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert packet.scoring_support is not None
+    assert packet.scoring_support.net_return_support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert "packet evidence for return math" in packet.scoring_support.net_return_missing_inputs
+    valuation_support = next(
+        factor
+        for factor in packet.scoring_support.score_factors
+        if factor.name == "Valuation and net return"
+    )
+    assert valuation_support.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert valuation_support.missing_inputs == ["packet evidence for return math"]
     assert "packet evidence for return math" in packet.score.net_return.missing_inputs
     valuation_factor = packet.score_factors[0]
     assert valuation_factor.name == "Valuation and net return"
