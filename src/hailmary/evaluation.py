@@ -21,6 +21,11 @@ from hailmary.evidence import (
     ReviewIssueSeverity,
     build_deal_evidence_review,
 )
+from hailmary.evidence.actions import (
+    EvidenceActionError,
+    EvidenceActionSummary,
+    apply_evidence_actions,
+)
 from hailmary.evidence.review import (
     DealEvidenceReview,
     ReviewIssueSummary,
@@ -347,6 +352,13 @@ def evaluate_deal_folder(
         if research_run.imported_count:
             store = _load_evidence_store_for_deal(deal, config=config)
 
+    _stage(stage_callback, "evidence actions")
+    try:
+        action_application = apply_evidence_actions(config=config, store=store)
+    except EvidenceActionError as exc:
+        raise EvaluationError(str(exc)) from exc
+    store = action_application.store
+
     _stage(stage_callback, "rule-based scoring")
     try:
         status = portfolio_status(config)
@@ -373,6 +385,8 @@ def evaluate_deal_folder(
             config=config,
             created_at=packet_created_at,
             source_documents=deal.documents,
+            quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+            action_summary=action_application.summary,
         )
         packets_by_role = {
             packet_file.agent_role: _packet_from_file(packet_file.path)
@@ -402,6 +416,8 @@ def evaluate_deal_folder(
                 created_at=packet_created_at,
                 source_documents=deal.documents,
                 committee_context=committee_context,
+                quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+                action_summary=action_application.summary,
             )
             final_packet_path = packet_paths_by_role[AgentRole.FINAL_DECISION]
             _write_private_text(
@@ -424,7 +440,12 @@ def evaluate_deal_folder(
                     "Hail Mary did not write a final memo."
                 )
             final_output = final_result.output
-            guarded_decision = _guard_final_decision(scored_deal, store, final_output)
+            guarded_decision = _guard_final_decision(
+                scored_deal,
+                store,
+                final_output,
+                quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+            )
             final_review_was_model = True
         else:
             _stage(stage_callback, "final decision")
@@ -439,6 +460,7 @@ def evaluate_deal_folder(
                 scored_deal,
                 store,
                 mode=mode,
+                quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
             )
         else:
             final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
@@ -456,6 +478,7 @@ def evaluate_deal_folder(
         config=config,
         scored_deal=scored_deal,
         final_recommendation=guarded_decision.recommendation,
+        action_summary=action_application.summary,
     )
 
     _stage(stage_callback, "final memo write")
@@ -493,6 +516,7 @@ def evaluate_deal_folder(
             final_review_was_model=final_review_was_model,
             research_run=research_run,
             evidence_review=evidence_review,
+            quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
         ),
         description="final evaluation memo",
     )
@@ -785,10 +809,12 @@ def _rule_based_final_decision(
     store: EvidenceStore,
     *,
     mode: EvaluationMode,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> tuple[AgentReviewOutput, GuardedFinalDecision]:
     evidence_selection = _deterministic_recommendation_evidence_selection(
         store,
         scored_deal,
+        quote_only_evidence_ids=quote_only_evidence_ids,
     )
     references = evidence_selection.references
     citation_limitation = None
@@ -891,6 +917,7 @@ def render_final_evaluation_memo(
     final_review_was_model: bool = True,
     research_run: EvaluationResearchRun | None = None,
     evidence_review: DealEvidenceReview | None = None,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> str:
     verified_claims = validated_verified_claims(store)
     lines = [
@@ -1033,6 +1060,7 @@ def render_final_evaluation_memo(
         specialist_results=specialist_results,
         final_output=final_output,
         final_recommendation=final_recommendation,
+        quote_only_evidence_ids=quote_only_evidence_ids,
     )
     if evidence_lines:
         lines.extend(evidence_lines)
@@ -1120,6 +1148,8 @@ def _write_agent_packets(
     config: AppConfig,
     created_at: datetime,
     source_documents: Sequence[IngestedDocument],
+    quote_only_evidence_ids: set[str],
+    action_summary: EvidenceActionSummary,
 ) -> list[AgentPacketFile]:
     output_dir = config.data_dir / "agent-packets"
     _ensure_private_directory(output_dir, private_root=config.data_dir, description="agent packet")
@@ -1131,6 +1161,8 @@ def _write_agent_packets(
             role=role,
             created_at=created_at,
             source_documents=source_documents,
+            quote_only_evidence_ids=quote_only_evidence_ids,
+            action_summary=action_summary,
         )
         packet_path = output_dir / f"{slugify(store.company_name)}-{store.deal_id}-{role}.json"
         _write_private_text(
@@ -1415,6 +1447,8 @@ def _guard_final_decision(
     scored_deal: ScoredDeal,
     store: EvidenceStore,
     final_output: AgentReviewOutput,
+    *,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> GuardedFinalDecision:
     model_recommendation = final_output.recommendation
     if model_recommendation is None:
@@ -1427,6 +1461,7 @@ def _guard_final_decision(
         evidence_selection = _deterministic_recommendation_evidence_selection(
             store,
             scored_deal,
+            quote_only_evidence_ids=quote_only_evidence_ids,
         )
         forced_pass_warning = (
             "The final model recommended "
@@ -1538,21 +1573,33 @@ def _no_evidence_final_decision(
 def _deterministic_recommendation_evidence(
     store: EvidenceStore,
     scored_deal: ScoredDeal,
+    *,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> list[AgentEvidenceReference]:
-    return _deterministic_recommendation_evidence_selection(store, scored_deal).references
+    return _deterministic_recommendation_evidence_selection(
+        store,
+        scored_deal,
+        quote_only_evidence_ids=quote_only_evidence_ids,
+    ).references
 
 
 def _deterministic_recommendation_evidence_selection(
     store: EvidenceStore,
     scored_deal: ScoredDeal,
+    *,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> DeterministicEvidenceSelection:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    quote_only_ids = quote_only_evidence_ids or set()
     references: list[AgentEvidenceReference] = []
     for evidence_id in _deterministic_support_evidence_ids(store, scored_deal):
         evidence = evidence_by_id.get(evidence_id)
         if evidence is None:
             continue
-        references.append(_reference_for_evidence(evidence))
+        if evidence_id in quote_only_ids:
+            references.append(AgentEvidenceReference(evidence_id=evidence_id))
+        else:
+            references.append(_reference_for_evidence(evidence))
     safe_references = _validated_deterministic_recommendation_references(
         references,
         store,
@@ -1836,6 +1883,7 @@ def _build_evaluate_deal_evidence_review(
     config: AppConfig,
     scored_deal: ScoredDeal,
     final_recommendation: AgentRecommendationRationale,
+    action_summary: EvidenceActionSummary | None = None,
 ) -> DealEvidenceReview:
     evidence_store_path = deal.evidence_store_path or (
         config.data_dir / "processed" / "deals" / deal.id / "evidence_store.json"
@@ -1848,6 +1896,7 @@ def _build_evaluate_deal_evidence_review(
             scored_deal,
             final_recommendation,
         ),
+        action_summary=action_summary,
     )
 
 
@@ -1908,16 +1957,17 @@ def _evidence_review_limitations(
 ) -> list[str]:
     if evidence_review is None:
         return []
-    blocking_issues = [
+    limitation_issues = [
         issue
         for issue in _active_evidence_review_issues(evidence_review)
         if issue.severity == ReviewIssueSeverity.BLOCKING
+        or issue.code in {"needs_review_actions", "needs_review_cited"}
     ]
-    if not blocking_issues:
+    if not limitation_issues:
         return []
     return [
         "Evidence review found issues that need attention before relying on this memo: "
-        f"{_evidence_issue_names(blocking_issues)}."
+        f"{_evidence_issue_names(limitation_issues)}."
     ]
 
 
@@ -1933,6 +1983,22 @@ def _evidence_health_memo_lines(
         "- Evidence health means whether saved source records are complete and safe "
         "enough to rely on.",
     ]
+    if evidence_review.action_summary is not None:
+        action_summary = evidence_review.action_summary
+        if action_summary.valid_action_count or action_summary.stale_action_count:
+            action_parts = [
+                f"{status_count.status.value.replace('_', ' ')}: {status_count.count}"
+                for status_count in action_summary.status_counts
+            ]
+            if action_summary.stale_action_count:
+                action_parts.append(f"stale: {action_summary.stale_action_count}")
+            lines.append(
+                "- Evidence actions: "
+                f"{_memo_text(', '.join(action_parts))}. Excluded records are ignored "
+                "by scoring and model packets."
+            )
+        else:
+            lines.append("- Evidence actions: none.")
     if not active_issues:
         lines.append("- No evidence review issues were found.")
         return lines
@@ -2793,8 +2859,11 @@ def _cited_evidence_lines(
     specialist_results: Sequence[RoleReviewResult],
     final_output: AgentReviewOutput,
     final_recommendation: AgentRecommendationRationale,
+    quote_only_evidence_ids: set[str] | None = None,
 ) -> list[str]:
     evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    quote_only_ids = quote_only_evidence_ids or set()
+    preferred_quotes = _preferred_memo_quotes_by_evidence_id(store)
     cited_ids: list[str] = []
 
     def add_id(evidence_id: str) -> None:
@@ -2828,8 +2897,28 @@ def _cited_evidence_lines(
         if evidence is None:
             lines.append(f"- {_memo_text(evidence_id)}: NEEDS_DILIGENCE missing evidence record.")
             continue
-        lines.append(_evidence_line(evidence))
+        lines.append(
+            _evidence_line(
+                evidence,
+                quote_only=evidence.id in quote_only_ids,
+                preferred_quotes=preferred_quotes.get(evidence.id, []),
+            )
+        )
     return lines
+
+
+def _preferred_memo_quotes_by_evidence_id(
+    store: EvidenceStore,
+) -> dict[str, list[str]]:
+    quotes_by_id: dict[str, list[str]] = {}
+    for claim in validated_verified_claims(store):
+        for citation in claim.citations:
+            if not citation.quote:
+                continue
+            quotes = quotes_by_id.setdefault(citation.evidence_id, [])
+            if citation.quote not in quotes:
+                quotes.append(citation.quote)
+    return quotes_by_id
 
 
 def _all_agent_references(
@@ -2862,7 +2951,12 @@ def _output_references(output: AgentReviewOutput) -> list[AgentEvidenceReference
     return references
 
 
-def _evidence_line(evidence: EvidenceRecord) -> str:
+def _evidence_line(
+    evidence: EvidenceRecord,
+    *,
+    quote_only: bool = False,
+    preferred_quotes: Sequence[str] = (),
+) -> str:
     locator = (
         f"page {evidence.page_number}"
         if evidence.page_number is not None
@@ -2870,9 +2964,12 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
         if evidence.table_index is not None
         else "document"
     )
-    excerpt = _memo_text(evidence.text[:500])
-    if len(evidence.text) > 500:
-        excerpt = f"{excerpt}..."
+    excerpt = _memo_evidence_excerpt(
+        evidence,
+        quote_only=quote_only,
+        preferred_quotes=preferred_quotes,
+        max_chars=500,
+    )
     source_parts = [
         f"document: {_memo_text(str(evidence.document_path))}",
         f"locator: {locator}",
@@ -2904,6 +3001,34 @@ def _evidence_line(evidence: EvidenceRecord) -> str:
         f"- {_memo_text(evidence.id)}: {'; '.join(source_parts)}. "
         f"Quote/excerpt: \"{excerpt}\""
     )
+
+
+def _memo_evidence_excerpt(
+    evidence: EvidenceRecord,
+    *,
+    quote_only: bool,
+    preferred_quotes: Sequence[str],
+    max_chars: int,
+) -> str:
+    if quote_only:
+        valid_quotes = [
+            quote for quote in preferred_quotes if quote and quote in evidence.text
+        ]
+        if not valid_quotes:
+            return (
+                "Only selected claim quotes are shown because another claim on this "
+                "evidence was excluded; no surviving quote was available."
+            )
+        quote_text = "\n...\n".join(valid_quotes)
+        excerpt = _memo_text(quote_text[:max_chars])
+        if len(quote_text) > max_chars:
+            excerpt = f"{excerpt}..."
+        return excerpt
+
+    excerpt = _memo_text(evidence.text[:max_chars])
+    if len(evidence.text) > max_chars:
+        excerpt = f"{excerpt}..."
+    return excerpt
 
 
 def _format_ocr_confidence(confidence: float) -> str:

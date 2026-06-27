@@ -18,6 +18,7 @@ from hailmary.evaluation import (
     openai_review_messages,
     render_final_evaluation_memo,
 )
+from hailmary.evidence.actions import EvidenceActionStatus, record_evidence_action
 from hailmary.ingest.extractors import extract_document
 from hailmary.ingest.folder_loader import ingest_folder
 from hailmary.ingest.ocr import LocalOcrResult
@@ -2958,7 +2959,6 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "Expected the final memo to cite the imported research evidence ID.",
         imported_research_id=imported_research_id,
     )
-
     serialized_payloads = "\n".join(client.request_payloads)
     _expect(
         "Synthetic GoldenCo public site reports paid customer growth" in serialized_payloads,
@@ -2975,6 +2975,100 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         leaked_private_markers=", ".join(leaked_private_markers),
     )
 
+
+def run_evidence_actions_fixture(work_dir: Path) -> None:
+    safe_work_dir = work_dir.resolve(strict=False)
+    root = safe_work_dir / "pitch-decks"
+    company = root / "Synthetic ActionCo"
+    company.mkdir(parents=True)
+    excluded_marker = "EXCLUDED_ACTION_MARKER"
+    private_note_marker = "PRIVATE_ACTION_NOTE"
+    (company / "terms.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M. "
+        "Minimum investment $1,000. Lead investor committed and seed round is active.",
+        encoding="utf-8",
+    )
+    (company / "traction.txt").write_text(
+        f"{excluded_marker} ARR revenue growth with paid customers and retention.",
+        encoding="utf-8",
+    )
+
+    config = AppConfig(data_dir=safe_work_dir / "data", local_only=True)
+    initial = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+        created_at=BUILT_AT,
+    )
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    excluded_evidence = next(
+        evidence for evidence in store.evidence if excluded_marker in evidence.text
+    )
+    needs_review_evidence = next(
+        evidence for evidence in store.evidence if evidence.id != excluded_evidence.id
+    )
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        evidence_id=excluded_evidence.id,
+        status=EvidenceActionStatus.EXCLUDED,
+        note=private_note_marker,
+        created_at=BUILT_AT,
+    )
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        evidence_id=needs_review_evidence.id,
+        status=EvidenceActionStatus.NEEDS_REVIEW,
+        note=private_note_marker,
+        created_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    result = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+        created_at=BUILT_AT,
+    )
+
+    _expect_equal(
+        result.evidence_count,
+        initial.evidence_count - 1,
+        "Expected excluded evidence actions to remove one evidence record from scoring.",
+    )
+    _expect(
+        result.evidence_review is not None
+        and result.evidence_review.action_summary is not None
+        and result.evidence_review.action_summary.excluded_evidence_count == 1,
+        "Expected evaluate-deal evidence health to surface excluded evidence actions.",
+    )
+    _expect(
+        any("needs review" in warning for warning in result.warnings),
+        "Expected evaluate-deal warnings to surface needs-review evidence actions.",
+    )
+    _expect(
+        any("needs review" in limitation for limitation in result.operator_limitations),
+        "Expected evaluate-deal limitations to surface needs-review evidence actions.",
+    )
+    memo = result.final_memo_path.read_text(encoding="utf-8")
+    expected_fragments = ["Evidence actions:", "excluded: 1", "needs review"]
+    missing_fragments = [fragment for fragment in expected_fragments if fragment not in memo]
+    _expect(
+        not missing_fragments,
+        "Expected the final memo to summarize evidence actions.",
+        missing_fragments=", ".join(missing_fragments),
+    )
+    _expect(
+        excluded_marker not in memo,
+        "Expected excluded evidence text to stay out of the final memo.",
+    )
+    _expect(
+        private_note_marker not in memo,
+        "Expected private operator notes to stay out of the final memo.",
+    )
 
 def run_memo_v2_score_evidence_fixture() -> None:
     store = _strong_store()

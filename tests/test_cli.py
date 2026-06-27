@@ -10,6 +10,15 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from hailmary.cli import _format_dollars, app
+from hailmary.config import AppConfig
+from hailmary.evidence.actions import (
+    EvidenceActionLog,
+    EvidenceActionRecord,
+    EvidenceActionStatus,
+    EvidenceActionTarget,
+    action_log_path,
+    write_action_log,
+)
 from hailmary.ingest import folder_loader
 from hailmary.ingest.extractors import ExtractionResult
 from hailmary.ingest.extractors import extract_document as real_extract_document
@@ -681,10 +690,290 @@ def test_review_evidence_single_deal_latest_summary_hides_text_by_default(
     assert "Evidence health summary" in result.output
     assert "Evidence by source document" in result.output
     assert "Claims by label and status" in result.output
+    assert "Claim IDs for actions" in result.output
+    assert "claim_valuation_cap_ev_secret" in result.output
     assert "Evidence text is hidden by default" in result.output
     assert "source span" in result.output
     assert "citation span" in result.output
     assert "SECRET CUSTOMER LIST" not in result.output
+
+
+def test_evidence_actions_cli_writes_private_action_and_hides_notes_by_default(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_secret",
+        "SECRET CUSTOMER LIST. Valuation cap $8M.",
+        deal_id="deal_secret",
+    )
+    store = _review_store(
+        deal_id="deal_secret",
+        company_name="SecretCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    action_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "exclude",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--evidence-id",
+            "ev_secret",
+            "--note",
+            "Operator checked the source locally.",
+        ],
+    )
+    list_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "list",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+        ],
+    )
+    notes_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "list",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--show-notes",
+        ],
+    )
+
+    assert action_result.exit_code == 0, action_result.output
+    assert "No evidence text was copied" in action_result.output
+    assert "SECRET CUSTOMER LIST" not in action_result.output
+    action_path = action_log_path(
+        config=AppConfig(data_dir=data_dir),
+        deal_id="deal_secret",
+    )
+    action_text = action_path.read_text(encoding="utf-8")
+    assert "Operator checked the source locally" in action_text
+    assert "SECRET CUSTOMER LIST" not in action_text
+    assert list_result.exit_code == 0, list_result.output
+    assert "excluded" in list_result.output
+    assert "Operator checked the source locally" not in list_result.output
+    assert "SECRET CUSTOMER LIST" not in list_result.output
+    assert notes_result.exit_code == 0, notes_result.output
+    assert "Operator checked the source locally" in notes_result.output
+    assert "SECRET CUSTOMER LIST" not in notes_result.output
+
+
+def test_evidence_actions_cli_prunes_stale_actions(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_secret",
+        "SECRET CUSTOMER LIST. Valuation cap $8M.",
+        deal_id="deal_secret",
+    )
+    store = _review_store(
+        deal_id="deal_secret",
+        company_name="SecretCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+    write_action_log(
+        config=AppConfig(data_dir=data_dir),
+        log=EvidenceActionLog(
+            deal_id="deal_secret",
+            actions=[
+                EvidenceActionRecord(
+                    action_id="act_stale",
+                    deal_id="deal_secret",
+                    target_type=EvidenceActionTarget.EVIDENCE,
+                    target_id="ev_missing",
+                    status=EvidenceActionStatus.NEEDS_REVIEW,
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    operator_note="Private stale note.",
+                )
+            ],
+        ),
+    )
+
+    list_before = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "list",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+        ],
+    )
+    prune_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "prune-stale",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+        ],
+    )
+    list_after = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "list",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+        ],
+    )
+
+    assert list_before.exit_code == 0, list_before.output
+    assert "stale" in list_before.output
+    assert "Private stale note" not in list_before.output
+    assert "SECRET CUSTOMER LIST" not in list_before.output
+    assert prune_result.exit_code == 0, prune_result.output
+    assert "Removed 1 stale action" in prune_result.output
+    assert "Private stale note" not in prune_result.output
+    assert "SECRET CUSTOMER LIST" not in prune_result.output
+    assert list_after.exit_code == 0, list_after.output
+    assert "No evidence actions have been saved" in list_after.output
+
+
+def test_review_evidence_shows_action_status_but_hides_notes_by_default(
+    tmp_path: Path,
+) -> None:
+    evidence = _review_evidence_record(
+        "ev_secret",
+        "SECRET CUSTOMER LIST. Valuation cap $8M.",
+        deal_id="deal_secret",
+    )
+    store = _review_store(
+        deal_id="deal_secret",
+        company_name="SecretCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+    action_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "needs-review",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--evidence-id",
+            "ev_secret",
+            "--note",
+            "Operator note should stay private by default.",
+        ],
+    )
+
+    review_result = runner.invoke(
+        app,
+        ["review-evidence", "--data-dir", str(data_dir), "--deal-id", "deal_secret"],
+    )
+    review_notes_result = runner.invoke(
+        app,
+        [
+            "review-evidence",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--show-notes",
+        ],
+    )
+
+    assert action_result.exit_code == 0, action_result.output
+    assert review_result.exit_code == 0, review_result.output
+    assert "needs review" in review_result.output
+    assert "Operator note should stay private" not in review_result.output
+    assert "SECRET CUSTOMER LIST" not in review_result.output
+    assert review_notes_result.exit_code == 0, review_notes_result.output
+    assert "Operator note should stay private" in review_notes_result.output
+    assert "SECRET CUSTOMER LIST" not in review_notes_result.output
+
+
+def test_evidence_actions_cli_unknown_target_has_plain_english_error(
+    tmp_path: Path,
+) -> None:
+    store = _review_store(deal_id="deal_secret", company_name="SecretCo")
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "exclude",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_secret",
+            "--evidence-id",
+            "missing_ev",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "No evidence record missing_ev" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_evidence_actions_write_rejects_repo_root_data_dir(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    evidence = _review_evidence_record(
+        "ev_secret",
+        "SECRET CUSTOMER LIST. Valuation cap $8M.",
+        deal_id="deal_secret",
+    )
+    store = _review_store(
+        deal_id="deal_secret",
+        company_name="SecretCo",
+        evidence=[evidence],
+        claims=[_review_claim("valuation cap", "$8M", evidence)],
+    )
+    _write_review_ingestion_summary(tmp_path, [store], data_dir=tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "exclude",
+            "--data-dir",
+            ".",
+            "--deal-id",
+            "deal_secret",
+            "--evidence-id",
+            "ev_secret",
+            "--note",
+            "Keep this private.",
+        ],
+    )
+
+    assert result.exit_code != 0
+    normalized_output = " ".join(result.output.split())
+    assert "Local generated-data setup failed" in normalized_output
+    assert "Choose a generated-data folder" in normalized_output
+    assert "Traceback" not in result.output
+    assert not (tmp_path / "evidence-actions").exists()
 
 
 def test_review_evidence_selects_by_deal_id_company_and_all(tmp_path: Path) -> None:
@@ -1012,6 +1301,76 @@ def test_review_evidence_summarizes_review_issues_and_conflicts(tmp_path: Path) 
     assert "warning" in normalized_output
 
 
+def test_review_evidence_applies_exclusions_before_health_summary(
+    tmp_path: Path,
+) -> None:
+    first_evidence = _review_evidence_record(
+        "ev_cap_low",
+        "Valuation cap $8M.",
+        deal_id="deal_actions",
+    )
+    second_evidence = _review_evidence_record(
+        "ev_cap_high",
+        "Valuation cap $10M.",
+        deal_id="deal_actions",
+    )
+    first_claim = _review_claim(
+        "valuation cap",
+        "$8M",
+        first_evidence,
+        status=VerificationStatus.CONFLICTED,
+    )
+    second_claim = _review_claim(
+        "valuation cap",
+        "$10M",
+        second_evidence,
+        status=VerificationStatus.CONFLICTED,
+    )
+    store = _review_store(
+        deal_id="deal_actions",
+        company_name="ActionCo",
+        evidence=[first_evidence, second_evidence],
+        claims=[first_claim, second_claim],
+        conflicts=[
+            ClaimConflict(
+                id="conflict_valuation_cap",
+                deal_id="deal_actions",
+                claim_type=ClaimType.DEAL_TERM,
+                label="valuation cap",
+                normalized_values=["valuation cap:$8M", "valuation cap:$10M"],
+                claim_ids=[first_claim.id, second_claim.id],
+                notes="Synthetic conflicting valuation caps.",
+            )
+        ],
+    )
+    data_dir = _write_review_ingestion_summary(tmp_path, [store])
+
+    action_result = runner.invoke(
+        app,
+        [
+            "evidence-actions",
+            "exclude",
+            "--data-dir",
+            str(data_dir),
+            "--deal-id",
+            "deal_actions",
+            "--claim-id",
+            first_claim.id,
+        ],
+    )
+    review_result = runner.invoke(
+        app,
+        ["review-evidence", "--data-dir", str(data_dir), "--deal-id", "deal_actions"],
+    )
+    normalized_output = " ".join(review_result.output.split())
+
+    assert action_result.exit_code == 0, action_result.output
+    assert review_result.exit_code == 0, review_result.output
+    assert "No conflicts" in normalized_output
+    assert "active_conflicts" not in normalized_output
+    assert "excluded_actions" in normalized_output
+
+
 def test_review_evidence_shows_table_index_with_page_number(tmp_path: Path) -> None:
     evidence = _review_evidence_record(
         "ev_table",
@@ -1270,8 +1629,9 @@ def _write_review_ingestion_summary(
     stores: list[EvidenceStore],
     *,
     documents_by_deal_id: dict[str, list[IngestedDocument]] | None = None,
+    data_dir: Path | None = None,
 ) -> Path:
-    data_dir = tmp_path / "data"
+    data_dir = data_dir or tmp_path / "data"
     processed_dir = data_dir / "processed"
     processed_dir.mkdir(parents=True)
     deals: list[IngestedDeal] = []

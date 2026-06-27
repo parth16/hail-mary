@@ -33,7 +33,17 @@ from hailmary.config import (
 )
 from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder
-from hailmary.evidence import EvidenceReviewError
+from hailmary.evidence import (
+    EvidenceActionError,
+    EvidenceActionStatus,
+    EvidenceActionSummary,
+    EvidenceActionTarget,
+    EvidenceReviewError,
+    prune_stale_evidence_actions,
+    record_evidence_action,
+    select_action_context,
+    summarize_evidence_actions,
+)
 from hailmary.evidence import review_evidence as build_evidence_review
 from hailmary.evidence.review import (
     DealEvidenceReview,
@@ -95,7 +105,12 @@ portfolio_app = typer.Typer(
     help="Track recorded investments and available capital for new checks.",
     no_args_is_help=True,
 )
+evidence_actions_app = typer.Typer(
+    help="Record local evidence review actions without copying source text.",
+    no_args_is_help=True,
+)
 app.add_typer(portfolio_app, name="portfolio", hidden=True)
+app.add_typer(evidence_actions_app, name="evidence-actions")
 console = Console(highlight=False)
 DEFAULT_REVIEW_QUOTE_LIMIT = 240
 MAX_REVIEW_QUOTE_LIMIT = 500
@@ -696,6 +711,475 @@ def ingest_folder(
         _print_section("Review needed", warning_lines, style="yellow")
 
 
+@evidence_actions_app.command("list")
+def evidence_actions_list_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should read private evidence action state.",
+        ),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option(
+            "--deal-id",
+            help="List actions for one exact ingested deal ID.",
+        ),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option(
+            "--company",
+            help="List actions for one exact ingested company name.",
+        ),
+    ] = None,
+    show_notes: Annotated[
+        bool,
+        typer.Option(
+            "--show-notes",
+            help="Show local operator notes. Notes are hidden by default.",
+        ),
+    ] = False,
+) -> None:
+    """List local evidence actions without showing evidence text."""
+
+    config = _config_from_options(data_dir)
+    try:
+        context = select_action_context(
+            config=config,
+            deal_id=deal_id,
+            company_name=company,
+        )
+        summary = summarize_evidence_actions(config=config, store=context.store)
+    except EvidenceActionError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    renderables: list[RenderableType] = [
+        _plain(f"Company: {context.deal.company_name}."),
+        _plain(f"Deal ID: {context.deal.id}."),
+        _plain(f"Evidence action file: {summary.action_file_path}."),
+        _plain(_action_summary_text(summary)),
+    ]
+    if not show_notes:
+        renderables.append(
+            _plain("Operator notes are hidden by default. Use --show-notes to show them.")
+        )
+    renderables.append(_evidence_action_list_table(summary, show_notes=show_notes))
+    if show_notes:
+        renderables.extend(_evidence_action_note_lines(summary))
+    _print_panel("Evidence actions", renderables, border_style="green")
+
+
+@evidence_actions_app.command("approve")
+def evidence_actions_approve_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where Hail Mary should write private actions."),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="Action one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="Action one exact ingested company name."),
+    ] = None,
+    evidence_id: Annotated[
+        str | None,
+        typer.Option("--evidence-id", help="Evidence record ID to approve."),
+    ] = None,
+    claim_id: Annotated[
+        str | None,
+        typer.Option("--claim-id", help="Claim ID to approve."),
+    ] = None,
+    note: Annotated[
+        str | None,
+        typer.Option("--note", help="Optional plain-English operator note."),
+    ] = None,
+) -> None:
+    """Mark an evidence record or claim as approved."""
+
+    _record_evidence_action_command(
+        data_dir=data_dir,
+        deal_id=deal_id,
+        company=company,
+        evidence_id=evidence_id,
+        claim_id=claim_id,
+        status=EvidenceActionStatus.APPROVED,
+        note=note,
+    )
+
+
+@evidence_actions_app.command("exclude")
+def evidence_actions_exclude_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where Hail Mary should write private actions."),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="Action one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="Action one exact ingested company name."),
+    ] = None,
+    evidence_id: Annotated[
+        str | None,
+        typer.Option("--evidence-id", help="Evidence record ID to exclude."),
+    ] = None,
+    claim_id: Annotated[
+        str | None,
+        typer.Option("--claim-id", help="Claim ID to exclude."),
+    ] = None,
+    note: Annotated[
+        str | None,
+        typer.Option("--note", help="Optional plain-English operator note."),
+    ] = None,
+) -> None:
+    """Exclude an evidence record or claim from scoring and model packets."""
+
+    _record_evidence_action_command(
+        data_dir=data_dir,
+        deal_id=deal_id,
+        company=company,
+        evidence_id=evidence_id,
+        claim_id=claim_id,
+        status=EvidenceActionStatus.EXCLUDED,
+        note=note,
+    )
+
+
+@evidence_actions_app.command("needs-review")
+def evidence_actions_needs_review_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where Hail Mary should write private actions."),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="Action one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="Action one exact ingested company name."),
+    ] = None,
+    evidence_id: Annotated[
+        str | None,
+        typer.Option("--evidence-id", help="Evidence record ID to mark for review."),
+    ] = None,
+    claim_id: Annotated[
+        str | None,
+        typer.Option("--claim-id", help="Claim ID to mark for review."),
+    ] = None,
+    note: Annotated[
+        str | None,
+        typer.Option("--note", help="Optional plain-English operator note."),
+    ] = None,
+) -> None:
+    """Mark an evidence record or claim as needing review."""
+
+    _record_evidence_action_command(
+        data_dir=data_dir,
+        deal_id=deal_id,
+        company=company,
+        evidence_id=evidence_id,
+        claim_id=claim_id,
+        status=EvidenceActionStatus.NEEDS_REVIEW,
+        note=note,
+    )
+
+
+@evidence_actions_app.command("usable")
+def evidence_actions_usable_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where Hail Mary should write private actions."),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="Action one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="Action one exact ingested company name."),
+    ] = None,
+    evidence_id: Annotated[
+        str | None,
+        typer.Option("--evidence-id", help="Evidence record ID to mark usable."),
+    ] = None,
+    claim_id: Annotated[
+        str | None,
+        typer.Option("--claim-id", help="Claim ID to mark usable."),
+    ] = None,
+    note: Annotated[
+        str | None,
+        typer.Option("--note", help="Optional plain-English operator note."),
+    ] = None,
+) -> None:
+    """Mark an evidence record or claim as usable."""
+
+    _record_evidence_action_command(
+        data_dir=data_dir,
+        deal_id=deal_id,
+        company=company,
+        evidence_id=evidence_id,
+        claim_id=claim_id,
+        status=EvidenceActionStatus.USABLE,
+        note=note,
+    )
+
+
+@evidence_actions_app.command("note")
+def evidence_actions_note_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where Hail Mary should write private actions."),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="Action one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="Action one exact ingested company name."),
+    ] = None,
+    evidence_id: Annotated[
+        str | None,
+        typer.Option("--evidence-id", help="Evidence record ID for the note."),
+    ] = None,
+    claim_id: Annotated[
+        str | None,
+        typer.Option("--claim-id", help="Claim ID for the note."),
+    ] = None,
+    note: Annotated[
+        str,
+        typer.Option("--note", help="Plain-English operator note to store locally."),
+    ] = "",
+) -> None:
+    """Add a local operator note without changing the current status."""
+
+    _record_evidence_action_command(
+        data_dir=data_dir,
+        deal_id=deal_id,
+        company=company,
+        evidence_id=evidence_id,
+        claim_id=claim_id,
+        status=None,
+        note=note,
+    )
+
+
+@evidence_actions_app.command("prune-stale")
+def evidence_actions_prune_stale_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option("--data-dir", help="Where Hail Mary should write private actions."),
+    ] = None,
+    deal_id: Annotated[
+        str | None,
+        typer.Option("--deal-id", help="Prune actions for one exact ingested deal ID."),
+    ] = None,
+    company: Annotated[
+        str | None,
+        typer.Option("--company", help="Prune actions for one exact ingested company name."),
+    ] = None,
+) -> None:
+    """Remove saved actions whose evidence or claim IDs no longer exist."""
+
+    config = _config_from_options(data_dir)
+    try:
+        result = prune_stale_evidence_actions(
+            config=config,
+            deal_id=deal_id,
+            company_name=company,
+        )
+    except EvidenceActionError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    target_word = "target" if result.removed_target_count == 1 else "targets"
+    action_word = "action" if result.removed_action_count == 1 else "actions"
+    if result.removed_action_count:
+        summary = (
+            f"Removed {result.removed_action_count} stale {action_word} across "
+            f"{result.removed_target_count} obsolete {target_word}."
+        )
+    else:
+        summary = "No stale evidence actions were found."
+    state_line = (
+        f"Saved private action state to {result.action_file_path}."
+        if result.removed_action_count
+        else f"Private action state path: {result.action_file_path}."
+    )
+    _print_panel(
+        "Stale evidence actions pruned",
+        [
+            _plain(f"Company: {result.company_name}."),
+            _plain(f"Deal ID: {result.deal_id}."),
+            _plain(summary),
+            _plain(state_line),
+            _plain("No evidence text was copied into the action file."),
+        ],
+        border_style="green",
+    )
+
+
+def _record_evidence_action_command(
+    *,
+    data_dir: Path | None,
+    deal_id: str | None,
+    company: str | None,
+    evidence_id: str | None,
+    claim_id: str | None,
+    status: EvidenceActionStatus | None,
+    note: str | None,
+) -> None:
+    config = _config_from_options(data_dir)
+    try:
+        result = record_evidence_action(
+            config=config,
+            deal_id=deal_id,
+            company_name=company,
+            evidence_id=evidence_id,
+            claim_id=claim_id,
+            status=status,
+            note=note,
+        )
+    except EvidenceActionError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    _print_panel(
+        "Evidence action saved",
+        [
+            _plain(f"Company: {result.company_name}."),
+            _plain(f"Deal ID: {result.deal_id}."),
+            _plain(
+                f"Marked {_action_target_label(result.target_type)} "
+                f"{result.target_id} as {_action_status_label(result.status)}."
+            ),
+            _plain(f"Saved private action state to {result.action_file_path}."),
+            _plain("No evidence text was copied into the action file."),
+        ],
+        border_style="green",
+    )
+
+
+def _evidence_action_list_table(
+    summary: EvidenceActionSummary,
+    *,
+    show_notes: bool,
+) -> Table:
+    table = Table(
+        title="Saved actions",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Target", style="bold cyan")
+    table.add_column("Target ID", overflow="fold")
+    table.add_column("Status")
+    table.add_column("Last updated", no_wrap=True)
+    if show_notes:
+        table.add_column("Operator note", overflow="fold")
+
+    rows: list[tuple[str, str, str, str, str]] = []
+    for target_type, states in (
+        (EvidenceActionTarget.EVIDENCE, summary.evidence_states),
+        (EvidenceActionTarget.CLAIM, summary.claim_states),
+    ):
+        for target_id, state in sorted(states.items(), key=lambda item: item[0]):
+            rows.append(
+                (
+                    _action_target_label(target_type),
+                    target_id,
+                    _action_status_label(state.status),
+                    state.created_at.isoformat(),
+                    state.operator_note or "",
+                )
+            )
+    for state in summary.stale_states:
+        rows.append(
+            (
+                f"stale {_action_target_label(state.target_type)}",
+                state.target_id,
+                _action_status_label(state.status),
+                state.created_at.isoformat(),
+                state.operator_note or "",
+            )
+        )
+
+    if not rows:
+        row = [_plain("No saved actions"), _plain(""), _plain(""), _plain("")]
+        if show_notes:
+            row.append(_plain(""))
+        table.add_row(*row)
+        return table
+
+    for target, target_id, status, updated_at, operator_note in rows:
+        row = [
+            _plain(target),
+            _plain(target_id),
+            _plain(status),
+            _plain(updated_at),
+        ]
+        if show_notes:
+            row.append(_plain(operator_note))
+        table.add_row(*row)
+    return table
+
+
+def _action_summary_text(summary: EvidenceActionSummary) -> str:
+    if summary.valid_action_count == 0 and summary.stale_action_count == 0:
+        return "No evidence actions have been saved for this deal."
+    status_parts = [
+        f"{_action_status_label(metric.status)}: {metric.count}"
+        for metric in summary.status_counts
+    ]
+    if summary.stale_action_count:
+        status_parts.append(f"stale: {summary.stale_action_count}")
+    return "Action status counts: " + ", ".join(status_parts)
+
+
+def _evidence_action_note_lines(summary: EvidenceActionSummary) -> list[Text]:
+    lines: list[Text] = []
+    for target_type, states in (
+        (EvidenceActionTarget.EVIDENCE, summary.evidence_states),
+        (EvidenceActionTarget.CLAIM, summary.claim_states),
+    ):
+        for target_id, state in sorted(states.items(), key=lambda item: item[0]):
+            if state.operator_note:
+                lines.append(
+                    _plain(
+                        f"Operator note for {_action_target_label(target_type)} "
+                        f"{target_id}: {state.operator_note}"
+                    )
+                )
+    for state in summary.stale_states:
+        if state.operator_note:
+            lines.append(
+                _plain(
+                    f"Operator note for stale {_action_target_label(state.target_type)} "
+                    f"{state.target_id}: {state.operator_note}"
+                )
+            )
+    if not lines:
+        lines.append(_plain("No operator notes are saved for these actions."))
+    return lines
+
+
+def _action_target_label(target_type: EvidenceActionTarget) -> str:
+    return target_type.value.replace("_", " ")
+
+
+def _action_status_label(status: EvidenceActionStatus) -> str:
+    return status.value.replace("_", " ")
+
+
 @app.command("review-evidence")
 def review_evidence_command(
     data_dir: Annotated[
@@ -752,6 +1236,13 @@ def review_evidence_command(
             ),
         ),
     ] = None,
+    show_notes: Annotated[
+        bool,
+        typer.Option(
+            "--show-notes",
+            help="Show local operator notes from evidence actions. Notes are hidden by default.",
+        ),
+    ] = False,
 ) -> None:
     """Review local evidence, claims, conflicts, and diligence gaps."""
 
@@ -801,16 +1292,25 @@ def review_evidence_command(
                 f"Showing short evidence excerpts capped at {excerpt_limit} characters."
             )
         )
+    if not show_notes:
+        intro_lines.append(
+            _plain("Operator notes are hidden by default. Use --show-notes to show them.")
+        )
 
     _print_section("Evidence review", intro_lines, style="green")
     for deal_review in result.deals:
-        _print_deal_evidence_review(deal_review, excerpt_limit=excerpt_limit)
+        _print_deal_evidence_review(
+            deal_review,
+            excerpt_limit=excerpt_limit,
+            show_notes=show_notes,
+        )
 
 
 def _print_deal_evidence_review(
     deal_review: DealEvidenceReview,
     *,
     excerpt_limit: int | None,
+    show_notes: bool,
 ) -> None:
     console.print(Rule(deal_review.company_name, style="cyan"))
     console.print(_deal_review_summary_table(deal_review))
@@ -820,7 +1320,12 @@ def _print_deal_evidence_review(
     if external_sources_table is not None:
         console.print(external_sources_table)
     console.print(_claim_review_table(deal_review))
+    console.print(_claim_id_review_table(deal_review))
     console.print(_conflict_review_table(deal_review))
+    console.print(_action_review_table(deal_review, show_notes=show_notes))
+    if show_notes and deal_review.action_summary is not None:
+        for line in _evidence_action_note_lines(deal_review.action_summary):
+            console.print(line, soft_wrap=True)
     console.print(_issue_review_table(deal_review))
     console.print(_evidence_record_review_table(deal_review, excerpt_limit=excerpt_limit))
 
@@ -833,6 +1338,11 @@ def _deal_review_summary_table(deal_review: DealEvidenceReview) -> Table:
     table.add_row(_plain("Evidence records"), _plain(str(deal_review.evidence_count)))
     table.add_row(_plain("Claims"), _plain(str(deal_review.claim_count)))
     table.add_row(_plain("Stored conflicts"), _plain(str(deal_review.conflict_count)))
+    if deal_review.action_summary is not None:
+        table.add_row(
+            _plain("Evidence actions"),
+            _plain(_action_summary_text(deal_review.action_summary)),
+        )
     return table
 
 
@@ -948,6 +1458,49 @@ def _claim_review_table(deal_review: DealEvidenceReview) -> Table:
     return table
 
 
+def _claim_id_review_table(deal_review: DealEvidenceReview) -> Table:
+    table = Table(
+        title="Claim IDs for actions",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Claim ID", style="bold cyan", no_wrap=True)
+    table.add_column("Claim label")
+    table.add_column("Status")
+    table.add_column("Cited evidence IDs", overflow="fold")
+    table.add_column("Action")
+    if not deal_review.claim_records:
+        table.add_row(
+            _plain("No extracted claims"),
+            _plain(""),
+            _plain(""),
+            _plain(""),
+            _plain(""),
+        )
+        return table
+    action_states = (
+        deal_review.action_summary.claim_states
+        if deal_review.action_summary is not None
+        else {}
+    )
+    for claim in deal_review.claim_records:
+        action_state = action_states.get(claim.claim_id)
+        table.add_row(
+            _plain(claim.claim_id),
+            _plain(claim.label),
+            _plain(_enum_label(claim.verification_status)),
+            _plain(", ".join(claim.cited_evidence_ids) or "No cited evidence"),
+            _plain(
+                _action_status_label(action_state.status)
+                if action_state is not None
+                else "no saved action"
+            ),
+        )
+    return table
+
+
 def _conflict_review_table(deal_review: DealEvidenceReview) -> Table:
     table = Table(
         title="Conflicts and why they matter",
@@ -976,6 +1529,58 @@ def _conflict_review_table(deal_review: DealEvidenceReview) -> Table:
             _plain(f"{len(conflict.normalized_values)} {value_word}"),
             _plain(conflict.why_it_matters),
         )
+    return table
+
+
+def _action_review_table(deal_review: DealEvidenceReview, *, show_notes: bool) -> Table:
+    table = Table(
+        title="Evidence actions",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Target", style="bold cyan")
+    table.add_column("Target ID", overflow="fold")
+    table.add_column("Status")
+    table.add_column("Last updated", no_wrap=True)
+    if show_notes:
+        table.add_column("Operator note", overflow="fold")
+
+    summary = deal_review.action_summary
+    if summary is None or (
+        summary.valid_action_count == 0 and summary.stale_action_count == 0
+    ):
+        row = [_plain("No saved actions"), _plain(""), _plain(""), _plain("")]
+        if show_notes:
+            row.append(_plain(""))
+        table.add_row(*row)
+        return table
+
+    for target_type, states in (
+        (EvidenceActionTarget.EVIDENCE, summary.evidence_states),
+        (EvidenceActionTarget.CLAIM, summary.claim_states),
+    ):
+        for target_id, state in sorted(states.items(), key=lambda item: item[0]):
+            row = [
+                _plain(_action_target_label(target_type)),
+                _plain(target_id),
+                _plain(_action_status_label(state.status)),
+                _plain(state.created_at.isoformat()),
+            ]
+            if show_notes:
+                row.append(_plain(state.operator_note or ""))
+            table.add_row(*row)
+    for state in summary.stale_states:
+        row = [
+            _plain(f"stale {_action_target_label(state.target_type)}"),
+            _plain(state.target_id),
+            _plain(_action_status_label(state.status)),
+            _plain(state.created_at.isoformat()),
+        ]
+        if show_notes:
+            row.append(_plain(state.operator_note or ""))
+        table.add_row(*row)
     return table
 
 
@@ -1028,12 +1633,14 @@ def _evidence_record_review_table(
     table.add_column("Source document")
     table.add_column("Location", no_wrap=True)
     table.add_column("Freshness")
+    table.add_column("Action")
     table.add_column("Flags")
     if excerpt_limit is not None:
         table.add_column("Excerpt")
     if not deal_review.evidence_records:
         row = [
             _plain("No matching evidence records"),
+            _plain(""),
             _plain(""),
             _plain(""),
             _plain(""),
@@ -1050,12 +1657,23 @@ def _evidence_record_review_table(
             _plain(str(evidence.document_path)),
             _plain(_evidence_location(evidence)),
             _plain(_enum_label(evidence.source_freshness)),
+            _plain(_evidence_action_status(deal_review, evidence.id)),
             _plain(_evidence_flags(evidence)),
         ]
         if excerpt_limit is not None:
             row.append(_plain(_bounded_excerpt(evidence.text, excerpt_limit)))
         table.add_row(*row)
     return table
+
+
+def _evidence_action_status(deal_review: DealEvidenceReview, evidence_id: str) -> str:
+    summary = deal_review.action_summary
+    if summary is None:
+        return "none"
+    state = summary.evidence_states.get(evidence_id)
+    if state is None:
+        return "none"
+    return _action_status_label(state.status)
 
 
 def _evidence_source_reference(evidence: object) -> str:
@@ -1454,6 +2072,10 @@ def evaluate_deal(
     summary.add_row(
         _plain("Evidence health"),
         _plain(_evaluate_deal_evidence_health_text(result.evidence_review)),
+    )
+    summary.add_row(
+        _plain("Evidence actions"),
+        _plain(_evaluate_deal_evidence_action_text(result.evidence_review)),
     )
     summary.add_row(
         _plain("External research imported"),
@@ -2061,6 +2683,17 @@ def _evaluate_deal_evidence_health_text(
     if info_count:
         parts.append(_research_count_phrase(info_count, "note"))
     return ", ".join(parts)
+
+
+def _evaluate_deal_evidence_action_text(
+    evidence_review: DealEvidenceReview | None,
+) -> str:
+    if evidence_review is None or evidence_review.action_summary is None:
+        return "none"
+    summary = evidence_review.action_summary
+    if summary.valid_action_count == 0 and summary.stale_action_count == 0:
+        return "none"
+    return _action_summary_text(summary)
 
 
 def _research_count_phrase(count: int, singular: str, plural: str | None = None) -> str:

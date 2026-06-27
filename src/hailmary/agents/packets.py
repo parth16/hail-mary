@@ -8,6 +8,11 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from hailmary.config import AppConfig, ConfigError, validate_local_state
+from hailmary.evidence.actions import (
+    EvidenceActionError,
+    EvidenceActionSummary,
+    apply_evidence_actions,
+)
 from hailmary.evidence.review import (
     EvidenceHealthMetric,
     ReviewIssueSummary,
@@ -202,7 +207,9 @@ def prepare_agent_packets(
             f"Could not read the private portfolio ledger: {exc}"
         ) from exc
     packet_files: list[AgentPacketFile] = []
-    packet_inputs: list[tuple[IngestedDeal, EvidenceStore, ScoredDeal]] = []
+    packet_inputs: list[
+        tuple[IngestedDeal, EvidenceStore, ScoredDeal, set[str], EvidenceActionSummary]
+    ] = []
 
     for deal in summary.deals:
         if deal.evidence_store_path is None:
@@ -221,19 +228,38 @@ def prepare_agent_packets(
                 f"{evidence_store_path}. Run `hailmary ingest-folder` again."
             )
         store = _load_evidence_store(evidence_store_path, company_name=deal.company_name)
+        try:
+            action_application = apply_evidence_actions(config=config, store=store)
+        except EvidenceActionError as exc:
+            raise AgentPacketError(str(exc)) from exc
+        store = action_application.store
         ranking_scored_deal = score_evidence_store(
             store,
             config=config,
             capital_remaining=max(status.available_capital, config.max_check),
         )
-        packet_inputs.append((deal, store, ranking_scored_deal))
+        packet_inputs.append(
+            (
+                deal,
+                store,
+                ranking_scored_deal,
+                action_application.packet_quote_only_evidence_ids,
+                action_application.summary,
+            )
+        )
 
     scored_by_index = _score_with_ranked_capital_allocation(
         packet_inputs,
         config=config,
         available_capital=status.available_capital,
     )
-    for index, (deal, store, _) in enumerate(packet_inputs):
+    for index, (
+        deal,
+        store,
+        _,
+        packet_quote_only_evidence_ids,
+        action_summary,
+    ) in enumerate(packet_inputs):
         scored_deal = scored_by_index[index]
         for role in roles:
             packet = build_agent_input_packet(
@@ -242,6 +268,8 @@ def prepare_agent_packets(
                 role=role,
                 created_at=packet_created_at,
                 source_documents=deal.documents,
+                quote_only_evidence_ids=packet_quote_only_evidence_ids,
+                action_summary=action_summary,
             )
             packet_path = (
                 output_dir / f"{slugify(deal.company_name)}-{deal.id}-{role}.json"
@@ -264,7 +292,9 @@ def prepare_agent_packets(
 
 
 def _score_with_ranked_capital_allocation(
-    packet_inputs: list[tuple[IngestedDeal, EvidenceStore, ScoredDeal]],
+    packet_inputs: list[
+        tuple[IngestedDeal, EvidenceStore, ScoredDeal, set[str], EvidenceActionSummary]
+    ],
     *,
     config: AppConfig,
     available_capital: int,
@@ -275,7 +305,7 @@ def _score_with_ranked_capital_allocation(
         enumerate(packet_inputs),
         key=lambda item: portfolio_rank_key(item[1][2]),
     )
-    for index, (_, store, _) in ranked_inputs:
+    for index, (_, store, _, _, _) in ranked_inputs:
         scored_deal = score_evidence_store(
             store,
             config=config,
@@ -296,17 +326,22 @@ def build_agent_input_packet(
     max_evidence_chars: int = MAX_PACKET_EVIDENCE_CHARS,
     source_documents: Sequence[IngestedDocument] = (),
     committee_context: AgentCommitteeContext | None = None,
+    quote_only_evidence_ids: set[str] | None = None,
+    action_summary: EvidenceActionSummary | None = None,
 ) -> AgentInputPacket:
     verified_claims = validated_verified_claims(store)
+    quote_only_ids = quote_only_evidence_ids or set()
+    quotes_by_evidence_id = _preferred_quotes_by_evidence_id(verified_claims)
     selected_evidence = _select_evidence_records(
         store,
         scored_deal,
         verified_claims,
+        quotes_by_evidence_id=quotes_by_evidence_id,
+        quote_only_evidence_ids=quote_only_ids,
         max_evidence_records=max_evidence_records,
     )
     selected_evidence_ids = [evidence.id for evidence in selected_evidence]
     allowed_evidence_ids = set(selected_evidence_ids)
-    quotes_by_evidence_id = _preferred_quotes_by_evidence_id(verified_claims)
     selected_claims = [
         _claim_item(claim, allowed_evidence_ids=allowed_evidence_ids)
         for claim in verified_claims
@@ -317,6 +352,7 @@ def build_agent_input_packet(
             evidence,
             max_evidence_chars=max_evidence_chars,
             preferred_quotes=quotes_by_evidence_id.get(evidence.id, []),
+            quote_only=evidence.id in quote_only_ids,
         )
         for evidence in selected_evidence
     ]
@@ -363,6 +399,7 @@ def build_agent_input_packet(
             store,
             source_documents=source_documents,
             scored_deal=scored_deal,
+            action_summary=action_summary,
         ),
         scoring_support=_scoring_support_context(
             scored_deal,
@@ -555,11 +592,13 @@ def _evidence_health_context(
     *,
     source_documents: Sequence[IngestedDocument],
     scored_deal: ScoredDeal,
+    action_summary: EvidenceActionSummary | None,
 ) -> AgentEvidenceHealthContext:
     health = build_evidence_health(
         store,
         source_documents,
         recommendation_evidence_ids=_scoring_reference_evidence_ids(scored_deal),
+        action_summary=action_summary,
     )
     return AgentEvidenceHealthContext(
         evidence_count=store.evidence_count,
@@ -818,6 +857,8 @@ def _select_evidence_records(
     scored_deal: ScoredDeal,
     verified_claims: list[ClaimRecord],
     *,
+    quotes_by_evidence_id: dict[str, list[str]],
+    quote_only_evidence_ids: set[str],
     max_evidence_records: int,
 ) -> list[EvidenceRecord]:
     cited_ids = _cited_evidence_ids(scored_deal, verified_claims, store)
@@ -827,6 +868,11 @@ def _select_evidence_records(
     for evidence in store.evidence:
         if len(selected) >= max_evidence_records:
             break
+        if (
+            evidence.id in quote_only_evidence_ids
+            and not quotes_by_evidence_id.get(evidence.id)
+        ):
+            continue
         if evidence.id in cited_ids:
             selected.append(evidence)
             selected_ids.add(evidence.id)
@@ -834,6 +880,11 @@ def _select_evidence_records(
     for evidence in store.evidence:
         if len(selected) >= max_evidence_records:
             break
+        if (
+            evidence.id in quote_only_evidence_ids
+            and not quotes_by_evidence_id.get(evidence.id)
+        ):
+            continue
         if evidence.id not in selected_ids:
             selected.append(evidence)
             selected_ids.add(evidence.id)
@@ -912,12 +963,14 @@ def _evidence_item(
     *,
     max_evidence_chars: int,
     preferred_quotes: list[str],
+    quote_only: bool = False,
 ) -> AgentEvidenceItem:
-    truncated = len(evidence.text) > max_evidence_chars
+    truncated = quote_only or len(evidence.text) > max_evidence_chars
     text = _packet_evidence_text(
         evidence.text,
         max_evidence_chars=max_evidence_chars,
         preferred_quotes=preferred_quotes,
+        quote_only=quote_only,
     )
     return AgentEvidenceItem(
         id=evidence.id,
@@ -939,10 +992,18 @@ def _packet_evidence_text(
     *,
     max_evidence_chars: int,
     preferred_quotes: list[str],
+    quote_only: bool = False,
 ) -> str:
-    if len(text) <= max_evidence_chars:
-        return text
     quotes = [quote for quote in preferred_quotes if quote and quote in text]
+    if quote_only:
+        quote_only_text = "\n...\n".join(quotes)
+        if len(quote_only_text) <= max_evidence_chars:
+            return quote_only_text
+        if not quotes:
+            return ""
+        return quote_only_text[:max_evidence_chars].rstrip()
+    elif len(text) <= max_evidence_chars:
+        return text
     if not quotes:
         return text[:max_evidence_chars].rstrip()
 

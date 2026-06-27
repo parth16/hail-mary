@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from hailmary.config import AppConfig, ConfigError, validate_local_state
+from hailmary.evidence.actions import EvidenceActionError, apply_evidence_actions
 from hailmary.portfolio import PortfolioError, portfolio_status
 from hailmary.portfolio.scenario import (
     allowed_check_tiers_for_available_capital,
@@ -78,6 +79,10 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
                 f"{evidence_store_path}. Run `hailmary ingest-folder` again."
             )
         store = _load_evidence_store(evidence_store_path, company_name=deal.company_name)
+        try:
+            store = apply_evidence_actions(config=config, store=store).store
+        except EvidenceActionError as exc:
+            raise ScoringError(str(exc)) from exc
         ranking_scored_deal = score_evidence_store(
             store,
             config=config,

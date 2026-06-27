@@ -14,6 +14,7 @@ import hailmary.evaluation as evaluation
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder, openai_review_messages
+from hailmary.evidence.actions import EvidenceActionStatus, record_evidence_action
 from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
 from hailmary.portfolio import add_portfolio_investment
 from hailmary.research import (
@@ -367,6 +368,163 @@ def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "## External Research" in memo_text
     assert "Imported 1 external research evidence record before scoring." in memo_text
+
+
+def test_evaluate_deal_excludes_actioned_evidence_before_scoring_and_packets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = tmp_path / "ActionFilterCo"
+    company_dir.mkdir()
+    (company_dir / "terms.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M. "
+        "Minimum investment $1,000. Lead investor committed and seed round is active.",
+        encoding="utf-8",
+    )
+    (company_dir / "excluded-traction.txt").write_text(
+        "EXCLUDED_MARKER ARR revenue growth with paid customers and retention.",
+        encoding="utf-8",
+    )
+    config = AppConfig(data_dir=tmp_path / "data", local_only=True)
+    initial = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    excluded_evidence = next(
+        evidence for evidence in store.evidence if "EXCLUDED_MARKER" in evidence.text
+    )
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        evidence_id=excluded_evidence.id,
+        status=EvidenceActionStatus.EXCLUDED,
+        note="Synthetic exclusion note.",
+    )
+
+    _set_openai_env(monkeypatch)
+    client = RecordingReviewClient()
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+        run_research=False,
+    )
+
+    score_evidence_ids = {
+        evidence_id
+        for factor in result.deterministic_score.score_factors
+        for evidence_id in factor.evidence_ids
+    }
+    packet_evidence_ids = {
+        evidence.id for packet, _, _ in client.calls for evidence in packet.evidence
+    }
+    serialized_payloads = "\n".join(client.request_payloads)
+    assert result.evidence_count == initial.evidence_count - 1
+    assert excluded_evidence.id not in score_evidence_ids
+    assert excluded_evidence.id not in packet_evidence_ids
+    assert "EXCLUDED_MARKER" not in serialized_payloads
+    assert result.evidence_review is not None
+    assert result.evidence_review.action_summary is not None
+    assert result.evidence_review.action_summary.excluded_evidence_count == 1
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Evidence actions:" in memo_text
+    assert "excluded: 1" in memo_text
+    assert "EXCLUDED_MARKER" not in memo_text
+
+
+def test_evaluate_deal_claim_exclusion_suppresses_final_memo_excerpt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = tmp_path / "SharedClaimCo"
+    company_dir.mkdir()
+    (company_dir / "shared-terms.txt").write_text(
+        "Valuation cap $8M. EXCLUDED_MEMO_MARKER Discount 20%. "
+        "Round size $1M. Minimum investment $1,000. "
+        "Lead investor committed and seed round is active.",
+        encoding="utf-8",
+    )
+    config = AppConfig(data_dir=tmp_path / "data", local_only=True)
+    initial = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    excluded_claim = next(claim for claim in store.claims if claim.label == "discount")
+    shared_evidence_id = excluded_claim.citations[0].evidence_id
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        claim_id=excluded_claim.id,
+        status=EvidenceActionStatus.EXCLUDED,
+        note="Synthetic claim exclusion.",
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+
+    assert result.evidence_count == initial.evidence_count
+    assert result.evidence_review is not None
+    assert any(
+        evidence.id == shared_evidence_id
+        for evidence in result.evidence_review.evidence_records
+    )
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Valuation cap $8M" in memo_text
+    assert "Round size $1M" in memo_text
+    assert "EXCLUDED_MEMO_MARKER" not in memo_text
+    assert "Discount 20%" not in memo_text
+
+
+def test_evaluate_deal_surfaces_needs_review_evidence_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="NeedsReviewCo")
+    config = AppConfig(data_dir=tmp_path / "data", local_only=True)
+    initial = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        evidence_id=store.evidence[0].id,
+        status=EvidenceActionStatus.NEEDS_REVIEW,
+        note="Synthetic needs-review note.",
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+
+    assert any("needs review" in warning for warning in result.warnings)
+    assert any("needs review" in limitation for limitation in result.operator_limitations)
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "needs review" in memo_text
+    assert "Synthetic needs-review note" not in memo_text
 
 
 def test_evaluate_deal_blocks_bad_supplied_research_results_file(
@@ -875,6 +1033,61 @@ def test_deterministic_citation_validation_uses_full_evidence_text() -> None:
     assert references == [
         AgentEvidenceReference(evidence_id="ev-long", quote=opening_quote)
     ]
+
+
+def test_local_only_quote_only_evidence_does_not_render_deterministic_quote() -> None:
+    sensitive_opening = "Sensitive excluded-claim wording should stay hidden"
+    evidence = _evidence_record(
+        "ev-shared",
+        f"{sensitive_opening}. Valuation cap $8M.",
+        "memo.txt",
+    )
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="SharedEvidenceCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence],
+        claims=[],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="SharedEvidenceCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=45,
+        one_line_reason="Rule-based scoring found limited support.",
+        score_factors=[
+            ScoreFactor(
+                name="Synthetic support",
+                score=4,
+                max_score=20,
+                explanation="Synthetic factor for quote-only citation handling.",
+                evidence_ids=[evidence.id],
+            )
+        ],
+    )
+
+    final_output, guarded = evaluation._rule_based_final_decision(
+        scored_deal,
+        store,
+        mode=evaluation.EvaluationMode(
+            name="local-only",
+            model_backed=False,
+            explanation="Local-only mode was used.",
+            limitation="Local-only mode was used.",
+        ),
+        quote_only_evidence_ids={evidence.id},
+    )
+
+    assert guarded.recommendation.evidence == [
+        AgentEvidenceReference(evidence_id=evidence.id)
+    ]
+    assert final_output.summary[0].evidence == [
+        AgentEvidenceReference(evidence_id=evidence.id)
+    ]
+    assert sensitive_opening not in evaluation._citation_text(
+        guarded.recommendation.evidence
+    )
 
 
 def test_deterministic_quote_preserves_source_whitespace_for_validation() -> None:
