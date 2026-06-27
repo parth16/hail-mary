@@ -428,6 +428,15 @@ def _cli_decisive_factor(result: DealEvaluationResult) -> str:
     deterministic = result.deterministic_score
     reason = _reason_fragment(deterministic.one_line_reason)
     uncertainty_prefix = _uncertainty_prefix(result.final_recommendation.reason)
+    if _evidence_audit_controlled_final_pass(result):
+        return _clean_cli_commentary_text(
+            (
+                f"{uncertainty_prefix}The recommendation is PASS because evidence "
+                "completeness found blocking gaps in the source-linked support. "
+                "Resolve those gaps before relying on an INVEST decision."
+            ),
+            max_chars=360,
+        )
     if _final_recommendation_was_overridden(result):
         return _clean_cli_commentary_text(
             (
@@ -577,6 +586,14 @@ def _final_check_size_was_capped(result: DealEvaluationResult) -> bool:
     return (
         model_recommendation.recommendation == result.final_recommendation.recommendation
         and model_recommendation.check_size != result.final_recommendation.check_size
+    )
+
+
+def _evidence_audit_controlled_final_pass(result: DealEvaluationResult) -> bool:
+    return (
+        result.final_recommendation.recommendation == Recommendation.PASS
+        and "Evidence completeness audit forced PASS/$0"
+        in result.final_recommendation.reason
     )
 
 
@@ -897,6 +914,7 @@ def evaluate_deal_folder(
                         quote_only_evidence_ids=(
                             action_application.packet_quote_only_evidence_ids
                         ),
+                        evidence_audit=evidence_audit,
                     )
                     final_review_was_model = False
                 else:
@@ -911,6 +929,7 @@ def evaluate_deal_folder(
                     store,
                     final_output,
                     quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+                    evidence_audit=evidence_audit,
                 )
                 final_review_was_model = True
         else:
@@ -927,6 +946,7 @@ def evaluate_deal_folder(
                 store,
                 mode=mode,
                 quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
+                evidence_audit=evidence_audit,
             )
         else:
             final_output, guarded_decision = _no_evidence_final_decision(scored_deal)
@@ -1280,6 +1300,7 @@ def _rule_based_final_decision(
     *,
     mode: EvaluationMode,
     quote_only_evidence_ids: set[str] | None = None,
+    evidence_audit: EvidenceCompletenessAudit | None = None,
 ) -> tuple[AgentReviewOutput, GuardedFinalDecision]:
     evidence_selection = _deterministic_recommendation_evidence_selection(
         store,
@@ -1296,7 +1317,15 @@ def _rule_based_final_decision(
     )
     final_confidence = scored_deal.confidence
     unsupported = not references
-    if (
+    audit_guardrail_reason = _evidence_audit_guardrail_reason(evidence_audit)
+    if scored_deal.recommendation == Recommendation.INVEST and audit_guardrail_reason:
+        final_recommendation = Recommendation.PASS
+        final_check_size = 0
+        final_reason = f"NEEDS_DILIGENCE: {audit_guardrail_reason}"
+        final_confidence = ConfidenceLevel.LOW
+        unsupported = True
+        references = []
+    elif (
         scored_deal.recommendation == Recommendation.INVEST
         and evidence_selection.filtered_reference_count
         and references
@@ -1339,7 +1368,7 @@ def _rule_based_final_decision(
     )
     limitations = [
         limitation
-        for limitation in (mode.limitation, citation_limitation)
+        for limitation in (mode.limitation, audit_guardrail_reason, citation_limitation)
         if limitation
     ]
     output = AgentReviewOutput(
@@ -1507,8 +1536,8 @@ def render_final_evaluation_memo(
         or final_output.recommendation.check_size != final_recommendation.check_size
     ):
         lines.append(
-            "- Guardrail override: deterministic scoring replaced the model "
-            "recommendation or check size."
+            "- Guardrail override: deterministic scoring or evidence-completeness "
+            "guardrails replaced the model recommendation or check size."
         )
     lines.append(
         f"- Rationale: {_memo_text(final_recommendation.reason)}"
@@ -2305,12 +2334,30 @@ def _guard_final_decision(
     final_output: AgentReviewOutput,
     *,
     quote_only_evidence_ids: set[str] | None = None,
+    evidence_audit: EvidenceCompletenessAudit | None = None,
 ) -> GuardedFinalDecision:
     model_recommendation = final_output.recommendation
     if model_recommendation is None:
         raise EvaluationError(
             "The final model review passed validation without a recommendation. "
             "Hail Mary did not write a final memo."
+        )
+
+    audit_guardrail_reason = _evidence_audit_guardrail_reason(evidence_audit)
+    if audit_guardrail_reason and scored_deal.recommendation == Recommendation.INVEST:
+        warning = (
+            "Evidence completeness guardrail forced final PASS/$0 because blocking "
+            "gaps were found. Evidence completeness means whether saved source records "
+            "cover the key facts needed for the decision."
+        )
+        return GuardedFinalDecision(
+            recommendation=AgentRecommendationRationale(
+                recommendation=Recommendation.PASS,
+                check_size=0,
+                reason=f"NEEDS_DILIGENCE: {audit_guardrail_reason}",
+                evidence=[],
+            ),
+            warning=warning,
         )
 
     if scored_deal.recommendation == Recommendation.PASS:
@@ -3010,6 +3057,25 @@ def _evidence_audit_limitations(
         "Evidence completeness audit found missing, weak, stale, or unresolved inputs "
         "that should be reviewed before relying on this memo."
     ]
+
+
+def _evidence_audit_guardrail_reason(
+    evidence_audit: EvidenceCompletenessAudit | None,
+) -> str | None:
+    if evidence_audit is None:
+        return None
+    blocking_findings = [
+        finding
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.BLOCKING
+    ]
+    if not blocking_findings:
+        return None
+    return (
+        "Evidence completeness audit forced PASS/$0 because blocking gaps were found: "
+        f"{_evidence_audit_finding_names(blocking_findings)}. Add clean source-linked "
+        "support or resolve the blocking issue before relying on an INVEST decision."
+    )
 
 
 def _evidence_audit_finding_names(findings: Sequence[object]) -> str:

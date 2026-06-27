@@ -14,6 +14,13 @@ import hailmary.evaluation as evaluation
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder, openai_review_messages
+from hailmary.evidence import (
+    EvidenceAuditFinding,
+    EvidenceAuditFindingKind,
+    EvidenceAuditReadiness,
+    EvidenceAuditSeverity,
+    EvidenceCompletenessAudit,
+)
 from hailmary.evidence.actions import EvidenceActionStatus, record_evidence_action
 from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
 from hailmary.portfolio import add_portfolio_investment
@@ -1833,6 +1840,67 @@ def test_evaluate_deal_deterministic_pass_overrides_model_invest(
     assert "Valuation cap" not in result.final_recommendation.reason
 
 
+def test_evaluate_deal_evidence_audit_blocker_overrides_model_invest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path)
+    client = RecordingReviewClient(
+        outputs_by_role={AgentRole.FINAL_DECISION: [_invest_output_json]}
+    )
+    monkeypatch.setattr(
+        evaluation,
+        "build_evidence_completeness_audit",
+        _blocking_evidence_audit,
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.INVEST
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+    assert result.final_recommendation.check_size == 0
+    assert "Evidence completeness audit forced PASS/$0" in result.final_recommendation.reason
+    assert any(
+        "Evidence completeness guardrail forced final PASS/$0" in warning
+        for warning in result.warnings
+    )
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Guardrail override" in memo_text
+    assert "evidence-completeness guardrails replaced the model recommendation" in memo_text
+
+
+def test_evaluate_deal_evidence_audit_blocker_overrides_local_invest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        evaluation,
+        "build_evidence_completeness_audit",
+        _blocking_evidence_audit,
+    )
+
+    result = evaluate_deal_folder(
+        _write_company_folder(tmp_path),
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.INVEST
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+    assert result.final_recommendation.check_size == 0
+    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+    assert "evidence completeness found blocking gaps" in commentary.decisive_factor
+    assert any("Missing price or valuation" in risk for risk in commentary.risks)
+
+
 def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3118,6 +3186,32 @@ def _write_company_folder(
         text = f"{text} " + ("filler " * 500) + "PRIVATE_FULL_TEXT_MARKER_AT_END"
     (company_dir / "memo.txt").write_text(text, encoding="utf-8")
     return company_dir
+
+
+def _blocking_evidence_audit(
+    store: EvidenceStore,
+    *,
+    scored_deal: ScoredDeal | None = None,
+) -> EvidenceCompletenessAudit:
+    del scored_deal
+    return EvidenceCompletenessAudit(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        readiness=EvidenceAuditReadiness.INSUFFICIENT,
+        findings=[
+            EvidenceAuditFinding(
+                id="finding_missing_price_valuation",
+                kind=EvidenceAuditFindingKind.MISSING_TERM,
+                severity=EvidenceAuditSeverity.BLOCKING,
+                title="Missing price or valuation",
+                explanation=(
+                    "No usable current source confirms the price or valuation needed "
+                    "to rely on an investment decision."
+                ),
+                missing_evidence=True,
+            )
+        ],
+    )
 
 
 def _commentary_result(
