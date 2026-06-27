@@ -2420,6 +2420,7 @@ def evaluate_deal(
         _plain(_scoring_missing_inputs_text(result.deterministic_score)),
     )
     summary.add_row(_plain("Final memo"), _plain(str(result.final_memo_path)))
+    summary.add_row(_plain("Final JSON"), _plain(str(result.final_json_path)))
     failed_roles = ", ".join(_role_display(role) for role in result.failed_specialist_roles)
     summary.add_row(_plain("Failed model roles"), _plain(failed_roles or "none"))
 
