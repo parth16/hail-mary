@@ -175,9 +175,30 @@ TRACTION_NEGATED_QUALIFIERS = (
     r"production|live)\s+){0,3}"
 )
 BENIGN_NEGATED_TRACTION_NOUNS = r"(?:issues?|concerns?|problems?|churn|complaints?)"
-TRACTION_CLAUSE_VERBS = (
-    r"(?:is|are|was|were|has|have|had|reports?|reported|shows?|showed|"
-    r"reaches|reached|grew|grows|now)\b"
+TRACTION_NEGATED_TERM_PATTERN = re.compile(
+    rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b",
+    re.IGNORECASE,
+)
+WITHOUT_TRACTION_PATTERN = re.compile(r"\bwithout\s+", re.IGNORECASE)
+WITHOUT_TRACTION_SEPARATOR_PATTERN = re.compile(
+    r"(?:\s*,\s*(?:(?:or|and)\s+)?|\s+(?:or|and)\s+)",
+    re.IGNORECASE,
+)
+TRACTION_POSITIVE_PREDICATE = (
+    r"(?:(?:is|are|was|were|has|have|had|reports?|reported|shows?|showed)\s+"
+    r"(?!(?:not|no|without|missing|absent|none)\b)"
+    r"(?:\S+\s+){0,5}?"
+    r"(?:\$|\d|strong|positive|validated|active|paying|paid|retained|"
+    r"growing|growth|grew|reached|meaningful|commercial)"
+    r"|(?:reaches|reached|grew|grows)\b)"
+)
+TRACTION_POSITIVE_CLAUSE_PATTERN = re.compile(
+    rf"\A{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+    rf"(?:\s+(?:or|and)\s+{TRACTION_NEGATED_QUALIFIERS}"
+    rf"{TRACTION_NEGATED_SIGNAL}\b)*"
+    rf"(?:\s+(?:metrics?|evidence|proof|data|numbers?|claims?))*"
+    rf"\s+{TRACTION_POSITIVE_PREDICATE}",
+    re.IGNORECASE,
 )
 NEGATED_TRACTION_PATTERNS = (
     re.compile(r"\bpre[-\s]?revenue\b", re.IGNORECASE),
@@ -198,25 +219,6 @@ NEGATED_TRACTION_PATTERNS = (
         rf"(?:(?:(?:\s*,\s*(?:(?:or|and)\s+)?)|\s+(?:or|and)\s+)"
         rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
         rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b))*",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        rf"\bwithout\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
-        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
-        rf"(?:(?:\s+(?:or|and)\s+{TRACTION_NEGATED_QUALIFIERS}"
-        rf"{TRACTION_NEGATED_SIGNAL}\b"
-        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b))|"
-        rf"(?:\s*,\s*(?:or|and)\s+{TRACTION_NEGATED_QUALIFIERS}"
-        rf"{TRACTION_NEGATED_SIGNAL}\b"
-        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
-        rf"(?!\s+{TRACTION_CLAUSE_VERBS}))|"
-        rf"(?:\s*,\s*{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
-        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
-        rf"(?!\s+{TRACTION_CLAUSE_VERBS}))+"
-        rf"\s*,?\s*(?:or|and)\s+{TRACTION_NEGATED_QUALIFIERS}"
-        rf"{TRACTION_NEGATED_SIGNAL}\b"
-        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
-        rf"(?!\s+{TRACTION_CLAUSE_VERBS}))*",
         re.IGNORECASE,
     ),
     re.compile(
@@ -2524,11 +2526,45 @@ def _negated_spans(
     text: str,
     negated_patterns: tuple[re.Pattern[str], ...],
 ) -> list[tuple[int, int]]:
-    return [
+    spans = [
         match.span()
         for pattern in negated_patterns
         for match in pattern.finditer(text)
     ]
+    if negated_patterns is NEGATED_TRACTION_PATTERNS:
+        spans.extend(_without_traction_negated_spans(text))
+    return spans
+
+
+def _without_traction_negated_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for without_match in WITHOUT_TRACTION_PATTERN.finditer(text):
+        first_term = TRACTION_NEGATED_TERM_PATTERN.match(text, without_match.end())
+        if first_term is None or _traction_term_has_benign_noun(text, first_term.end()):
+            continue
+        spans.append(first_term.span())
+        cursor = first_term.end()
+
+        while separator := WITHOUT_TRACTION_SEPARATOR_PATTERN.match(text, cursor):
+            term = TRACTION_NEGATED_TERM_PATTERN.match(text, separator.end())
+            if term is None or _traction_term_has_benign_noun(text, term.end()):
+                break
+            if TRACTION_POSITIVE_CLAUSE_PATTERN.match(text[term.start() :]):
+                break
+            spans.append(term.span())
+            cursor = term.end()
+
+    return spans
+
+
+def _traction_term_has_benign_noun(text: str, term_end: int) -> bool:
+    return bool(
+        re.match(
+            rf"\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b",
+            text[term_end:],
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _span_overlaps(

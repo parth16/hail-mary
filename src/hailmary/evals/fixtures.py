@@ -2977,28 +2977,44 @@ def run_missing_deal_terms_v3_score_fixture() -> None:
     )
 
 
-def run_conflicting_revenue_customers_score_fixture() -> None:
-    evidence = [
-        _evidence("ev_revenue_high", "ARR is $500K with 40 customers."),
-        _evidence("ev_revenue_low", "ARR is $50K with 4 customers."),
-    ]
-    high_claim = _claim("revenue", "$500K", evidence[0]).model_copy(
-        update={"verification_status": VerificationStatus.CONFLICTED}
+def run_conflicting_revenue_customers_score_fixture(work_dir: Path) -> None:
+    root = (work_dir / "score-conflicting-revenue-customers").resolve(strict=False)
+    company = root / "Synthetic ConflictCo"
+    company.mkdir(parents=True)
+    (company / "memo-a.txt").write_text(
+        "Valuation cap $8M. Discount 20%. Round size $1M. "
+        "ARR is $500K with 40 customers.",
+        encoding="utf-8",
     )
-    low_claim = _claim("revenue", "$50K", evidence[1]).model_copy(
-        update={"verification_status": VerificationStatus.CONFLICTED}
+    (company / "memo-b.txt").write_text(
+        "Valuation cap $10M. Discount 20%. Round size $1M. "
+        "ARR is $50K with 4 customers.",
+        encoding="utf-8",
     )
-    conflict = ClaimConflict(
-        id="conflict_revenue_customers",
-        deal_id="deal_eval",
-        claim_type=ClaimType.DEAL_TERM,
-        label="revenue",
-        normalized_values=[high_claim.normalized_value, low_claim.normalized_value],
-        claim_ids=[high_claim.id, low_claim.id],
-        notes="Synthetic revenue and customer-count evidence conflict.",
+    summary = ingest_folder(
+        root,
+        config=AppConfig(data_dir=(work_dir / "data").resolve(strict=False)),
+    )
+    _expect_equal(
+        len(summary.deals),
+        1,
+        "Expected conflicting traction fixture to ingest one synthetic deal.",
+    )
+    store_path = summary.deals[0].evidence_store_path
+    _expect(store_path is not None, "Expected ingestion to write an evidence store.")
+    assert store_path is not None
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    _expect(
+        any("ARR is $500K with 40 customers" in record.text for record in store.evidence)
+        and any("ARR is $50K with 4 customers" in record.text for record in store.evidence),
+        "Expected conflicting synthetic revenue and customer evidence to be ingested.",
+    )
+    _expect(
+        any(conflict.label == "valuation cap" for conflict in store.conflicts),
+        "Expected production claim extraction to create a valuation conflict.",
     )
     scored = score_evidence_store(
-        _store(evidence=evidence, claims=[high_claim, low_claim], conflicts=[conflict]),
+        store,
         config=AppConfig(data_dir=Path("data")),
     )
 
@@ -3010,14 +3026,20 @@ def run_conflicting_revenue_customers_score_fixture() -> None:
     _expect_equal(
         scored.recommendation,
         Recommendation.PASS,
-        "Expected conflicting revenue or customer evidence to force PASS.",
+        "Expected ingested conflicting evidence to force PASS.",
     )
     _expect_equal(scored.check_size, 0, "Expected conflicting-claims PASS to use $0.")
     conflict_gate = _triggered_gate(scored, "Conflicting material deal terms")
-    _expect_equal(
-        conflict_gate.evidence_ids,
-        ["ev_revenue_high", "ev_revenue_low"],
+    _expect(
+        len(conflict_gate.evidence_ids) == 2,
         "Expected the conflict gate to cite both conflicting synthetic records.",
+    )
+    _expect(
+        all(
+            evidence_id in {record.id for record in store.evidence}
+            for evidence_id in conflict_gate.evidence_ids
+        ),
+        "Expected conflict gate evidence IDs to come from the ingested evidence store.",
     )
 
 

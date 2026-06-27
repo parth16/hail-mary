@@ -454,7 +454,7 @@ def _eval_definitions() -> list[EvalDefinition]:
                     "deterministic recommendation at PASS."
                 ),
             ),
-            run=lambda _: fixtures.run_conflicting_revenue_customers_score_fixture(),
+            run=fixtures.run_conflicting_revenue_customers_score_fixture,
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
