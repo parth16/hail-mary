@@ -611,7 +611,7 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
         _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
         _evidence(
             "ev_return",
-            "Ownership 1%. Estimated dilution 20%. SPV expenses 5%. Carry 20%. "
+            "Investor ownership 1%. Estimated dilution 20%. SPV expenses 5%. Carry 20%. "
             "Exit value $1B.",
         ),
         _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
@@ -685,7 +685,7 @@ def test_net_return_math_adds_round_size_to_pre_money_valuation() -> None:
         _evidence("ev_round", "Round size $20M."),
         _evidence(
             "ev_return",
-            "Ownership 1%. Estimated dilution 20%. SPV expenses 5%. Carry 20%. "
+            "Investor ownership 1%. Estimated dilution 20%. SPV expenses 5%. Carry 20%. "
             "Exit value $1B.",
         ),
     ]
@@ -702,6 +702,30 @@ def test_net_return_math_adds_round_size_to_pre_money_valuation() -> None:
     assert scored.net_return.entry_valuation == 60_000_000
     assert scored.net_return.net_return_multiple == 10
     assert scored.net_return.evidence_ids == ["ev_valuation", "ev_round", "ev_return"]
+
+
+def test_net_return_math_ignores_founder_ownership_as_check_input() -> None:
+    evidence = [
+        _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_return",
+            "Founder ownership 60%. Estimated dilution 20%. SPV expenses 5%. "
+            "Carry 20%. Exit value $1B.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.estimated_ownership_percent is None
+    assert "ownership" in scored.net_return.missing_inputs
 
 
 def test_net_return_math_needs_round_size_for_pre_money_valuation() -> None:
@@ -1051,7 +1075,7 @@ def test_valuation_net_return_factor_keeps_all_return_input_evidence_ids() -> No
     evidence = [
         _evidence("ev_valuation", "Pre-money valuation $40M."),
         _evidence("ev_round", "Round size $20M."),
-        _evidence("ev_ownership", "Ownership 1%."),
+        _evidence("ev_ownership", "Investor ownership 1%."),
         _evidence("ev_dilution", "Estimated dilution 20%."),
         _evidence("ev_fees", "SPV expenses 5%."),
         _evidence("ev_carry", "Carry 20%."),
@@ -1272,6 +1296,23 @@ def test_score_evidence_store_passes_when_no_nonzero_check_fits() -> None:
         gate.name == "No available check size"
         for gate in scored.triggered_kill_gates
     )
+
+
+def test_score_evidence_store_explains_risk_cap_below_minimum_check() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_strong", company_name="StrongCo"),
+        config=AppConfig(data_dir=Path("data"), min_check=5_000),
+    )
+
+    no_check_gate = next(
+        gate
+        for gate in scored.triggered_kill_gates
+        if gate.name == "No available check size"
+    )
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert "Risk caps" in no_check_gate.reason
+    assert "minimum check" in no_check_gate.reason
 
 
 def test_score_evidence_store_matches_traction_keywords_as_words() -> None:
@@ -1507,6 +1548,37 @@ def test_score_evidence_store_ignores_negated_funding_language() -> None:
 
     assert scored.fundability_risk == FundabilityRisk.HIGH
     assert _score_factor(scored, "Next-round fundability").evidence_ids == ["ev_funding"]
+
+
+def test_score_evidence_store_treats_mixed_funding_as_high_risk() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers."),
+        _evidence("ev_positive_funding", "Lead investor committed."),
+        _evidence("ev_negative_funding", "No institutional follow-on is confirmed."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    fundability_factor = _score_factor(scored, "Next-round fundability")
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+    assert fundability_factor.evidence_ids == [
+        "ev_positive_funding",
+        "ev_negative_funding",
+    ]
+    assert fundability_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
+    assert (
+        "resolved lead investor, institutional investor, or follow-on financing conflict"
+        in fundability_factor.missing_inputs
+    )
 
 
 def test_score_evidence_store_ignores_qualified_negated_funding_language() -> None:

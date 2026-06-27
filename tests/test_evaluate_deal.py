@@ -2016,7 +2016,7 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
         body=(
             "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M. "
             "ARR revenue growth with paid customers and retention. "
-            "Lead investor committed. Ownership 1%. Estimated dilution 20%. "
+            "Lead investor committed. Investor ownership 1%. Estimated dilution 20%. "
             "SPV expenses 5%. Carry 20%. Exit value $1B."
         ),
     )

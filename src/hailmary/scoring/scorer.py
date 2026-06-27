@@ -109,7 +109,10 @@ STAGE_NEGATED_PATTERNS = (
 )
 RETURN_INPUT_PATTERNS = {
     "ownership": re.compile(
-        r"\b(?:post[-\s]?money\s+|target\s+|expected\s+|estimated\s+)?ownership\b"
+        r"\b(?:(?:investor|investment|spv|fund|platform|check|our|target|"
+        r"expected|estimated|post[-\s]?money|pro[-\s]?forma)\s+ownership|"
+        r"ownership\s+(?:target|for\s+(?:our\s+)?(?:check|investment|"
+        r"investor|spv|fund|platform)))\b"
         r"\s*(?:is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
         re.IGNORECASE,
     ),
@@ -340,7 +343,16 @@ def score_evidence_store(
             KillGate(
                 name="No available check size",
                 triggered=True,
-                reason="No configured check size fits the remaining capital.",
+                reason=_no_available_check_size_reason(
+                    total_score,
+                    config=config,
+                    confidence=confidence,
+                    platform_minimum_check=platform_minimum_check,
+                    capital_remaining=available_capital,
+                    valuation_risk=valuation_risk,
+                    fundability_risk=fundability_risk,
+                    net_return=net_return,
+                ),
             )
         )
 
@@ -806,7 +818,12 @@ def _fundability_factor(
     }
     positive_funding_evidence = _positive_funding_evidence(store.evidence)
     negative_funding_evidence = _negative_funding_evidence(store.evidence)
-    matched_evidence = positive_funding_evidence or negative_funding_evidence
+    matched_evidence = list(
+        {
+            evidence.id: evidence
+            for evidence in [*positive_funding_evidence, *negative_funding_evidence]
+        }.values()
+    )
     positive_funding_is_stale_only = _all_records_stale(positive_funding_evidence)
     missing_inputs: list[str] = []
     if not positive_funding_evidence:
@@ -817,6 +834,10 @@ def _fundability_factor(
         missing_inputs.append(
             "current lead investor, institutional investor, or follow-on evidence"
         )
+    if negative_funding_evidence:
+        missing_inputs.append(
+            "resolved lead investor, institutional investor, or follow-on financing conflict"
+        )
     if not verified_claims:
         missing_inputs.append("verified deal terms")
     if pmf_level != PMFLevel.DEVELOPING:
@@ -824,7 +845,13 @@ def _fundability_factor(
     elif _all_records_stale(_positive_traction_evidence(store.evidence)):
         missing_inputs.append("current customer, revenue, retention, or usage evidence")
     explanation = f"Next-round fundability risk is {fundability_risk}."
-    if negative_funding_evidence and not positive_funding_evidence:
+    if negative_funding_evidence and positive_funding_evidence:
+        explanation = (
+            "Next-round fundability risk is high because funding support is "
+            "contradicted by source-linked missing lead, institutional, or "
+            "follow-on financing evidence."
+        )
+    elif negative_funding_evidence:
         explanation = (
             "Next-round fundability risk is high because source-linked evidence says "
             "lead, institutional, or follow-on financing is missing."
@@ -1325,12 +1352,12 @@ def _fundability_risk(
         (has_traction and _all_records_stale(traction_evidence))
         or (has_funding_signal and _all_records_stale(funding_evidence))
     )
+    if has_missing_funding_signal:
+        return FundabilityRisk.HIGH
     if has_terms and has_traction and has_funding_signal:
         if has_only_stale_support:
             return FundabilityRisk.HIGH
         return FundabilityRisk.LOW
-    if has_missing_funding_signal:
-        return FundabilityRisk.HIGH
     if has_terms and has_traction:
         return FundabilityRisk.MEDIUM
     return FundabilityRisk.HIGH
@@ -1494,6 +1521,53 @@ def _check_size_cap(
     ):
         cap = _min_optional_cap(cap, _one_tier_lower(target))
     return cap
+
+
+def _no_available_check_size_reason(
+    total_score: int,
+    *,
+    config: AppConfig,
+    confidence: ConfidenceLevel,
+    platform_minimum_check: int | None,
+    capital_remaining: int,
+    valuation_risk: ValuationRisk,
+    fundability_risk: FundabilityRisk,
+    net_return: NetReturnEstimate,
+) -> str:
+    target = _target_check_size(total_score, confidence=confidence)
+    cap = _check_size_cap(
+        target,
+        confidence=confidence,
+        valuation_risk=valuation_risk,
+        fundability_risk=fundability_risk,
+        net_return=net_return,
+    )
+    if cap is not None:
+        base_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+        )
+        capped_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+            check_size_cap=cap,
+        )
+        if base_tiers and not capped_tiers:
+            minimum_check = config.min_check
+            if platform_minimum_check is not None:
+                minimum_check = max(minimum_check, platform_minimum_check)
+            if cap < minimum_check:
+                return (
+                    "Risk caps lowered the maximum check below the configured or "
+                    "platform minimum check."
+                )
+            return (
+                "No configured check size fits the risk cap, platform minimum, "
+                "and remaining capital."
+            )
+    return "No configured check size fits the platform minimum and remaining capital."
 
 
 def _min_optional_cap(current_cap: int | None, candidate_cap: int) -> int:
