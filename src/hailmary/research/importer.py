@@ -41,6 +41,7 @@ from .meridian import (
     clean_meridian_url,
 )
 from .providers import builtin_research_providers
+from .quality import STALE_SOURCE_DAYS, evidence_duplicate_keys
 from .schemas import (
     ResearchImportDealSummary,
     ResearchImportRunSummary,
@@ -59,7 +60,6 @@ class ResearchImportError(RuntimeError):
     """External research results could not be imported safely."""
 
 
-STALE_SOURCE_DAYS = 365
 SUPPORTED_SOURCE_KINDS = {SourceKind.WEB, SourceKind.MERIDIAN, SourceKind.MANUAL_NOTE}
 SUPPORTED_DOCUMENT_TYPES = {
     DocumentType.WEB_PAGE,
@@ -146,11 +146,11 @@ def import_research_results(
     evidence_by_deal_id = {
         deal_id: list(store.evidence) for deal_id, store in stores.items()
     }
-    existing_ids_by_deal_id = {
+    existing_markers_by_deal_id = {
         deal_id: {
-            evidence_id
+            duplicate_marker
             for evidence in store.evidence
-            for evidence_id in _duplicate_ids_for_existing_evidence(
+            for duplicate_marker in _duplicate_markers_for_existing_evidence(
                 evidence,
                 deal_id=deal_id,
             )
@@ -169,7 +169,11 @@ def import_research_results(
 
     for match in matches:
         deal_id = match.deal.id
-        if match.evidence.id in existing_ids_by_deal_id[deal_id]:
+        duplicate_markers = _duplicate_markers_for_existing_evidence(
+            match.evidence,
+            deal_id=deal_id,
+        )
+        if duplicate_markers & existing_markers_by_deal_id[deal_id]:
             duplicate_counts[deal_id] = duplicate_counts.get(deal_id, 0) + 1
             continue
         evidence = _evidence_with_existing_meridian_document_id(
@@ -177,8 +181,8 @@ def import_research_results(
             existing_meridian_document_ids_by_deal_id[deal_id],
         )
         evidence_by_deal_id[deal_id].append(evidence)
-        existing_ids_by_deal_id[deal_id].update(
-            _duplicate_ids_for_existing_evidence(evidence, deal_id=deal_id)
+        existing_markers_by_deal_id[deal_id].update(
+            _duplicate_markers_for_existing_evidence(evidence, deal_id=deal_id)
         )
         imported_counts[deal_id] = imported_counts.get(deal_id, 0) + 1
         provider_id = match.result.provider_id
@@ -1013,16 +1017,24 @@ def _evidence_with_existing_meridian_document_id(
     return evidence.model_copy(update={"document_id": document_id})
 
 
-def _duplicate_ids_for_existing_evidence(
+def _duplicate_markers_for_existing_evidence(
     evidence: EvidenceRecord,
     *,
     deal_id: str,
 ) -> set[str]:
-    duplicate_ids = {evidence.id}
+    duplicate_markers = {f"id:{evidence.id}"}
     meridian_id = _canonical_meridian_evidence_id(evidence, deal_id=deal_id)
     if meridian_id is not None:
-        duplicate_ids.add(meridian_id)
-    return duplicate_ids
+        duplicate_markers.add(f"id:{meridian_id}")
+    duplicate_markers.update(
+        f"source:{_duplicate_key_marker(duplicate_key)}"
+        for duplicate_key in evidence_duplicate_keys(evidence, deal_key=deal_id)
+    )
+    return duplicate_markers
+
+
+def _duplicate_key_marker(duplicate_key: tuple[str, str, str]) -> str:
+    return "\0".join(duplicate_key)
 
 
 def _canonical_meridian_evidence_id(
