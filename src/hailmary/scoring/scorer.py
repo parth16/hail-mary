@@ -108,6 +108,14 @@ STAGE_NEGATED_PATTERNS = (
     ),
 )
 RETURN_INPUT_PATTERNS = {
+    "ownership": re.compile(
+        r"\b(?:(?:investor|investment|spv|fund|platform|check|our|target|"
+        r"post[-\s]?money|pro[-\s]?forma)\s+ownership|"
+        r"ownership\s+(?:target|for\s+(?:our\s+)?(?:check|investment|"
+        r"investor|spv|fund|platform)))\b"
+        r"\s*(?:is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
+        re.IGNORECASE,
+    ),
     "dilution": re.compile(
         r"\b(?:estimated\s+)?dilution\b\s*(?:is|of|at|:)?\s*(?P<value>\d+(?:\.\d+)?)\s?%",
         re.IGNORECASE,
@@ -147,16 +155,27 @@ NEGATED_GROSS_EXIT_PATTERNS = (
     ),
 )
 TRACTION_NEGATED_SIGNAL = (
-    r"(?:customers?|revenue|usage|retention|growth|pilots?|beta|lois?|waitlist)"
+    r"(?:customers?|revenue|arr|usage|retention|growth|pilots?|beta|lois?|waitlist)"
 )
 TRACTION_NEGATED_QUALIFIERS = (
     r"(?:(?:any|actual|customer|meaningful|material|measurable|real|recurring|commercial|signed|"
-    r"active|current|clear|validated|paying|paid|confirmed|contracted|"
+    r"active|current|clear|validated|paying|paid|confirmed|contracted|annual|"
     r"production|live)\s+){0,3}"
 )
 BENIGN_NEGATED_TRACTION_NOUNS = r"(?:issues?|concerns?|problems?|churn|complaints?)"
 NEGATED_TRACTION_PATTERNS = (
     re.compile(r"\bpre[-\s]?revenue\b", re.IGNORECASE),
+    re.compile(
+        rf"\b(?:planned|projected|expected|future|target|targeted)\s+"
+        rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?:\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b)*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bnot[-\s]?yet\s+{TRACTION_NEGATED_QUALIFIERS}"
+        rf"{TRACTION_NEGATED_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         rf"\bno\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
         rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
@@ -192,7 +211,22 @@ NEGATED_TRACTION_PATTERNS = (
     ),
 )
 BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
+BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
+BENIGN_FUNDING_CONCERN_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 NEGATED_FUNDING_PATTERNS = (
+    re.compile(
+        r"\b(?:planned|projected|expected|future|upcoming|target|targeted)\s+"
+        r"(?:lead\s+investor|institutional(?:\s+investors?)?|"
+        r"follow[-\s]?on)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bnot[-\s]?yet\s+"
+        r"(?:secured|identified|confirmed|named|signed)?\s*"
+        r"(?:a\s+)?(?:lead\s+investor|institutional(?:\s+investors?)?|"
+        r"follow[-\s]?on)\b",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"\bno\s+(?:(?:committed|identified|confirmed|named|signed|"
         r"secured|current|active)\s+)?lead\s+investor\b"
@@ -226,10 +260,30 @@ NEGATED_FUNDING_PATTERNS = (
         rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
         re.IGNORECASE,
     ),
-    re.compile(r"\bno\s+institutional(?:\s+(?:investors?|follow[-\s]?on))?\b", re.IGNORECASE),
-    re.compile(r"\bwithout\s+institutional(?:\s+investors?)?\b", re.IGNORECASE),
-    re.compile(r"\bno\s+(?:seed|follow[-\s]?on)(?:\s+\w+){0,3}\b", re.IGNORECASE),
-    re.compile(r"\bno\s+(?:\w+\s+){0,3}follow[-\s]?on\b", re.IGNORECASE),
+    re.compile(
+        r"\bno\s+institutional"
+        rf"(?!(?:\s+investors?)?\s+{BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS}\b)"
+        r"(?:\s+(?:investors?|follow[-\s]?on))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bwithout\s+institutional"
+        rf"(?!(?:\s+investors?)?\s+{BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS}\b)"
+        r"(?:\s+investors?)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno\s+"
+        rf"(?!(?:[\w-]+\s+){{0,4}}{BENIGN_FUNDING_CONCERN_NOUNS}\b)"
+        r"(?:seed|follow[-\s]?on)(?:\s+\w+){0,3}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bno\s+"
+        rf"(?!(?:[\w-]+\s+){{0,4}}{BENIGN_FUNDING_CONCERN_NOUNS}\b)"
+        r"(?:\w+\s+){0,3}follow[-\s]?on\b",
+        re.IGNORECASE,
+    ),
 )
 PRICING_TERM_LABELS = {
     "post-money valuation",
@@ -268,6 +322,7 @@ def score_evidence_store(
         platform_minimum_check=platform_minimum_check,
         capital_remaining=available_capital,
         valuation_risk=valuation_risk,
+        net_return=net_return,
         valuation_evidence_ids=_valuation_gate_evidence_ids(
             store,
             verified_claims,
@@ -301,6 +356,9 @@ def score_evidence_store(
             confidence=confidence,
             platform_minimum_check=platform_minimum_check,
             capital_remaining=available_capital,
+            valuation_risk=valuation_risk,
+            fundability_risk=fundability_risk,
+            net_return=net_return,
         )
     )
     if recommendation == Recommendation.INVEST and check_size == 0:
@@ -309,7 +367,16 @@ def score_evidence_store(
             KillGate(
                 name="No available check size",
                 triggered=True,
-                reason="No configured check size fits the remaining capital.",
+                reason=_no_available_check_size_reason(
+                    total_score,
+                    config=config,
+                    confidence=confidence,
+                    platform_minimum_check=platform_minimum_check,
+                    capital_remaining=available_capital,
+                    valuation_risk=valuation_risk,
+                    fundability_risk=fundability_risk,
+                    net_return=net_return,
+                ),
             )
         )
 
@@ -431,6 +498,7 @@ def _kill_gates(
     platform_minimum_check: int | None,
     capital_remaining: int,
     valuation_risk: ValuationRisk,
+    net_return: NetReturnEstimate,
     valuation_evidence_ids: list[str],
 ) -> list[KillGate]:
     minimum_above_maximum = (
@@ -453,6 +521,12 @@ def _kill_gates(
     missing_key_terms_evidence_ids = _missing_key_terms_evidence_ids(verified_claims)
     missing_key_terms = has_scorable_deal and not has_pricing_term
     valuation_too_high = has_scorable_deal and valuation_risk == ValuationRisk.HIGH
+    low_verified_return = (
+        has_scorable_deal
+        and net_return.support_status == ScoreSupportStatus.VERIFIED
+        and net_return.net_return_multiple is not None
+        and net_return.net_return_multiple < 1
+    )
     conflict_evidence_ids = _conflict_evidence_ids(store, valid_conflicts)
     return [
         KillGate(
@@ -533,6 +607,21 @@ def _kill_gates(
             support_status=(
                 ScoreSupportStatus.VERIFIED
                 if valuation_too_high
+                else ScoreSupportStatus.INFERRED
+            ),
+        ),
+        KillGate(
+            name="Verified return below capital back",
+            triggered=low_verified_return,
+            reason=(
+                "Verified return math is below 1x capital back."
+                if low_verified_return
+                else "Verified return math is not below 1x capital back."
+            ),
+            evidence_ids=net_return.evidence_ids,
+            support_status=(
+                ScoreSupportStatus.VERIFIED
+                if low_verified_return
                 else ScoreSupportStatus.INFERRED
             ),
         ),
@@ -638,11 +727,11 @@ def _evidence_authority_factor(store: EvidenceStore) -> ScoreFactor:
         evidence_ids=_evidence_authority_evidence_ids(store.evidence),
         support_status=(
             ScoreSupportStatus.NEEDS_DILIGENCE
-            if unknown_count
+            if stale_count or unknown_count
             else ScoreSupportStatus.VERIFIED
         ),
         missing_inputs=(
-            ["current source dates"] if unknown_count else []
+            ["current source dates"] if stale_count or unknown_count else []
         ),
     )
 
@@ -773,25 +862,68 @@ def _fundability_factor(
         FundabilityRisk.MEDIUM: 10,
         FundabilityRisk.LOW: 14,
     }
-    matched_evidence = _positive_funding_evidence(store.evidence)
+    positive_funding_evidence = _positive_funding_evidence(store.evidence)
+    negative_funding_evidence = _negative_funding_evidence(store.evidence)
+    positive_traction_evidence = _positive_traction_evidence(store.evidence)
+    positive_funding_is_not_current = _all_records_not_current(positive_funding_evidence)
+    positive_traction_is_not_current = _all_records_not_current(positive_traction_evidence)
+    matched_evidence = _dedupe_evidence_records(
+        [
+            *positive_funding_evidence,
+            *negative_funding_evidence,
+            *(positive_traction_evidence if positive_traction_is_not_current else []),
+        ]
+    )
     missing_inputs: list[str] = []
-    if not matched_evidence:
+    if not positive_funding_evidence:
         missing_inputs.append(
             "lead investor, institutional investor, or follow-on financing evidence"
+        )
+    elif positive_funding_is_not_current:
+        missing_inputs.append(
+            "current lead investor, institutional investor, or follow-on evidence"
+        )
+    if negative_funding_evidence:
+        missing_inputs.append(
+            "resolved lead investor, institutional investor, or follow-on financing conflict"
         )
     if not verified_claims:
         missing_inputs.append("verified deal terms")
     if pmf_level != PMFLevel.DEVELOPING:
         missing_inputs.append("customer, revenue, retention, or usage evidence")
+    elif positive_traction_is_not_current:
+        missing_inputs.append("current customer, revenue, retention, or usage evidence")
+    explanation = f"Next-round fundability risk is {fundability_risk}."
+    if negative_funding_evidence and positive_funding_evidence:
+        explanation = (
+            "Next-round fundability risk is high because funding support is "
+            "contradicted by source-linked missing lead, institutional, or "
+            "follow-on financing evidence."
+        )
+    elif negative_funding_evidence:
+        explanation = (
+            "Next-round fundability risk is high because source-linked evidence says "
+            "lead, institutional, or follow-on financing is missing."
+        )
+    elif positive_funding_is_not_current:
+        explanation = (
+            "Next-round fundability risk is high because funding support appears only "
+            "in stale or undated evidence."
+        )
+    elif positive_traction_is_not_current:
+        explanation = (
+            "Next-round fundability risk is high because traction support appears only "
+            "in stale or undated evidence."
+        )
     return ScoreFactor(
         name="Fundability and next-round risk",
         score=score_by_risk[fundability_risk],
         max_score=15,
-        explanation=f"Next-round fundability risk is {fundability_risk}.",
+        explanation=explanation,
         evidence_ids=[evidence.id for evidence in matched_evidence[:5]],
         support_status=(
             ScoreSupportStatus.VERIFIED
-            if matched_evidence and not missing_inputs
+            if positive_funding_evidence and not missing_inputs
             else ScoreSupportStatus.NEEDS_DILIGENCE
         ),
         missing_inputs=missing_inputs,
@@ -812,7 +944,10 @@ def _valuation_net_return_factor(
         ValuationRisk.LOW: 13,
     }
     score = score_by_risk[valuation_risk]
-    if net_return.net_return_multiple is not None:
+    if (
+        net_return.net_return_multiple is not None
+        and net_return.support_status == ScoreSupportStatus.VERIFIED
+    ):
         if net_return.net_return_multiple >= 10:
             score += 7
         elif net_return.net_return_multiple >= 5:
@@ -957,11 +1092,11 @@ def _valuation_risk(
         return ValuationRisk.HIGH
     medium_thresholds = {
         CompanyStage.PRE_SEED: 15_000_000,
-        CompanyStage.SEED: 35_000_000,
-        CompanyStage.SERIES_A: 100_000_000,
-        CompanyStage.SERIES_B_PLUS: 500_000_000,
-        CompanyStage.HARD_TECH_DEFENSE: 50_000_000,
-        CompanyStage.UNKNOWN: 25_000_000,
+        CompanyStage.SEED: 30_000_000,
+        CompanyStage.SERIES_A: 80_000_000,
+        CompanyStage.SERIES_B_PLUS: 450_000_000,
+        CompanyStage.HARD_TECH_DEFENSE: 45_000_000,
+        CompanyStage.UNKNOWN: 20_000_000,
     }
     if (
         entry_valuation >= medium_thresholds[company_stage]
@@ -978,28 +1113,28 @@ def _valuation_is_far_ahead(
     pmf_level: PMFLevel,
 ) -> bool:
     if company_stage == CompanyStage.PRE_SEED:
-        return entry_valuation >= 45_000_000 or (
+        return entry_valuation >= 40_000_000 or (
             entry_valuation >= 25_000_000 and pmf_level != PMFLevel.DEVELOPING
         )
     if company_stage == CompanyStage.SEED:
-        return entry_valuation >= 120_000_000 or (
-            entry_valuation >= 75_000_000 and pmf_level != PMFLevel.DEVELOPING
+        return entry_valuation >= 100_000_000 or (
+            entry_valuation >= 60_000_000 and pmf_level != PMFLevel.DEVELOPING
         )
     if company_stage == CompanyStage.SERIES_A:
-        return entry_valuation >= 300_000_000 or (
-            entry_valuation >= 175_000_000 and pmf_level != PMFLevel.DEVELOPING
+        return entry_valuation >= 250_000_000 or (
+            entry_valuation >= 150_000_000 and pmf_level != PMFLevel.DEVELOPING
         )
     if company_stage == CompanyStage.SERIES_B_PLUS:
-        return entry_valuation >= 1_000_000_000 or (
-            entry_valuation >= 750_000_000 and pmf_level != PMFLevel.DEVELOPING
+        return entry_valuation >= 900_000_000 or (
+            entry_valuation >= 650_000_000 and pmf_level != PMFLevel.DEVELOPING
         )
     if company_stage == CompanyStage.HARD_TECH_DEFENSE:
-        return entry_valuation >= 500_000_000 or (
-            entry_valuation >= 150_000_000 and pmf_level == PMFLevel.UNKNOWN
+        return entry_valuation >= 450_000_000 or (
+            entry_valuation >= 125_000_000 and pmf_level == PMFLevel.UNKNOWN
         )
     if company_stage == CompanyStage.UNKNOWN:
-        return entry_valuation >= 50_000_000
-    return entry_valuation >= 50_000_000 and pmf_level != PMFLevel.DEVELOPING
+        return entry_valuation >= 40_000_000
+    return entry_valuation >= 40_000_000 and pmf_level != PMFLevel.DEVELOPING
 
 
 def _net_return_estimate(
@@ -1059,6 +1194,8 @@ def _net_return_estimate(
     return_inputs = _return_inputs(store.evidence)
     evidence_ids = list(dict.fromkeys([*evidence_ids, *return_inputs.evidence_ids]))
     missing_inputs: list[str] = []
+    if return_inputs.ownership_percent is None:
+        missing_inputs.append("ownership")
     if return_inputs.dilution_percent is None:
         missing_inputs.append("dilution")
     if return_inputs.fees_and_carry_percent is None:
@@ -1068,15 +1205,18 @@ def _net_return_estimate(
 
     net_multiple: float | None = None
     if (
-        return_inputs.dilution_percent is not None
+        return_inputs.ownership_percent is not None
+        and return_inputs.dilution_percent is not None
         and return_inputs.fees_and_carry_percent is not None
         and return_inputs.gross_exit_value is not None
         and entry_valuation > 0
     ):
+        ownership_fraction = max(0.0, return_inputs.ownership_percent / 100)
         ownership_after_dilution = max(0.0, 1 - (return_inputs.dilution_percent / 100))
         proceeds_after_fees = max(0.0, 1 - (return_inputs.fees_and_carry_percent / 100))
         net_multiple = round(
             (return_inputs.gross_exit_value / entry_valuation)
+            * ownership_fraction
             * ownership_after_dilution
             * proceeds_after_fees,
             2,
@@ -1091,13 +1231,14 @@ def _net_return_estimate(
     else:
         explanation = (
             f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
-            f"Using cited dilution, fees or carry, and exit value, estimated net return "
-            f"is {net_multiple:g}x."
+            f"Using cited ownership, dilution, fees or carry, and exit value, "
+            f"estimated net return is {net_multiple:g}x."
         )
         support_status = ScoreSupportStatus.VERIFIED
 
     return NetReturnEstimate(
         entry_valuation=entry_valuation,
+        estimated_ownership_percent=return_inputs.ownership_percent,
         estimated_dilution_percent=return_inputs.dilution_percent,
         estimated_fees_and_carry_percent=return_inputs.fees_and_carry_percent,
         gross_exit_value=return_inputs.gross_exit_value,
@@ -1113,11 +1254,13 @@ class _ReturnInputs:
     def __init__(
         self,
         *,
+        ownership_percent: float | None,
         dilution_percent: float | None,
         fees_and_carry_percent: float | None,
         gross_exit_value: int | None,
         evidence_ids: list[str],
     ) -> None:
+        self.ownership_percent = ownership_percent
         self.dilution_percent = dilution_percent
         self.fees_and_carry_percent = fees_and_carry_percent
         self.gross_exit_value = gross_exit_value
@@ -1125,6 +1268,7 @@ class _ReturnInputs:
 
 
 def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
+    ownership_percent: float | None = None
     dilution_percent: float | None = None
     fees_percent: float | None = None
     carry_percent: float | None = None
@@ -1132,6 +1276,12 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
     gross_exit_value: int | None = None
     evidence_ids: list[str] = []
     for record in evidence:
+        ownership_match = RETURN_INPUT_PATTERNS["ownership"].search(record.text)
+        if ownership_percent is None and ownership_match:
+            parsed_ownership = _float_text(ownership_match.group("value"))
+            if parsed_ownership is not None and 0 <= parsed_ownership <= 100:
+                ownership_percent = parsed_ownership
+                evidence_ids.append(record.id)
         dilution_match = RETURN_INPUT_PATTERNS["dilution"].search(record.text)
         if dilution_percent is None and dilution_match:
             dilution_percent = _float_text(dilution_match.group("value"))
@@ -1168,6 +1318,7 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
     else:
         fees_and_carry = None
     return _ReturnInputs(
+        ownership_percent=ownership_percent,
         dilution_percent=dilution_percent,
         fees_and_carry_percent=fees_and_carry,
         gross_exit_value=gross_exit_value,
@@ -1247,8 +1398,19 @@ def _fundability_risk(
     if not store.evidence:
         return FundabilityRisk.UNKNOWN
     has_terms = bool(verified_claims)
-    has_traction = bool(_positive_traction_evidence(store.evidence))
-    has_funding_signal = bool(_positive_funding_evidence(store.evidence))
+    traction_evidence = _positive_traction_evidence(store.evidence)
+    funding_evidence = _positive_funding_evidence(store.evidence)
+    has_traction = bool(traction_evidence)
+    has_funding_signal = bool(funding_evidence)
+    has_missing_funding_signal = bool(_negative_funding_evidence(store.evidence))
+    has_only_non_current_support = (
+        (has_traction and _all_records_not_current(traction_evidence))
+        or (has_funding_signal and _all_records_not_current(funding_evidence))
+    )
+    if has_missing_funding_signal:
+        return FundabilityRisk.HIGH
+    if has_terms and has_traction and has_only_non_current_support:
+        return FundabilityRisk.HIGH
     if has_terms and has_traction and has_funding_signal:
         return FundabilityRisk.LOW
     if has_terms and has_traction:
@@ -1316,6 +1478,9 @@ def _diligence_questions(
                 priority=5,
                 question="Check whether the company can raise the next round.",
                 reason="The evidence has limited investor or growth signals.",
+                evidence_ids=[
+                    evidence.id for evidence in _negative_funding_evidence(store.evidence)[:5]
+                ],
             )
         )
     if valuation_risk == ValuationRisk.HIGH:
@@ -1363,14 +1528,27 @@ def _check_size_for_score(
     confidence: ConfidenceLevel,
     platform_minimum_check: int | None,
     capital_remaining: int,
+    valuation_risk: ValuationRisk,
+    fundability_risk: FundabilityRisk,
+    net_return: NetReturnEstimate,
 ) -> int:
     target = _target_check_size(total_score, confidence=confidence)
+    cap = _check_size_cap(
+        target,
+        confidence=confidence,
+        valuation_risk=valuation_risk,
+        fundability_risk=fundability_risk,
+        net_return=net_return,
+    )
+    if cap is not None:
+        target = min(target, cap)
     if platform_minimum_check is not None:
         target = max(target, platform_minimum_check)
     allowed_tiers = _available_nonzero_tiers(
         config,
         platform_minimum_check=platform_minimum_check,
         capital_remaining=capital_remaining,
+        check_size_cap=cap,
     )
     if not allowed_tiers:
         return 0
@@ -1378,6 +1556,88 @@ def _check_size_for_score(
     if tiers_at_or_above_target:
         return min(tiers_at_or_above_target)
     return max(allowed_tiers)
+
+
+def _check_size_cap(
+    target: int,
+    *,
+    confidence: ConfidenceLevel,
+    valuation_risk: ValuationRisk,
+    fundability_risk: FundabilityRisk,
+    net_return: NetReturnEstimate,
+) -> int | None:
+    cap: int | None = None
+    if confidence == ConfidenceLevel.LOW:
+        cap = 1_000
+    if (
+        valuation_risk == ValuationRisk.MEDIUM
+        or fundability_risk in {FundabilityRisk.MEDIUM, FundabilityRisk.HIGH}
+        or net_return.missing_inputs
+    ):
+        cap = _min_optional_cap(cap, _one_tier_lower(target))
+    return cap
+
+
+def _no_available_check_size_reason(
+    total_score: int,
+    *,
+    config: AppConfig,
+    confidence: ConfidenceLevel,
+    platform_minimum_check: int | None,
+    capital_remaining: int,
+    valuation_risk: ValuationRisk,
+    fundability_risk: FundabilityRisk,
+    net_return: NetReturnEstimate,
+) -> str:
+    target = _target_check_size(total_score, confidence=confidence)
+    cap = _check_size_cap(
+        target,
+        confidence=confidence,
+        valuation_risk=valuation_risk,
+        fundability_risk=fundability_risk,
+        net_return=net_return,
+    )
+    if cap is not None:
+        base_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+        )
+        capped_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+            check_size_cap=cap,
+        )
+        if base_tiers and not capped_tiers:
+            minimum_check = config.min_check
+            if platform_minimum_check is not None:
+                minimum_check = max(minimum_check, platform_minimum_check)
+            if cap < minimum_check:
+                return (
+                    "Risk caps lowered the maximum check below the configured or "
+                    "platform minimum check."
+                )
+            return (
+                "No configured check size fits the risk cap, platform minimum, "
+                "and remaining capital."
+            )
+    return "No configured check size fits the platform minimum and remaining capital."
+
+
+def _min_optional_cap(current_cap: int | None, candidate_cap: int) -> int:
+    if current_cap is None:
+        return candidate_cap
+    return min(current_cap, candidate_cap)
+
+
+def _one_tier_lower(target: int) -> int:
+    nonzero_tiers = [tier for tier in CHECK_SIZE_TIERS if tier > 0]
+    lower_or_equal = [tier for tier in nonzero_tiers if tier <= target]
+    if not lower_or_equal:
+        return nonzero_tiers[0]
+    current_index = nonzero_tiers.index(max(lower_or_equal))
+    return nonzero_tiers[max(0, current_index - 1)]
 
 
 def _target_check_size(total_score: int, *, confidence: ConfidenceLevel) -> int:
@@ -1399,11 +1659,14 @@ def _available_nonzero_tiers(
     *,
     platform_minimum_check: int | None,
     capital_remaining: int,
+    check_size_cap: int | None = None,
 ) -> list[int]:
     minimum_check = config.min_check
     if platform_minimum_check is not None:
         minimum_check = max(minimum_check, platform_minimum_check)
     maximum_check = min(config.max_check, capital_remaining, HARD_MAX_CHECK)
+    if check_size_cap is not None:
+        maximum_check = min(maximum_check, check_size_cap)
     return [
         tier
         for tier in CHECK_SIZE_TIERS
@@ -1565,6 +1828,10 @@ def _positive_traction_evidence(evidence: list[EvidenceRecord]) -> list[Evidence
     ]
 
 
+def _dedupe_evidence_records(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
+    return list({record.id: record for record in evidence}.values())
+
+
 def _positive_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
     return [
         record
@@ -1575,6 +1842,21 @@ def _positive_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceR
             negated_patterns=NEGATED_FUNDING_PATTERNS,
         )
     ]
+
+
+def _negative_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:
+    return [
+        record
+        for record in evidence
+        if _negated_spans(record.text, NEGATED_FUNDING_PATTERNS)
+    ]
+
+
+def _all_records_not_current(evidence: list[EvidenceRecord]) -> bool:
+    return bool(evidence) and all(
+        record.source_freshness in {SourceFreshness.STALE, SourceFreshness.UNKNOWN}
+        for record in evidence
+    )
 
 
 def _positive_early_pmf_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:

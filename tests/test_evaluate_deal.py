@@ -157,6 +157,12 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "Final recommendation" in result.output
     assert "Check size" in result.output
     assert "Final memo" in result.output
+    assert "Stage" in result.output
+    assert "Product-market fit" in result.output
+    assert "Fundability risk" in result.output
+    assert "Valuation risk" in result.output
+    assert "Triggered scoring gates" in result.output
+    assert "Scoring missing inputs" in result.output
     assert "Failed model roles" in result.output
     assert "OCR means reading text from images" in result.output
     assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
@@ -285,8 +291,8 @@ def test_evaluate_deal_final_memo_v2_sections_keep_decision_first(
         body=(
             "Valuation cap $8M. Discount 20%. Round size $1M. "
             "Seed round is active. ARR revenue growth with paid customers and retention. "
-            "Lead investor committed. Estimated dilution 20%. Platform fees 2%. "
-            "Carry 20%. Gross exit value $100M."
+            "Lead investor committed. Investor ownership 20%. Estimated dilution 20%. "
+            "Platform fees 2%. Carry 20%. Gross exit value $100M."
         ),
     )
 
@@ -311,7 +317,91 @@ def test_evaluate_deal_final_memo_v2_sections_keep_decision_first(
     assert "| Rank | Source | Question | Reason | Evidence IDs |" in memo_text
     assert "Unsupported or model-only findings may be shown as diligence notes" in memo_text
     assert "Gross exit value" in memo_text
+    assert "Ownership" in memo_text
+    assert "cited ownership" in memo_text
     assert "Net return multiple" in memo_text
+
+
+def test_evaluate_deal_borderline_score_stays_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="BorderlineCo",
+        body="Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+    )
+
+    assert 65 <= result.deterministic_score.total_score <= 74
+    assert result.deterministic_score.recommendation == Recommendation.PASS
+    assert result.deterministic_score.check_size == 0
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+    assert result.final_recommendation.check_size == 0
+
+
+def test_evaluate_deal_missing_terms_stays_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="MissingTermsCo",
+        body=(
+            "Discount 20%. Round size $1M. ARR revenue growth with paid customers "
+            "and retention. Lead investor committed."
+        ),
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.PASS
+    assert result.deterministic_score.check_size == 0
+    assert any(
+        gate.name == "Missing key investment terms"
+        for gate in result.deterministic_score.triggered_kill_gates
+    )
+    assert result.final_recommendation.recommendation == Recommendation.PASS
+
+
+def test_evaluate_deal_high_valuation_stays_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="HighValuationCo",
+        body=(
+            "Seed company with a beta design partner. Valuation cap $60M. "
+            "Discount 20%. Round size $1M. Lead investor committed."
+        ),
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.PASS
+    assert result.deterministic_score.check_size == 0
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in result.deterministic_score.triggered_kill_gates
+    )
+    assert result.final_recommendation.recommendation == Recommendation.PASS
 
 
 def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
@@ -1928,7 +2018,15 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     _set_openai_env(monkeypatch)
-    company_dir = _write_company_folder(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        body=(
+            "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M. "
+            "ARR revenue growth with paid customers and retention. "
+            "Lead investor committed. Investor ownership 100%. Estimated dilution 20%. "
+            "SPV expenses 5%. Carry 20%. Exit value $1B."
+        ),
+    )
     client = RecordingReviewClient(
         outputs_by_role={AgentRole.FINAL_DECISION: [_invest_output_json]}
     )
@@ -1939,16 +2037,16 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
             data_dir=tmp_path / "data",
             local_only=False,
             mock_llm=False,
-            min_check=5_000,
+            min_check=2_500,
         ),
         model_client=client,
         max_concurrency=1,
     )
 
     assert result.deterministic_score.recommendation == Recommendation.INVEST
-    assert result.deterministic_score.check_size == 5_000
+    assert result.deterministic_score.check_size == 7_500
     assert result.final_recommendation.recommendation == Recommendation.INVEST
-    assert result.final_recommendation.check_size == 5_000
+    assert result.final_recommendation.check_size == 7_500
     assert any("rule-based allocation" in warning for warning in result.warnings)
     assert any("deterministic allocation" in warning for warning in result.warnings)
     memo_text = result.final_memo_path.read_text(encoding="utf-8")

@@ -94,6 +94,7 @@ from hailmary.research import (
 )
 from hailmary.schemas.documents import SourceKind
 from hailmary.schemas.evidence import EvidenceRecord
+from hailmary.schemas.scoring import ScoredDeal
 from hailmary.scoring.memo import ScoringError, score_latest_ingestion
 
 app = typer.Typer(
@@ -2098,6 +2099,27 @@ def evaluate_deal(
         _plain(f"{result.deterministic_score.total_score}/{result.deterministic_score.max_score}"),
     )
     summary.add_row(_plain("Confidence"), _plain(str(result.deterministic_score.confidence)))
+    summary.add_row(_plain("Stage"), _plain(str(result.deterministic_score.company_stage)))
+    summary.add_row(
+        _plain("Product-market fit"),
+        _plain(str(result.deterministic_score.pmf_level)),
+    )
+    summary.add_row(
+        _plain("Fundability risk"),
+        _plain(str(result.deterministic_score.fundability_risk)),
+    )
+    summary.add_row(
+        _plain("Valuation risk"),
+        _plain(str(result.deterministic_score.valuation_risk)),
+    )
+    summary.add_row(
+        _plain("Triggered scoring gates"),
+        _plain(_triggered_scoring_gate_text(result.deterministic_score)),
+    )
+    summary.add_row(
+        _plain("Scoring missing inputs"),
+        _plain(_scoring_missing_inputs_text(result.deterministic_score)),
+    )
     summary.add_row(_plain("Final memo"), _plain(str(result.final_memo_path)))
     failed_roles = ", ".join(_role_display(role) for role in result.failed_specialist_roles)
     summary.add_row(_plain("Failed model roles"), _plain(failed_roles or "none"))
@@ -2763,6 +2785,30 @@ def _evaluate_deal_evidence_action_text(
     if summary.valid_action_count == 0 and summary.stale_action_count == 0:
         return "none"
     return _action_summary_text(summary)
+
+
+def _triggered_scoring_gate_text(scored_deal: ScoredDeal) -> str:
+    triggered_gate_names = [gate.name for gate in scored_deal.triggered_kill_gates]
+    if not triggered_gate_names:
+        return "none"
+    return ", ".join(triggered_gate_names)
+
+
+def _scoring_missing_inputs_text(scored_deal: ScoredDeal) -> str:
+    missing_inputs: list[str] = []
+
+    def add_input(input_name: str) -> None:
+        if input_name not in missing_inputs:
+            missing_inputs.append(input_name)
+
+    for factor in scored_deal.score_factors:
+        for input_name in factor.missing_inputs:
+            add_input(input_name)
+    for input_name in scored_deal.net_return.missing_inputs:
+        add_input(input_name)
+    if not missing_inputs:
+        return "none"
+    return ", ".join(missing_inputs)
 
 
 def _research_count_phrase(count: int, singular: str, plural: str | None = None) -> str:

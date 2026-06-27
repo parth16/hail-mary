@@ -2501,6 +2501,159 @@ def run_borderline_score_fixture() -> None:
     )
 
 
+def run_missing_terms_score_fixture() -> None:
+    evidence = [
+        _evidence("ev_terms", "Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    scored = score_evidence_store(
+        _store(
+            evidence=evidence,
+            claims=[
+                _claim("discount", "20%", evidence[0]),
+                _claim("round size", "$1M", evidence[0]),
+            ],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    _expect_equal(
+        scored.recommendation,
+        Recommendation.PASS,
+        "Expected missing valuation or valuation-cap evidence to produce PASS.",
+    )
+    _expect_equal(scored.check_size, 0, "Expected missing terms PASS to use $0.")
+    _expect(
+        any(gate.name == "Missing key investment terms" for gate in scored.triggered_kill_gates),
+        "Expected missing terms to trigger the key investment terms gate.",
+    )
+
+
+def run_high_valuation_score_fixture() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Seed company with a beta design partner. Valuation cap $60M. "
+            "Discount 20%. Round size $1M.",
+        )
+    ]
+    scored = score_evidence_store(
+        _store(
+            evidence=evidence,
+            claims=[
+                _claim("valuation cap", "$60M", evidence[0]),
+                _claim("discount", "20%", evidence[0]),
+                _claim("round size", "$1M", evidence[0]),
+            ],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    _expect_equal(
+        scored.recommendation,
+        Recommendation.PASS,
+        "Expected high stage-adjusted valuation risk to produce PASS.",
+    )
+    _expect_equal(
+        scored.valuation_risk,
+        ValuationRisk.HIGH,
+        "Expected the seed-stage $60M cap without developing PMF to be high risk.",
+    )
+    valuation_gate = next(
+        (
+            gate
+            for gate in scored.triggered_kill_gates
+            if gate.name == "Valuation far ahead of evidence"
+        ),
+        None,
+    )
+    _expect(
+        valuation_gate is not None and valuation_gate.evidence_ids == ["ev_terms"],
+        "Expected the high-valuation gate to cite the synthetic pricing and stage evidence.",
+    )
+
+
+def run_stale_conflicting_score_fixture() -> None:
+    stale_evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M.").model_copy(
+            update={"source_freshness": SourceFreshness.STALE}
+        ),
+        _evidence("ev_traction", "ARR revenue growth with paid customers.").model_copy(
+            update={"source_freshness": SourceFreshness.STALE}
+        ),
+        _evidence("ev_funding", "Lead investor committed.").model_copy(
+            update={"source_freshness": SourceFreshness.STALE}
+        ),
+    ]
+    stale_score = score_evidence_store(
+        _store(
+            evidence=stale_evidence,
+            claims=[
+                _claim("valuation cap", "$8M", stale_evidence[0]),
+                _claim("discount", "20%", stale_evidence[0]),
+                _claim("round size", "$1M", stale_evidence[0]),
+            ],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+    _expect_equal(
+        stale_score.recommendation,
+        Recommendation.PASS,
+        "Expected stale-only support to produce PASS.",
+    )
+    _expect_equal(
+        stale_score.fundability_risk,
+        FundabilityRisk.HIGH,
+        "Expected stale-only funding support to be high next-round risk.",
+    )
+    _expect(
+        "current source dates"
+        in _score_factor_missing_inputs(stale_score, "Evidence authority and freshness"),
+        "Expected stale evidence to surface current source dates as a missing input.",
+    )
+
+    conflict_evidence = [
+        _evidence("ev_low_cap", "Valuation cap $8M."),
+        _evidence("ev_high_cap", "Valuation cap $10M."),
+    ]
+    low_claim = _claim("valuation cap", "$8M", conflict_evidence[0]).model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    high_claim = _claim("valuation cap", "$10M", conflict_evidence[1]).model_copy(
+        update={"verification_status": VerificationStatus.CONFLICTED}
+    )
+    conflict = ClaimConflict(
+        id="conflict_eval_valuation",
+        deal_id="deal_eval",
+        claim_type=ClaimType.DEAL_TERM,
+        label="valuation cap",
+        normalized_values=["valuation cap:$10M", "valuation cap:$8M"],
+        claim_ids=[low_claim.id, high_claim.id],
+        notes="Synthetic conflicting valuation caps.",
+    )
+    conflict_score = score_evidence_store(
+        _store(
+            evidence=conflict_evidence,
+            claims=[low_claim, high_claim],
+            conflicts=[conflict],
+        ),
+        config=AppConfig(data_dir=Path("data")),
+    )
+    _expect_equal(
+        conflict_score.recommendation,
+        Recommendation.PASS,
+        "Expected conflicting valuation evidence to produce PASS.",
+    )
+    _expect(
+        any(
+            gate.name == "Conflicting material deal terms"
+            for gate in conflict_score.triggered_kill_gates
+        ),
+        "Expected valid conflicting valuation claims to trigger the conflict gate.",
+    )
+
+
 def run_stage_aware_score_fixture() -> None:
     pre_seed_evidence = [
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
@@ -2564,8 +2717,8 @@ def run_return_math_missing_fixture() -> None:
     )
     _expect_equal(
         scored.net_return.missing_inputs,
-        ["dilution", "fees or carry", "gross exit scenario"],
-        "Expected missing dilution, fee or carry, and exit inputs to be reported.",
+        ["ownership", "dilution", "fees or carry", "gross exit scenario"],
+        "Expected missing ownership, dilution, fee or carry, and exit inputs to be reported.",
     )
     _expect(
         "did not invent a net return" in scored.net_return.explanation,
@@ -2649,13 +2802,13 @@ def run_score_calibration_guards_fixture() -> None:
     )
     _expect_equal(
         negated_funding_score.fundability_risk,
-        FundabilityRisk.MEDIUM,
-        "Expected negated lead-investor language not to lower fundability risk.",
+        FundabilityRisk.HIGH,
+        "Expected explicit missing lead-investor language to raise fundability risk.",
     )
     _expect_equal(
         _score_factor_evidence_ids(negated_funding_score, "Next-round fundability"),
-        [],
-        "Expected negated funding evidence not to be cited in score factors.",
+        ["ev_negative_funding"],
+        "Expected explicit missing funding evidence to be cited as risk evidence.",
     )
 
     strong_store = _strong_store()
@@ -3734,6 +3887,23 @@ def _score_factor_evidence_ids(scored_deal: ScoredDeal, name: str) -> list[str]:
     for factor in scored_deal.score_factors:
         if factor.name == resolved_name:
             return factor.evidence_ids
+    raise EvalFixtureFailure(
+        "Expected score factor to be present.",
+        {"factor": name},
+    )
+
+
+def _score_factor_missing_inputs(scored_deal: ScoredDeal, name: str) -> list[str]:
+    aliases = {
+        "Deal-term clarity": "Deal terms and platform access",
+        "Product-market fit evidence": "Stage and product-market fit",
+        "Next-round fundability": "Fundability and next-round risk",
+        "Evidence quality": "Evidence authority and freshness",
+    }
+    resolved_name = aliases.get(name, name)
+    for factor in scored_deal.score_factors:
+        if factor.name == resolved_name:
+            return factor.missing_inputs
     raise EvalFixtureFailure(
         "Expected score factor to be present.",
         {"factor": name},

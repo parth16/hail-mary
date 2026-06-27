@@ -338,6 +338,42 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="score-missing-terms-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Missing terms PASS calibration",
+                description=(
+                    "Checks that missing valuation or valuation-cap evidence forces "
+                    "PASS with a $0 check."
+                ),
+            ),
+            run=lambda _: fixtures.run_missing_terms_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-high-valuation-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="High valuation PASS calibration",
+                description=(
+                    "Checks that valuation far ahead of stage and PMF evidence forces "
+                    "PASS with cited stage and pricing evidence."
+                ),
+            ),
+            run=lambda _: fixtures.run_high_valuation_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-stale-conflicting-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Stale and conflicting evidence PASS calibration",
+                description=(
+                    "Checks that stale-only support and valid conflicting terms produce "
+                    "PASS with explainable gates or missing-input status."
+                ),
+            ),
+            run=lambda _: fixtures.run_stale_conflicting_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="score-stage-aware-v2",
                 category=EvalCategory.SCORE_CALIBRATION,
                 name="Stage-aware v2 score calibration",

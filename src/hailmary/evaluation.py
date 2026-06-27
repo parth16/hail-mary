@@ -2140,8 +2140,9 @@ def _net_return_detail_lines(scored_deal: ScoredDeal) -> list[str]:
         )
     else:
         intro = (
-            "Hail Mary estimated net return as gross exit value divided by entry "
-            "valuation, adjusted for dilution and fees or carry."
+            "Hail Mary estimated net return as gross exit value multiplied by "
+            "cited ownership, divided by entry valuation, and adjusted for dilution "
+            "and fees or carry."
         )
     lines = [f"- {intro} {_memo_text(net_return.explanation)}"]
     lines.extend(
@@ -2149,6 +2150,10 @@ def _net_return_detail_lines(scored_deal: ScoredDeal) -> list[str]:
             ["Return input", "Value"],
             [
                 ["Entry valuation", _money_or_unknown(net_return.entry_valuation)],
+                [
+                    "Ownership",
+                    _percent_or_unknown(net_return.estimated_ownership_percent),
+                ],
                 ["Gross exit value", _money_or_unknown(net_return.gross_exit_value)],
                 ["Dilution", _percent_or_unknown(net_return.estimated_dilution_percent)],
                 [
@@ -2896,7 +2901,15 @@ def _missing_input_text(missing_inputs: Sequence[str]) -> str:
 def _net_return_summary(scored_deal: ScoredDeal) -> str:
     net_return = scored_deal.net_return
     if net_return.net_return_multiple is not None:
-        return f"{net_return.net_return_multiple:g}x estimated net return"
+        summary = f"{net_return.net_return_multiple:g}x estimated net return"
+        if net_return.estimated_ownership_percent is not None:
+            summary = f"{summary}; ownership {net_return.estimated_ownership_percent:g}%"
+        if net_return.missing_inputs:
+            summary = (
+                f"{summary}; missing "
+                f"{_memo_text(', '.join(net_return.missing_inputs))}"
+            )
+        return summary
     if net_return.entry_valuation is not None:
         return (
             f"{_format_money(net_return.entry_valuation)} entry valuation; "
