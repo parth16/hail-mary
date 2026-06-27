@@ -1911,6 +1911,31 @@ def test_score_evidence_store_keeps_positive_comma_clause_after_without_negation
     ]
 
 
+def test_score_evidence_store_keeps_positive_coordinated_clause_after_without_negation() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_traction",
+            "The company launched without customers, revenue and retention are now strong.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.DEVELOPING
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_traction"
+    ]
+
+
 @pytest.mark.parametrize(
     "traction_text",
     [

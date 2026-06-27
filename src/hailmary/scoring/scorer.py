@@ -175,6 +175,10 @@ TRACTION_NEGATED_QUALIFIERS = (
     r"production|live)\s+){0,3}"
 )
 BENIGN_NEGATED_TRACTION_NOUNS = r"(?:issues?|concerns?|problems?|churn|complaints?)"
+TRACTION_CLAUSE_VERBS = (
+    r"(?:is|are|was|were|has|have|had|reports?|reported|shows?|showed|"
+    r"reaches|reached|grew|grows|now)\b"
+)
 NEGATED_TRACTION_PATTERNS = (
     re.compile(r"\bpre[-\s]?revenue\b", re.IGNORECASE),
     re.compile(
@@ -199,14 +203,18 @@ NEGATED_TRACTION_PATTERNS = (
     re.compile(
         rf"\bwithout\s+{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
         rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
+        rf"(?!\s+{TRACTION_CLAUSE_VERBS})"
         rf"(?:(?:\s+(?:or|and)\s+|\s*,\s*(?:or|and)\s+)"
         rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
-        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)|"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
+        rf"(?!\s+{TRACTION_CLAUSE_VERBS})|"
         rf"(?:\s*,\s*{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
-        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b))+"
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
+        rf"(?!\s+{TRACTION_CLAUSE_VERBS}))+"
         rf"\s*,?\s*(?:or|and)\s+{TRACTION_NEGATED_QUALIFIERS}"
         rf"{TRACTION_NEGATED_SIGNAL}\b"
-        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b))*",
+        rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
+        rf"(?!\s+{TRACTION_CLAUSE_VERBS}))*",
         re.IGNORECASE,
     ),
     re.compile(
