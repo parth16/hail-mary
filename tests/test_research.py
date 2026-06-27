@@ -136,6 +136,8 @@ def test_company_match_classifies_exact_related_likely_and_rejected() -> None:
     likely = classify_company_match("Acme AI", "AcmeAI")
     related = classify_company_match("Acme AI", "Acme AI Federal")
     suffix_variant = classify_company_match("Acme LLC", "Acme LP")
+    founder = classify_company_match("Acme AI", "Jane Founder, Acme AI")
+    investor = classify_company_match("Acme AI", "Acme AI Ventures")
     rejected = classify_company_match("Acme AI", "Unrelated Robotics")
 
     assert exact.kind == CompanyMatchKind.EXACT
@@ -146,6 +148,8 @@ def test_company_match_classifies_exact_related_likely_and_rejected() -> None:
     assert related.import_ready is False
     assert suffix_variant.kind == CompanyMatchKind.RELATED
     assert suffix_variant.import_ready is False
+    assert founder.import_ready is False
+    assert investor.import_ready is False
     assert rejected.kind == CompanyMatchKind.REJECTED
     assert rejected.import_ready is False
 
@@ -642,6 +646,67 @@ def test_run_research_workflow_tracks_incomplete_paginated_search(
         and status.status == ResearchProviderRunStatus.INCOMPLETE_SEARCH
         for status in result.summary.provider_statuses
     )
+
+
+def test_run_research_workflow_keeps_incomplete_warning_with_saved_result(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    usaspending_responses = {
+        ("Acme AI", 1): _usaspending_response(
+            [
+                _usaspending_award(
+                    recipient_name="Acme AI",
+                    award_id="FAKE-EXACT",
+                    generated_internal_id="CONT_AWD_FAKE_EXACT",
+                )
+            ],
+            has_next=True,
+        )
+    }
+    usaspending_responses.update(
+        {
+            ("Acme AI", page): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Acme AI Ventures",
+                        award_id=f"FAKE-RELATED-{page}",
+                        generated_internal_id=f"CONT_AWD_FAKE_RELATED_{page}",
+                    )
+                ],
+                has_next=True,
+            )
+            for page in range(2, 21)
+        }
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=_FakeWebResearchClient({}),
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(usaspending_responses),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    usaspending = next(
+        collection for collection in result.collections if collection.source_id == "usaspending"
+    )
+    assert usaspending.result_count == 1
+    assert usaspending.status == ResearchProviderRunStatus.INCOMPLETE_SEARCH
+    assert usaspending.incomplete_search is True
+    assert usaspending.warnings
+    assert result.summary.incomplete_search_count == 1
 
 
 def test_run_research_workflow_reports_local_public_skips_and_no_results(
@@ -3452,6 +3517,42 @@ def test_collect_github_repositories_prioritizes_owner_matches_before_names(
     assert saved["results"][0]["source_url"] == "https://github.com/acme-ai/owner-tool"
 
 
+def test_collect_github_repositories_skips_repository_name_only_match(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeGitHubRepositorySearchClient(
+        {
+            ("Acme AI", 1): _github_repository_response(
+                [
+                    _github_repository(
+                        name="acme-ai",
+                        full_name="unrelated/acme-ai",
+                        owner_login="unrelated",
+                    )
+                ]
+            ),
+        }
+    )
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI"],
+        limit=5,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is None
+    assert result.result_count == 0
+    assert result.match_details[0].kind == CompanyMatchKind.LIKELY
+    assert result.match_details[0].import_ready is False
+
+
 def test_collect_github_repositories_surfaces_api_failures(
     tmp_path: Path,
 ) -> None:
@@ -4691,6 +4792,124 @@ def test_prepare_public_research_results_writes_private_importable_file(
     )
     assert dry_run.imported_count == 1
     assert dry_run.updated_store_paths == []
+
+
+def test_prepare_public_research_results_prefers_exact_over_related_match(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI Ventures",
+                "title": "Related investor Form D",
+                "text": "A related investor entity that must not become company evidence.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme-ventures/form-d",
+            },
+            {
+                "company_name": "Acme AI",
+                "title": "Exact Acme AI Form D",
+                "text": "Acme AI filed a Form D for a synthetic offering.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            },
+        ],
+    )
+
+    result = prepare_public_research_results(
+        config=config,
+        company_names=["Acme AI"],
+        sec_form_d_results_path=sec_results_path,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    assert result.result_count == 1
+    assert result.skipped_non_exact_company_names == ["Acme AI Ventures"]
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert [item["title"] for item in saved["results"]] == ["Exact Acme AI Form D"]
+
+
+def test_prepare_public_research_results_collapses_duplicate_public_results(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Older duplicate Form D",
+                "text": "Acme AI filed a Form D for a synthetic offering.",
+                "retrieved_at": "2024-01-01T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d",
+            },
+            {
+                "company_name": "Acme AI",
+                "title": "Fresh duplicate Form D",
+                "text": "Acme AI filed  a Form D for a synthetic offering.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/form-d/",
+            },
+        ],
+    )
+
+    result = prepare_public_research_results(
+        config=config,
+        company_names=["Acme AI"],
+        sec_form_d_results_path=sec_results_path,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    assert result.result_count == 1
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert saved["results"][0]["title"] == "Fresh duplicate Form D"
+    assert saved["results"][0]["retrieved_at"] == "2025-12-31T12:00:00Z"
+
+
+def test_prepare_public_research_results_ranks_fresh_reliable_source_first(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Older reliable Form D",
+                "text": "Acme AI filed an older synthetic Form D.",
+                "retrieved_at": "2024-01-01T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/old-form-d",
+            },
+            {
+                "company_name": "Acme AI",
+                "title": "Fresh reliable Form D",
+                "text": "Acme AI filed a fresher synthetic Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/fresh-form-d",
+            },
+        ],
+    )
+
+    result = prepare_public_research_results(
+        config=config,
+        company_names=["Acme AI"],
+        sec_form_d_results_path=sec_results_path,
+        collected_at=BUILT_AT,
+    )
+
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert [item["title"] for item in saved["results"]] == [
+        "Fresh reliable Form D",
+        "Older reliable Form D",
+    ]
 
 
 def test_prepare_public_research_results_preserves_suffix_distinct_requested_companies(
@@ -6505,6 +6724,49 @@ def test_import_research_results_skips_duplicate_with_different_title(
         deal.evidence_store_path.read_text(encoding="utf-8")
     )
     assert len([evidence for evidence in saved_store.evidence if evidence.provider_id]) == 1
+
+
+def test_import_research_results_skips_cross_provider_duplicate_records(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    cross_provider_results_path = tmp_path / "research-results-cross-provider.json"
+    _write_results(
+        cross_provider_results_path,
+        [
+            _research_result(
+                provider_id="public_web",
+                provider_name="Public web and press search",
+                title="Retitled public copy of same source excerpt",
+                text=(
+                    "Acme AI reports revenue growth from customers.\n"
+                    "Minimum investment $2,500."
+                ),
+            )
+        ],
+    )
+
+    result = import_research_results(
+        config=config,
+        results_path=cross_provider_results_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert result.imported_count == 0
+    assert result.skipped_duplicate_count == 1
+    assert result.provider_imported_counts == {}
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    imported_evidence = [evidence for evidence in saved_store.evidence if evidence.provider_id]
+    assert len(imported_evidence) == 1
+    assert imported_evidence[0].provider_id == "sec_form_d"
 
 
 def test_import_research_results_keeps_one_document_id_per_external_source(

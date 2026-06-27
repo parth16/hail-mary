@@ -29,6 +29,7 @@ from .matching import (
     normalize_company_slug,
 )
 from .providers import builtin_research_providers
+from .quality import ranked_public_research_results
 from .schemas import ResearchProvider, ResearchResultInput, ResearchResultsFile
 from .source_urls import (
     source_reference_looks_like_url,
@@ -1416,11 +1417,15 @@ def prepare_public_research_results(
         for provider_id in provider_ids
     }
     for deal in deals:
-        deal_results = [
-            result
-            for adapter in adapters
-            for result in adapter.collect(deal, collected_at=collected_at)
-        ]
+        deal_results = _rank_public_results(
+            [
+                result
+                for adapter in adapters
+                for result in adapter.collect(deal, collected_at=collected_at)
+            ],
+            deal=deal,
+            collected_at=collected_at,
+        )
         results.extend(deal_results)
         for result in deal_results:
             provider_result_counts[result.provider_id] = (
@@ -1588,6 +1593,11 @@ def collect_usaspending_awards(
                     break
         except UsaspendingApiError as exc:
             raise ResearchCollectionError(str(exc)) from exc
+        deal_results = _rank_public_results(
+            deal_results,
+            deal=deal,
+            collected_at=collected_at,
+        )
         results.extend(deal_results)
         deal_summaries.append(
             ResearchCollectionDealSummary(
@@ -1743,6 +1753,11 @@ def collect_sbir_awards(
                 page += 1
         except SbirApiError as exc:
             raise ResearchCollectionError(str(exc)) from exc
+        deal_results = _rank_public_results(
+            deal_results,
+            deal=deal,
+            collected_at=collected_at,
+        )
         results.extend(deal_results)
         deal_summaries.append(
             ResearchCollectionDealSummary(
@@ -1895,6 +1910,11 @@ def collect_sec_form_d_filings(
                 page += 1
         except SecFormDApiError as exc:
             raise ResearchCollectionError(str(exc)) from exc
+        deal_results = _rank_public_results(
+            deal_results,
+            deal=deal,
+            collected_at=collected_at,
+        )
         results.extend(deal_results)
         deal_summaries.append(
             ResearchCollectionDealSummary(
@@ -2028,7 +2048,7 @@ def collect_github_repositories(
                     run_warnings.append(
                         "GitHub marked repository search results for "
                         f"{deal.company_name} as incomplete. Hail Mary saved exact "
-                        "owner or repository-name matches it already validated, but "
+                        "owner matches it already validated, but "
                         "more GitHub results may exist."
                     )
                     break
@@ -2037,13 +2057,11 @@ def collect_github_repositories(
                 if page >= GITHUB_MAX_PAGES:
                     match_count = len(deal_results)
                     if match_count == 1:
-                        match_text = "saved 1 exact owner or repository-name match"
+                        match_text = "saved 1 exact owner match"
                     elif match_count > 1:
-                        match_text = (
-                            f"saved {match_count} exact owner or repository-name matches"
-                        )
+                        match_text = f"saved {match_count} exact owner matches"
                     else:
-                        match_text = "did not find exact owner or repository-name matches"
+                        match_text = "did not find exact owner matches"
                     run_warnings.append(
                         "GitHub still returned full repository-search pages for "
                         f"{deal.company_name} after Hail Mary checked "
@@ -2054,6 +2072,11 @@ def collect_github_repositories(
                 page += 1
         except GitHubApiError as exc:
             raise ResearchCollectionError(str(exc)) from exc
+        deal_results = _rank_public_results(
+            deal_results,
+            deal=deal,
+            collected_at=collected_at,
+        )
         results.extend(deal_results)
         deal_summaries.append(
             ResearchCollectionDealSummary(
@@ -2849,7 +2872,7 @@ def _research_result_from_github_repository(
             source_url=repository.html_url,
             source_api=repository.url,
             confidence=(
-                "medium: exact GitHub owner or repository-name match from the "
+                "medium: exact GitHub owner match from the "
                 "public repository search API; Hail Mary did not verify entity identity"
             ),
             licensing_notes=(
@@ -3437,6 +3460,19 @@ def _clean_company_names(company_names: list[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(company_name)
     return deduped
+
+
+def _rank_public_results(
+    results: list[ResearchResultInput],
+    *,
+    deal: ResearchCollectionDeal,
+    collected_at: datetime,
+) -> list[ResearchResultInput]:
+    return ranked_public_research_results(
+        results,
+        company_name=deal.company_name,
+        ranked_at=collected_at,
+    )
 
 
 def _exact_company_name_match(query_company_name: str, result_company_name: str) -> bool:
