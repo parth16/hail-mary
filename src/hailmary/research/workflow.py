@@ -1176,6 +1176,8 @@ def _merge_provider_status_summary(
     existing: ResearchProviderStatusSummary,
     incoming: ResearchProviderStatusSummary,
 ) -> ResearchProviderRunStatus:
+    if _ready_result_clears_manual_needed(existing=existing, incoming=incoming):
+        return ResearchProviderRunStatus.PLANNED
     if _has_ready_results(existing) or _has_ready_results(incoming):
         higher_priority_statuses = {
             ResearchProviderRunStatus.FAILED,
@@ -1195,6 +1197,20 @@ def _merge_provider_status_summary(
     ):
         return ResearchProviderRunStatus.PLANNED
     return _merge_provider_status(existing.status, incoming.status)
+
+
+def _ready_result_clears_manual_needed(
+    *,
+    existing: ResearchProviderStatusSummary,
+    incoming: ResearchProviderStatusSummary,
+) -> bool:
+    return (
+        existing.status == ResearchProviderRunStatus.MANUAL_NEEDED
+        and _has_ready_results(incoming)
+    ) or (
+        incoming.status == ResearchProviderRunStatus.MANUAL_NEEDED
+        and _has_ready_results(existing)
+    )
 
 
 def _has_ready_results(status: ResearchProviderStatusSummary) -> bool:

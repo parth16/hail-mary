@@ -753,6 +753,41 @@ def test_run_research_workflow_counts_only_unresolved_manual_tasks(
     assert all(task["provider_id"] != "sam_gov" for task in queue_payload["tasks"])
 
 
+def test_run_research_workflow_local_public_manual_provider_is_ready_to_import(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    sam_results_path = tmp_path / "sam-gov-results.json"
+    _write_public_source_results(
+        sam_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI SAM.gov result",
+                "text": "Acme AI has a public SAM.gov result.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://sam.gov/search/?index=opp&keywords=Acme+AI",
+            }
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        sam_gov_results_path=sam_results_path,
+        created_at=BUILT_AT,
+    )
+
+    sam_status = next(
+        status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "sam_gov"
+    )
+    assert sam_status.status == ResearchProviderRunStatus.PLANNED
+    assert sam_status.collected_count == 1
+    assert result.summary.manual_needed_provider_count == result.manual_task_count - 1
+
+
 def test_prepare_research_plan_rejects_meridian_url_for_multiple_companies(
     tmp_path: Path,
 ) -> None:
