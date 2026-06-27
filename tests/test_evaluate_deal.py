@@ -144,9 +144,18 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     )
 
     assert result.exit_code == 0, result.output
-    assert "1. local setup and privacy checks" in result.output
-    assert "final memo write" in result.output
+    assert "1. Checking local setup and privacy..." in result.output
+    assert "Writing the final memo..." in result.output
     assert "Deal evaluation complete" in result.output
+    assert "Final decision: INVEST" in result.output
+    assert any(
+        f"Recommended check: {check_size}" in result.output
+        for check_size in ("$1K", "$2.5K", "$5K", "$7.5K", "$10K")
+    )
+    assert "What stood out positively" in result.output
+    assert "Key risks" in result.output
+    assert "Decisive factor" in result.output
+    assert "The recommendation is INVEST because" in result.output
     assert "Company" in result.output
     assert "Mode" in result.output
     assert "Documents ingested" in result.output
@@ -165,6 +174,7 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "Scoring missing inputs" in result.output
     assert "Failed model roles" in result.output
     assert "OCR means reading text from images" in result.output
+    assert "\x1b[" not in result.output
     assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
     assert "Valuation cap $8M" not in result.output
 
@@ -1663,6 +1673,55 @@ def test_evaluate_deal_deterministic_pass_overrides_model_invest(
     assert "Model recommendation before guardrails: INVEST" in memo_text
     assert "Guardrail override" in memo_text
     assert "Valuation cap" not in result.final_recommendation.reason
+
+
+def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="GuardrailCliCo",
+        body=(
+            "Round size $1M. Discount 20%. ARR revenue growth with paid customers "
+            "and retention. Lead investor committed and seed round is active."
+        ),
+    )
+
+    class InvestingClient(RecordingReviewClient):
+        def __init__(self, *, model: str, api_key: str) -> None:
+            del model, api_key
+            super().__init__(
+                outputs_by_role={AgentRole.FINAL_DECISION: [_invest_output_json]}
+            )
+
+    monkeypatch.setattr(evaluation, "OpenAIAgentReviewClient", InvestingClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-deal",
+            str(company_dir),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--max-concurrency",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Final decision: PASS" in normalized_output
+    assert "Recommended check: $0" in normalized_output
+    assert "Decisive factor" in normalized_output
+    assert "deterministic" in normalized_output
+    assert "guardrails controlled" in normalized_output
+    assert "final recommendation" in normalized_output
+    assert "could not override" in normalized_output
+    assert "forced final PASS" in normalized_output
+    assert "Valuation cap" not in result.output
 
 
 def test_forced_pass_warns_when_rule_based_citations_are_filtered() -> None:

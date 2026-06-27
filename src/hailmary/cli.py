@@ -7,13 +7,15 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Annotated, Literal, NoReturn, Protocol
+from types import TracebackType
+from typing import Annotated, Literal, NoReturn, Protocol, Self
 
 import typer
 from rich import box
 from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.status import Status
 from rich.table import Table
 from rich.text import Text
 
@@ -32,7 +34,13 @@ from hailmary.config import (
     validate_investment_settings,
 )
 from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
-from hailmary.evaluation import EvaluationError, evaluate_deal_folder
+from hailmary.evaluation import (
+    DealEvaluationResult,
+    EvaluateDealCliCommentary,
+    EvaluationError,
+    build_evaluate_deal_cli_commentary,
+    evaluate_deal_folder,
+)
 from hailmary.evidence import (
     EvidenceActionError,
     EvidenceActionStatus,
@@ -115,6 +123,75 @@ app.add_typer(evidence_actions_app, name="evidence-actions")
 console = Console(highlight=False)
 DEFAULT_REVIEW_QUOTE_LIMIT = 240
 MAX_REVIEW_QUOTE_LIMIT = 500
+
+
+class _EvaluateDealProgress:
+    def __init__(self, output_console: Console) -> None:
+        self._console = output_console
+        self._stage_count = 0
+        self._status: Status | None = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
+        self.stop()
+
+    def update(self, stage: str) -> None:
+        self._stage_count += 1
+        label = _evaluate_deal_progress_label(stage)
+        if self._console.is_terminal:
+            if self._status is None:
+                self._status = self._console.status(_plain(label), spinner="dots")
+                self._status.__enter__()
+            else:
+                self._status.update(_plain(label))
+            return
+        self._console.print(_plain(f"{self._stage_count}. {label}", style="bold cyan"))
+
+    def stop(self) -> None:
+        if self._status is None:
+            return
+        self._status.__exit__(None, None, None)
+        self._status = None
+
+
+def _evaluate_deal_progress_label(stage: str) -> str:
+    if stage == "local setup and privacy checks":
+        return "Checking local setup and privacy..."
+    if stage == "folder preflight":
+        return "Checking the deal folder..."
+    if stage.startswith("mode selection"):
+        return "Choosing evaluation mode..."
+    if stage == "ingestion":
+        return "Reading local documents..."
+    if stage == "external research workflow":
+        return "Checking external research..."
+    if stage == "evidence refresh after research import":
+        return "Refreshing evidence after research import..."
+    if stage == "evidence actions":
+        return "Applying evidence review actions..."
+    if stage == "rule-based scoring":
+        return "Running rule-based scoring..."
+    if stage == "model review preparation":
+        return "Preparing model review packets..."
+    if stage == "specialist model review":
+        return "Running specialist review..."
+    if stage == "final model review":
+        return "Preparing final recommendation..."
+    if stage.endswith("final decision") or stage == "final decision":
+        return "Preparing final recommendation..."
+    if stage == "evidence health review":
+        return "Checking evidence health..."
+    if stage == "final memo write":
+        return "Writing the final memo..."
+    return f"{stage.capitalize()}..."
 
 
 def _plain(message: str, *, style: str | None = None) -> Text:
@@ -2034,35 +2111,31 @@ def evaluate_deal(
         _config_from_options(data_dir),
         enable_ocr=enable_ocr,
     )
-    stage_count = 0
-
-    def print_stage(stage: str) -> None:
-        nonlocal stage_count
-        stage_count += 1
-        console.print(_plain(f"{stage_count}. {stage}", style="bold cyan"))
 
     try:
-        result = evaluate_deal_folder(
-            folder,
-            config=config,
-            max_concurrency=max_concurrency,
-            run_research=not skip_research,
-            website_url=website,
-            meridian_url=meridian_url,
-            include_paid_research=include_paid_research,
-            sec_form_d_results_path=sec_form_d_results,
-            sam_gov_results_path=sam_gov_results,
-            usaspending_results_path=usaspending_results,
-            sbir_results_path=sbir_results,
-            uspto_results_path=uspto_results,
-            github_results_path=github_results,
-            research_results_files=results_file or [],
-            stage_callback=print_stage,
-        )
+        with _EvaluateDealProgress(console) as progress:
+            result = evaluate_deal_folder(
+                folder,
+                config=config,
+                max_concurrency=max_concurrency,
+                run_research=not skip_research,
+                website_url=website,
+                meridian_url=meridian_url,
+                include_paid_research=include_paid_research,
+                sec_form_d_results_path=sec_form_d_results,
+                sam_gov_results_path=sam_gov_results,
+                usaspending_results_path=usaspending_results,
+                sbir_results_path=sbir_results,
+                uspto_results_path=uspto_results,
+                github_results_path=github_results,
+                research_results_files=results_file or [],
+                stage_callback=progress.update,
+            )
     except EvaluationError as exc:
         _print_error(str(exc))
         raise typer.Exit(1) from None
 
+    commentary = build_evaluate_deal_cli_commentary(result)
     summary = _two_column_table("Result", "Value")
     summary.add_row(_plain("Company"), _plain(result.company_name))
     summary.add_row(_plain("Mode"), _plain(result.evaluation_mode))
@@ -2127,6 +2200,7 @@ def evaluate_deal(
     renderables: list[RenderableType] = [
         _plain(f"Evaluated {result.company_name}."),
         _plain(result.mode_explanation),
+        *_evaluate_deal_commentary_renderables(result, commentary),
         summary,
         _plain(result.ocr_status),
     ]
@@ -2192,6 +2266,42 @@ def evaluate_deal(
         renderables.append(_plain("Limitations: none beyond the source evidence in the memo."))
 
     _print_panel("Deal evaluation complete", renderables, border_style="green")
+
+
+def _evaluate_deal_commentary_renderables(
+    result: DealEvaluationResult,
+    commentary: EvaluateDealCliCommentary,
+) -> list[RenderableType]:
+    renderables: list[RenderableType] = [
+        _plain(
+            f"Final decision: {result.final_recommendation.recommendation}",
+            style="bold",
+        ),
+        _plain(
+            f"Recommended check: {_format_check_size(result.final_recommendation.check_size)}"
+        ),
+        _plain(""),
+        _plain("What stood out positively", style="bold"),
+    ]
+    for positive in commentary.positives:
+        renderables.append(_plain(f"- {positive}"))
+    renderables.extend(
+        [
+            _plain(""),
+            _plain("Key risks", style="bold"),
+        ]
+    )
+    for risk in commentary.risks:
+        renderables.append(_plain(f"- {risk}"))
+    renderables.extend(
+        [
+            _plain(""),
+            _plain("Decisive factor", style="bold"),
+            _plain(commentary.decisive_factor),
+            _plain(""),
+        ]
+    )
+    return renderables
 
 
 @app.command("prepare-agent-packets", hidden=True)

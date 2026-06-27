@@ -424,6 +424,11 @@ def test_evaluate_deal_local_only_cli_prints_safe_run_summary(
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
     assert "Deal evaluation complete" in normalized_output
+    assert "Final decision:" in normalized_output
+    assert "Recommended check:" in normalized_output
+    assert "What stood out positively" in normalized_output
+    assert "Key risks" in normalized_output
+    assert "Decisive factor" in normalized_output
     assert "Local-only mode was used" in normalized_output
     assert "rule-based scoring" in normalized_output
     assert "Documents ingested" in normalized_output
@@ -439,6 +444,41 @@ def test_evaluate_deal_local_only_cli_prints_safe_run_summary(
     assert "OCR means reading text from images" in normalized_output
     assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
     assert "Valuation cap $8M" not in result.output
+    assert "\x1b[" not in result.output
+
+
+def test_evaluate_deal_local_only_cli_pass_commentary_has_decisive_factor(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "CliPassCo"
+    source.mkdir()
+    (source / "memo.txt").write_text(
+        "One paid customer. Product is in a seed round.",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-deal",
+            str(source),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skip-research",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Final decision: PASS" in normalized_output
+    assert "Recommended check: $0" in normalized_output
+    assert "What stood out positively" in normalized_output
+    assert "Key risks" in normalized_output
+    assert "Decisive factor" in normalized_output
+    assert "The recommendation is PASS because" in normalized_output
+    assert "Valuation cap $8M" not in result.output
+    assert "One paid customer" not in result.output
 
 
 def test_evaluate_deal_cli_imports_research_results_before_final_decision(
@@ -490,7 +530,8 @@ def test_evaluate_deal_cli_imports_research_results_before_final_decision(
 
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
-    assert "external research workflow" in normalized_output
+    assert "Checking external research" in normalized_output
+    assert "Refreshing evidence after research import" in normalized_output
     assert "External research imported 1" in normalized_output
     assert "External research planned" in normalized_output
     assert "CliResearchCo public site reports" not in result.output
