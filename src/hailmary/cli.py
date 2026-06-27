@@ -46,6 +46,8 @@ from hailmary.evidence import (
     EvidenceActionStatus,
     EvidenceActionSummary,
     EvidenceActionTarget,
+    EvidenceAuditSeverity,
+    EvidenceCompletenessAudit,
     EvidenceReviewError,
     prune_stale_evidence_actions,
     record_evidence_action,
@@ -179,6 +181,8 @@ def _evaluate_deal_progress_label(stage: str) -> str:
         return "Applying evidence review actions..."
     if stage == "rule-based scoring":
         return "Running rule-based scoring..."
+    if stage == "evidence completeness audit":
+        return "Checking evidence completeness..."
     if stage == "model review preparation":
         return "Preparing model review packets..."
     if stage == "specialist model review":
@@ -2148,6 +2152,10 @@ def evaluate_deal(
         _plain(_evaluate_deal_evidence_health_text(result.evidence_review)),
     )
     summary.add_row(
+        _plain("Evidence completeness"),
+        _plain(_evaluate_deal_evidence_audit_text(result.evidence_audit)),
+    )
+    summary.add_row(
         _plain("Evidence actions"),
         _plain(_evaluate_deal_evidence_action_text(result.evidence_review)),
     )
@@ -2248,6 +2256,15 @@ def evaluate_deal(
                 f"{_evaluate_deal_evidence_health_text(result.evidence_review)}. "
                 "Evidence health means whether saved source records are complete and "
                 "safe enough to rely on."
+            )
+        )
+    if result.evidence_audit is not None:
+        renderables.append(
+            _plain(
+                "Evidence completeness audit found "
+                f"{_evaluate_deal_evidence_audit_text(result.evidence_audit)}. "
+                "Evidence completeness means whether saved source records cover the "
+                "key facts needed for the decision."
             )
         )
     if result.warnings:
@@ -2883,6 +2900,30 @@ def _evaluate_deal_evidence_health_text(
         parts.append(_research_count_phrase(warning_count, "warning"))
     if info_count:
         parts.append(_research_count_phrase(info_count, "note"))
+    return ", ".join(parts)
+
+
+def _evaluate_deal_evidence_audit_text(
+    evidence_audit: EvidenceCompletenessAudit | None,
+) -> str:
+    if evidence_audit is None:
+        return "not audited"
+    blocking_count = sum(
+        1
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.BLOCKING
+    )
+    warning_count = sum(
+        1
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.WARNING
+    )
+    readiness = evidence_audit.readiness.value.replace("_", " ")
+    parts = [readiness]
+    if blocking_count:
+        parts.append(_research_count_phrase(blocking_count, "blocking finding"))
+    if warning_count:
+        parts.append(_research_count_phrase(warning_count, "warning"))
     return ", ".join(parts)
 
 

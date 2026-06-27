@@ -157,25 +157,71 @@ def _query_contains_sensitive_access(query: str) -> bool:
     if not query:
         return False
     for key, _value in parse_qsl(query, keep_blank_values=True):
-        decoded_key = _recursive_unquote(key)
-        if decoded_key is None or "%" in decoded_key:
+        if _query_key_is_sensitive(key):
             return True
-        normalized_key = decoded_key.strip().casefold()
-        canonical_key = normalized_key.replace("-", "_")
-        if (
-            normalized_key in SENSITIVE_QUERY_KEYS
-            or canonical_key in SENSITIVE_QUERY_KEYS
+    for _key, value in parse_qsl(query, keep_blank_values=True):
+        if _query_value_contains_sensitive_access(value):
+            return True
+    return False
+
+
+def _query_key_is_sensitive(key: str) -> bool:
+    decoded_key = _recursive_unquote(key)
+    if decoded_key is None or "%" in decoded_key:
+        return True
+    normalized_key = decoded_key.strip().casefold()
+    canonical_key = normalized_key.replace("-", "_")
+    if (
+        normalized_key in SENSITIVE_QUERY_KEYS
+        or canonical_key in SENSITIVE_QUERY_KEYS
+    ):
+        return True
+    if normalized_key.startswith(("x-amz-", "x-goog-")) or canonical_key.startswith(
+        ("x_amz_", "x_goog_")
+    ):
+        return True
+    return normalized_key in REDIRECT_QUERY_KEYS or canonical_key in REDIRECT_QUERY_KEYS
+
+
+def _query_value_contains_sensitive_access(value: str) -> bool:
+    decoded_value = _recursive_unquote(value)
+    if decoded_value is None:
+        return True
+
+    parsed = urlparse(decoded_value)
+    nested_queries: list[str] = []
+    if parsed.query:
+        nested_queries.append(parsed.query)
+    if "?" in decoded_value:
+        nested_queries.append(decoded_value.split("?", 1)[1])
+    if "&" in decoded_value or "=" in decoded_value:
+        nested_queries.append(decoded_value)
+
+    for nested_query in nested_queries:
+        if _nested_query_contains_sensitive_key(nested_query):
+            return True
+    return False
+
+
+def _nested_query_contains_sensitive_key(query: str) -> bool:
+    if not query:
+        return False
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if _query_key_is_sensitive(key):
+            return True
+        decoded_value = _recursive_unquote(value)
+        if decoded_value is None:
+            return True
+        if decoded_value != value and (
+            "?" in decoded_value or "&" in decoded_value or "=" in decoded_value
         ):
-            return True
-        if normalized_key.startswith(("x-amz-", "x-goog-")) or canonical_key.startswith(
-            ("x_amz_", "x_goog_")
-        ):
-            return True
-        if (
-            normalized_key in REDIRECT_QUERY_KEYS
-            or canonical_key in REDIRECT_QUERY_KEYS
-        ):
-            return True
+            nested_query = (
+                decoded_value.split("?", 1)[1]
+                if "?" in decoded_value
+                else decoded_value
+            )
+            if _nested_query_contains_sensitive_key(nested_query):
+                return True
     return False
 
 
