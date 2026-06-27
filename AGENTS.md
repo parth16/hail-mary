@@ -165,3 +165,4 @@ Rules for all future Codex runs:
 - PR #72 loop 5: Shared `without` traction parsing should be used by both positive-keyword filtering and absence/conflict scans so mixed positive and explicitly absent traction records still create customer-traction diligence questions.
 - PR #80: New backend diligence modules should be wired into evaluate-deal before being considered complete, and URL validation must inspect recursively encoded query values as well as query keys so hidden token or credential parameters cannot become saved evidence lineage.
 - PR #81: Evidence-completeness guardrail text should say it forced PASS/$0 only when the score otherwise allowed INVEST; score-based PASS results need neutral audit limitation wording.
+- PR #83: Machine-readable evaluation exports should be curated schemas rather than raw model or evidence object dumps, so JSON artifacts preserve evidence IDs and status fields without copying source text, quotes, or model excerpts.
