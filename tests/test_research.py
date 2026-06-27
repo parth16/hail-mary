@@ -693,17 +693,50 @@ def test_run_research_workflow_reports_local_public_skips_and_no_results(
     assert result.no_prepared_result_companies == ["MissingCo"]
     assert result.summary.imported_record_count == 1
     assert result.summary.failed_provider_count == 0
-    assert any(
-        status.provider_id == "local_public"
-        and status.status == ResearchProviderRunStatus.PLANNED
+    sec_status = next(
+        status
         for status in result.summary.provider_statuses
+        if status.provider_id == "sec_form_d"
     )
+    assert sec_status.status == ResearchProviderRunStatus.PLANNED
+    assert sec_status.collected_count == 1
+    assert sec_status.no_exact_result_companies == ["MissingCo"]
     operator_lines = " ".join(
         line.plain for line in cli_module._research_workflow_collection_lines(local_public)
     )
     assert "skipped related match Acme AI Holdings for Acme AI" in operator_lines
     assert "operator validates the entity" in operator_lines
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
+
+
+def test_run_research_workflow_counts_only_unresolved_manual_tasks(
+    tmp_path: Path,
+) -> None:
+    config, _deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    _write_results(
+        results_path,
+        [
+            _research_result(
+                provider_id="sam_gov",
+                provider_name="SAM.gov",
+                title="Acme AI SAM.gov record",
+                text="Acme AI has a public SAM.gov registration record.",
+                retrieved_at="2025-12-31T12:00:00Z",
+                source_url="https://sam.gov/entity/acme-ai",
+                licensing_notes="Public government source.",
+            )
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        results_files=[results_path],
+        created_at=BUILT_AT,
+    )
+
+    assert result.manual_task_count > 0
+    assert result.unresolved_manual_task_count == result.manual_task_count - 1
 
 
 def test_prepare_research_plan_rejects_meridian_url_for_multiple_companies(

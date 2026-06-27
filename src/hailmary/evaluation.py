@@ -1669,9 +1669,9 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
             f"- Imported {research_run.stale_count} stale external research "
             f"{stale_record_word}; stale evidence is treated as limited support."
         )
-    if workflow.manual_task_count:
+    if workflow.unresolved_manual_task_count:
         lines.append(
-            f"- {workflow.manual_task_count} planned source tasks still need manual "
+            f"- {workflow.unresolved_manual_task_count} planned source tasks still need manual "
             "or local-file work."
         )
     lines.extend(_research_provider_status_memo_lines(workflow))
@@ -1781,9 +1781,9 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
             f"{research_run.stale_count} imported external research {stale_word} "
             "were stale. Treat them as limited support until refreshed."
         )
-    if workflow.manual_task_count:
+    if workflow.unresolved_manual_task_count:
         warnings.append(
-            f"{workflow.manual_task_count} external research source tasks still need "
+            f"{workflow.unresolved_manual_task_count} external research source tasks still need "
             "manual or local-file follow-up."
         )
     for issue in workflow.issues:

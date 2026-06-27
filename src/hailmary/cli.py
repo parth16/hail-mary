@@ -1872,6 +1872,7 @@ def research_workflow_command(
             {
                 "planned_source_count": result.planned_source_count,
                 "manual_task_count": result.manual_task_count,
+                "unresolved_manual_task_count": result.unresolved_manual_task_count,
                 "live_collectable_task_count": result.live_collectable_task_count,
                 "ready_to_import_count": result.ready_to_import_count,
                 "blocking_issue_count": result.blocking_issue_count,
@@ -1924,7 +1925,7 @@ def _research_workflow_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
     lines.append(
         _plain(
             f"Sources: {result.planned_source_count} planned, "
-            f"{result.manual_task_count} need manual or local-file work, "
+            f"{result.unresolved_manual_task_count} still need manual or local-file work, "
             f"{result.live_collectable_task_count} can be collected live."
         )
     )

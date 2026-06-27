@@ -30,11 +30,13 @@ from .importer import ResearchImportError, import_research_results
 from .matching import CompanyMatch
 from .meridian import clean_meridian_url, prepare_meridian_workflow
 from .planner import prepare_research_plan
+from .providers import builtin_research_providers
 from .schemas import (
     ResearchImportDealSummary,
     ResearchImportRunSummary,
     ResearchPlan,
     ResearchProviderCategory,
+    ResearchResultsFile,
     ResearchTask,
     ResearchTaskStatus,
 )
@@ -99,6 +101,9 @@ class ResearchWorkflowCollectionSummary(BaseModel):
     no_result_companies: list[str] = Field(default_factory=list)
     skipped_non_exact_company_names: list[str] = Field(default_factory=list)
     match_details: list[CompanyMatch] = Field(default_factory=list)
+    provider_ids: list[str] = Field(default_factory=list)
+    provider_result_counts: dict[str, int] = Field(default_factory=dict)
+    provider_company_result_counts: dict[str, dict[str, int]] = Field(default_factory=dict)
     provider_statuses: list[ResearchProviderStatusSummary] = Field(default_factory=list)
     incomplete_search: bool = False
     warnings: list[str] = Field(default_factory=list)
@@ -167,6 +172,10 @@ class ResearchWorkflowRunSummary(BaseModel):
     @property
     def manual_task_count(self) -> int:
         return sum(source.manual_count for source in self.source_summaries)
+
+    @property
+    def unresolved_manual_task_count(self) -> int:
+        return len(_unresolved_manual_tasks(self))
 
     @property
     def live_collectable_task_count(self) -> int:
@@ -732,6 +741,14 @@ def _collection_summary_from_result(
         deal.company_name for deal in deals if getattr(deal, "result_count", 0) == 0
     ]
     incomplete_search = _warnings_indicate_incomplete_search(warnings)
+    provider_ids = list(getattr(result, "provider_ids", []))
+    provider_result_counts = dict(getattr(result, "provider_result_counts", {}))
+    provider_company_result_counts = {
+        str(provider_id): dict(company_counts)
+        for provider_id, company_counts in dict(
+            getattr(result, "provider_company_result_counts", {})
+        ).items()
+    }
     return ResearchWorkflowCollectionSummary(
         kind=kind,
         source_id=source_id,
@@ -748,6 +765,18 @@ def _collection_summary_from_result(
         no_result_companies=no_result_companies,
         skipped_non_exact_company_names=skipped_non_exact_company_names or [],
         match_details=list(getattr(result, "match_details", [])),
+        provider_ids=provider_ids,
+        provider_result_counts=provider_result_counts,
+        provider_company_result_counts=provider_company_result_counts,
+        provider_statuses=(
+            _local_public_provider_statuses(
+                provider_ids=provider_ids,
+                provider_result_counts=provider_result_counts,
+                provider_company_result_counts=provider_company_result_counts,
+            )
+            if kind == "local_public"
+            else []
+        ),
         incomplete_search=incomplete_search,
         warnings=warnings,
     )
@@ -825,6 +854,37 @@ def _collection_status(
     return ResearchProviderRunStatus.NOT_RUN
 
 
+def _local_public_provider_statuses(
+    *,
+    provider_ids: list[str],
+    provider_result_counts: dict[str, int],
+    provider_company_result_counts: dict[str, dict[str, int]],
+) -> list[ResearchProviderStatusSummary]:
+    statuses: list[ResearchProviderStatusSummary] = []
+    for provider_id in provider_ids:
+        result_count = provider_result_counts.get(provider_id, 0)
+        company_counts = provider_company_result_counts.get(provider_id, {})
+        no_exact_result_companies = sorted(
+            company_name
+            for company_name, company_result_count in company_counts.items()
+            if company_result_count == 0
+        )
+        statuses.append(
+            ResearchProviderStatusSummary(
+                provider_id=provider_id,
+                provider_name=_provider_display_name(provider_id),
+                status=(
+                    ResearchProviderRunStatus.PLANNED
+                    if result_count > 0
+                    else ResearchProviderRunStatus.NO_EXACT_RESULTS
+                ),
+                collected_count=result_count,
+                no_exact_result_companies=no_exact_result_companies,
+            )
+        )
+    return statuses
+
+
 def _web_provider_statuses(
     tasks: list[WebResearchTaskSummary],
 ) -> list[ResearchProviderStatusSummary]:
@@ -869,6 +929,14 @@ def _web_provider_statuses(
             )
         )
     return statuses
+
+
+def _provider_display_name(provider_id: str) -> str:
+    provider = {
+        provider.id: provider
+        for provider in builtin_research_providers()
+    }.get(provider_id)
+    return provider.name if provider is not None else provider_id
 
 
 def _collection_import_source_id(collection: ResearchWorkflowCollectionSummary) -> str:
@@ -928,9 +996,9 @@ def _research_workflow_summary(
             statuses[provider_status.provider_id] = existing_status.model_copy(
                 update={
                     "provider_name": provider_status.provider_name,
-                    "status": _merge_provider_status(
-                        existing_status.status,
-                        provider_status.status,
+                    "status": _merge_provider_status_summary(
+                        existing=existing_status,
+                        incoming=provider_status,
                     ),
                     "collected_count": (
                         existing_status.collected_count
@@ -962,7 +1030,15 @@ def _research_workflow_summary(
         statuses[collection.source_id] = status.model_copy(
             update={
                 "provider_name": collection.source_name,
-                "status": _merge_provider_status(status.status, collection.status),
+                "status": _merge_provider_status_summary(
+                    existing=status,
+                    incoming=ResearchProviderStatusSummary(
+                        provider_id=collection.source_id,
+                        provider_name=collection.source_name,
+                        status=collection.status,
+                        collected_count=collection.result_count,
+                    ),
+                ),
                 "collected_count": status.collected_count + collection.result_count,
                 "warning_count": status.warning_count + len(collection.warnings),
                 "no_exact_result_companies": sorted(
@@ -1043,6 +1119,21 @@ def _merge_provider_status(
     return existing if rank[existing] <= rank[incoming] else incoming
 
 
+def _merge_provider_status_summary(
+    *,
+    existing: ResearchProviderStatusSummary,
+    incoming: ResearchProviderStatusSummary,
+) -> ResearchProviderRunStatus:
+    if (
+        ResearchProviderRunStatus.NO_EXACT_RESULTS
+        in {existing.status, incoming.status}
+        and ResearchProviderRunStatus.PLANNED in {existing.status, incoming.status}
+        and (existing.collected_count > 0 or incoming.collected_count > 0)
+    ):
+        return ResearchProviderRunStatus.PLANNED
+    return _merge_provider_status(existing.status, incoming.status)
+
+
 def _initial_provider_status(
     source: ResearchWorkflowSourceSummary,
     workflow: ResearchWorkflowRunSummary,
@@ -1085,6 +1176,48 @@ def _source_summaries(plan: ResearchPlan) -> list[ResearchWorkflowSourceSummary]
             }
         )
     return list(summaries.values())
+
+
+def _unresolved_manual_tasks(workflow: ResearchWorkflowRunSummary) -> list[ResearchTask]:
+    resolved_result_keys = _resolved_research_result_keys(workflow)
+    return [
+        task
+        for task in workflow.plan.tasks
+        if _task_needs_manual_work(task)
+        and _research_result_key(task.company_name, task.provider_id)
+        not in resolved_result_keys
+    ]
+
+
+def _resolved_research_result_keys(
+    workflow: ResearchWorkflowRunSummary,
+) -> set[tuple[str, str]]:
+    deal_company_names = {
+        deal.deal_id: deal.company_name
+        for deal in workflow.plan.deals
+    }
+    result_keys: set[tuple[str, str]] = set()
+    for preview in workflow.import_previews:
+        if preview.error is not None:
+            continue
+        try:
+            results_file = ResearchResultsFile.model_validate_json(
+                preview.input_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            continue
+        for result in results_file.results:
+            company_name = result.company_name
+            if company_name is None and result.deal_id is not None:
+                company_name = deal_company_names.get(result.deal_id)
+            if company_name is None:
+                continue
+            result_keys.add(_research_result_key(company_name, result.provider_id))
+    return result_keys
+
+
+def _research_result_key(company_name: str, provider_id: str) -> tuple[str, str]:
+    return (company_name.strip().casefold(), provider_id.strip())
 
 
 def _task_needs_manual_work(task: ResearchTask) -> bool:

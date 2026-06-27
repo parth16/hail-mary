@@ -1253,14 +1253,13 @@ def run_research_workflow_v4_fixture(work_dir: Path) -> None:
         for status in workflow.summary.provider_statuses
     }
     _expect_equal(
-        statuses["local_public"].status,
-        ResearchProviderRunStatus.PLANNED,
-        "Expected local public-source results to stay planned after dry-run validation.",
-    )
-    _expect_equal(
         statuses["sec_form_d"].status,
-        ResearchProviderRunStatus.NO_EXACT_RESULTS,
-        "Expected completed empty SEC searches to be marked no exact results.",
+        ResearchProviderRunStatus.PLANNED,
+        "Expected local SEC results to stay planned after dry-run validation.",
+    )
+    _expect(
+        "Synthetic MissingV4Co" in statuses["sec_form_d"].no_exact_result_companies,
+        "Expected provider status to still show companies with no exact SEC results.",
     )
     _expect_equal(
         statuses["usaspending"].status,
