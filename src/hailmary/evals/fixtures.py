@@ -2784,6 +2784,32 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "Expected evaluate-deal to persist parseable packet artifacts for every role.",
         missing_roles=", ".join(missing_packet_roles),
     )
+    final_packet = next(
+        (packet for packet in parsed_packets if packet.agent_role == AgentRole.FINAL_DECISION),
+        None,
+    )
+    _expect(
+        final_packet is not None,
+        "Expected a persisted final-decision packet artifact.",
+    )
+    if final_packet is None:
+        raise EvalFixtureFailure("Expected a persisted final-decision packet artifact.")
+    _expect(
+        final_packet.evidence_health is not None,
+        "Expected final-decision packet to include evidence-health context.",
+    )
+    _expect(
+        final_packet.scoring_support is not None,
+        "Expected final-decision packet to include scoring-support context.",
+    )
+    _expect(
+        final_packet.committee_context is not None,
+        "Expected final-decision packet to include validated specialist context.",
+    )
+    _expect(
+        "Source-linked synthetic review" in final_packet.model_dump_json(),
+        "Expected specialist findings to be persisted in final-decision packet context.",
+    )
     output_paths = sorted(
         path
         for path in result.agent_output_dir.glob("*.json")
@@ -2834,6 +2860,14 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
     _expect(
         bool(final_payloads) and "supported_specialist_findings" in final_payloads[-1],
         "Expected final-decision model messages to include specialist committee context.",
+    )
+    _expect(
+        bool(final_payloads) and "evidence_health" in final_payloads[-1],
+        "Expected final-decision model messages to include evidence-health context.",
+    )
+    _expect(
+        bool(final_payloads) and "scoring_support" in final_payloads[-1],
+        "Expected final-decision model messages to include scoring-support context.",
     )
     _expect(
         bool(final_payloads) and "Source-linked synthetic review" in final_payloads[-1],

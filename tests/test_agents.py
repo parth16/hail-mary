@@ -62,7 +62,7 @@ runner = CliRunner()
 _TEST_EVIDENCE_TEXT_BY_ID: dict[str, str] = {}
 
 
-def test_default_agent_roles_are_v2_committee() -> None:
+def test_default_agent_roles_are_v3_committee() -> None:
     assert DEFAULT_AGENT_ROLES == (
         AgentRole.PRODUCT_CUSTOMER_TRACTION,
         AgentRole.MARKET_COMPETITION,
@@ -100,7 +100,7 @@ def test_build_agent_input_packet_uses_validated_evidence_ids_only() -> None:
     }
 
 
-def test_build_agent_input_packet_carries_v2_context_without_provider_metadata() -> None:
+def test_build_agent_input_packet_carries_v3_context_without_provider_metadata() -> None:
     evidence_a = _evidence("ev_cap_a", "Valuation cap $8M.").model_copy(
         update={
             "provider_id": "sec",
@@ -143,6 +143,12 @@ def test_build_agent_input_packet_carries_v2_context_without_provider_metadata()
 
     assert packet.score_factors
     assert packet.triggered_kill_gates
+    assert packet.evidence_health is not None
+    assert packet.evidence_health.evidence_count == 2
+    assert packet.scoring_support is not None
+    assert packet.scoring_support.deterministic_recommendation == scored_deal.recommendation
+    assert packet.scoring_support.score_factors
+    assert packet.scoring_support.triggered_kill_gates
     assert packet.conflicts[0].evidence_ids == ["ev_cap_a", "ev_cap_b"]
     assert packet.packet_limitations
     assert any(
@@ -334,6 +340,14 @@ def test_build_agent_input_packet_caps_cited_evidence_records() -> None:
 
     assert len(packet.evidence) == 50
     assert packet.allowed_evidence_ids == [f"ev_{index}" for index in range(50)]
+    assert packet.scoring_support is not None
+    large_factor = packet.scoring_support.score_factors[0]
+    assert large_factor.selected_evidence_ids == [f"ev_{index}" for index in range(50)]
+    assert large_factor.omitted_evidence_count == 10
+    assert any(
+        "omitted 10 deterministic scoring support" in item
+        for item in packet.packet_limitations
+    )
 
 
 def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_records() -> None:
@@ -389,10 +403,14 @@ def test_build_agent_input_packet_filters_net_return_evidence_ids_to_selected_re
     valuation_factor = packet.score_factors[0]
     assert valuation_factor.name == "Valuation and net return"
     assert valuation_factor.score == 0
+    assert valuation_factor.omitted_evidence_count == 1
     assert valuation_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
     assert valuation_factor.missing_inputs == ["packet evidence for return math"]
     assert "95x" not in valuation_factor.explanation
     assert "$1B" not in valuation_factor.explanation
+    assert packet.scoring_support is not None
+    assert packet.scoring_support.net_return_selected_evidence_ids == ["ev_return_0"]
+    assert packet.scoring_support.net_return_omitted_evidence_count == 1
 
 
 def test_build_agent_input_packet_clears_return_math_when_support_text_is_truncated() -> None:
