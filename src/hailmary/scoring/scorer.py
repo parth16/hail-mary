@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 
 from hailmary.config import CHECK_SIZE_TIERS, AppConfig
+from hailmary.portfolio.scenario import portfolio_scenario
 from hailmary.schemas.evidence import (
     ClaimConflict,
     ClaimRecord,
@@ -15,6 +16,7 @@ from hailmary.schemas.evidence import (
     VerificationStatus,
 )
 from hailmary.schemas.scoring import (
+    CheckSizingDecision,
     CompanyStage,
     ConfidenceLevel,
     DiligenceQuestion,
@@ -24,11 +26,18 @@ from hailmary.schemas.scoring import (
     KillGate,
     NetReturnEstimate,
     PMFLevel,
+    PortfolioAllocationScenario,
     Recommendation,
     ScoredDeal,
     ScoreFactor,
     ScoreSupportStatus,
     ValuationRisk,
+)
+from hailmary.scoring.portfolio import (
+    PortfolioExposureState,
+    empty_portfolio_exposure_state,
+    portfolio_exposure_cap,
+    portfolio_exposure_checks,
 )
 
 TRACTION_KEYWORDS = (
@@ -305,6 +314,7 @@ def score_evidence_store(
     config: AppConfig,
     capital_remaining: int | None = None,
     research_context: DiligenceResearchContext | None = None,
+    exposure_state: PortfolioExposureState | None = None,
 ) -> ScoredDeal:
     """Score one deal using only validated evidence-store records."""
 
@@ -355,20 +365,34 @@ def score_evidence_store(
         if has_kill_gate or total_score < INVEST_MINIMUM_SCORE
         else Recommendation.INVEST
     )
+    check_sizing = _check_sizing_decision(
+        store,
+        total_score,
+        config=config,
+        confidence=confidence,
+        platform_minimum_check=platform_minimum_check,
+        capital_remaining=available_capital,
+        valuation_risk=valuation_risk,
+        fundability_risk=fundability_risk,
+        net_return=net_return,
+        company_stage=company_stage,
+        exposure_state=exposure_state,
+    )
     check_size = (
         0
         if recommendation == Recommendation.PASS
-        else _check_size_for_score(
-            total_score,
-            config=config,
-            confidence=confidence,
-            platform_minimum_check=platform_minimum_check,
-            capital_remaining=available_capital,
-            valuation_risk=valuation_risk,
-            fundability_risk=fundability_risk,
-            net_return=net_return,
-        )
+        else check_sizing.selected_tier
     )
+    if recommendation == Recommendation.PASS:
+        check_sizing = check_sizing.model_copy(
+            update={
+                "selected_tier": 0,
+                "reason_codes": [
+                    *check_sizing.reason_codes,
+                    "deterministic_pass",
+                ],
+            }
+        )
     if recommendation == Recommendation.INVEST and check_size == 0:
         recommendation = Recommendation.PASS
         kill_gates.append(
@@ -384,10 +408,16 @@ def score_evidence_store(
                     valuation_risk=valuation_risk,
                     fundability_risk=fundability_risk,
                     net_return=net_return,
+                    check_sizing=check_sizing,
                 ),
             )
         )
 
+    allocation_scenario = _allocation_scenario(
+        config=config,
+        capital_remaining=available_capital,
+        check_size=check_size,
+    )
     return ScoredDeal(
         deal_id=store.deal_id,
         company_name=store.company_name,
@@ -422,6 +452,8 @@ def score_evidence_store(
         ),
         capital_remaining_before=available_capital,
         capital_remaining_after=max(0, available_capital - check_size),
+        allocation_scenario=allocation_scenario,
+        check_sizing=check_sizing,
     )
 
 
@@ -1935,7 +1967,8 @@ def _triggered_gate_questions(kill_gates: list[KillGate]) -> list[DiligenceQuest
     return questions
 
 
-def _check_size_for_score(
+def _check_sizing_decision(
+    store: EvidenceStore,
     total_score: int,
     *,
     config: AppConfig,
@@ -1945,31 +1978,83 @@ def _check_size_for_score(
     valuation_risk: ValuationRisk,
     fundability_risk: FundabilityRisk,
     net_return: NetReturnEstimate,
-) -> int:
+    company_stage: CompanyStage,
+    exposure_state: PortfolioExposureState | None,
+) -> CheckSizingDecision:
     target = _target_check_size(total_score, confidence=confidence)
-    cap = _check_size_cap(
+    risk_cap = _check_size_cap(
         target,
         confidence=confidence,
         valuation_risk=valuation_risk,
         fundability_risk=fundability_risk,
         net_return=net_return,
     )
-    if cap is not None:
-        target = min(target, cap)
+    reason_codes = ["score_target"]
+    effective_cap = risk_cap
+    if risk_cap is not None:
+        target = min(target, risk_cap)
+        reason_codes.append("risk_cap_applied")
     if platform_minimum_check is not None:
+        if platform_minimum_check > target:
+            reason_codes.append("platform_minimum_applied")
         target = max(target, platform_minimum_check)
+    exposure_checks = portfolio_exposure_checks(
+        config=config,
+        store=store,
+        company_stage=company_stage,
+        confidence=confidence,
+        exposure_state=exposure_state or empty_portfolio_exposure_state(),
+    )
+    exposure_cap = portfolio_exposure_cap(exposure_checks)
+    if exposure_cap is not None:
+        effective_cap = (
+            exposure_cap if effective_cap is None else min(effective_cap, exposure_cap)
+        )
+        reason_codes.append("exposure_limit_applied")
+    if capital_remaining < config.max_check:
+        reason_codes.append("capital_limited")
     allowed_tiers = _available_nonzero_tiers(
         config,
         platform_minimum_check=platform_minimum_check,
         capital_remaining=capital_remaining,
-        check_size_cap=cap,
+        check_size_cap=effective_cap,
     )
     if not allowed_tiers:
-        return 0
+        reason_codes.extend(
+            _no_tier_reason_codes(
+                config=config,
+                platform_minimum_check=platform_minimum_check,
+                capital_remaining=capital_remaining,
+                risk_cap=risk_cap,
+                exposure_cap=exposure_cap,
+            )
+        )
+        return CheckSizingDecision(
+            score_target=_target_check_size(total_score, confidence=confidence),
+            risk_cap=risk_cap,
+            platform_minimum_check=platform_minimum_check,
+            exposure_cap=exposure_cap,
+            allowed_tiers=[],
+            selected_tier=0,
+            reason_codes=list(dict.fromkeys(reason_codes)),
+            exposure_checks=exposure_checks,
+        )
     tiers_at_or_above_target = [tier for tier in allowed_tiers if tier >= target]
     if tiers_at_or_above_target:
-        return min(tiers_at_or_above_target)
-    return max(allowed_tiers)
+        selected_tier = min(tiers_at_or_above_target)
+    else:
+        selected_tier = max(allowed_tiers)
+        reason_codes.append("selected_lower_allowed_tier")
+    return CheckSizingDecision(
+        score_target=_target_check_size(total_score, confidence=confidence),
+        risk_cap=risk_cap,
+        platform_minimum_check=platform_minimum_check,
+        exposure_cap=exposure_cap,
+        allowed_tiers=allowed_tiers,
+        selected_tier=selected_tier,
+        reason_codes=list(dict.fromkeys(reason_codes)),
+        exposure_checks=exposure_checks,
+    )
 
 
 def _check_size_cap(
@@ -2002,7 +2087,24 @@ def _no_available_check_size_reason(
     valuation_risk: ValuationRisk,
     fundability_risk: FundabilityRisk,
     net_return: NetReturnEstimate,
+    check_sizing: CheckSizingDecision,
 ) -> str:
+    reason_codes = set(check_sizing.reason_codes)
+    if "risk_cap_below_minimum" in reason_codes:
+        return (
+            "Risk caps lowered the maximum check below the configured or "
+            "platform minimum check."
+        )
+    if "risk_cap_no_tier" in reason_codes:
+        return (
+            "No configured check size fits the risk cap, platform minimum, "
+            "and remaining capital."
+        )
+    if "exposure_limit_no_tier" in reason_codes or "exposure_cap_below_minimum" in reason_codes:
+        return (
+            "No configured check size fits the exposure limits, platform minimum, "
+            "and remaining capital."
+        )
     target = _target_check_size(total_score, confidence=confidence)
     cap = _check_size_cap(
         target,
@@ -2037,6 +2139,83 @@ def _no_available_check_size_reason(
                 "and remaining capital."
             )
     return "No configured check size fits the platform minimum and remaining capital."
+
+
+def _no_tier_reason_codes(
+    *,
+    config: AppConfig,
+    platform_minimum_check: int | None,
+    capital_remaining: int,
+    risk_cap: int | None,
+    exposure_cap: int | None,
+) -> list[str]:
+    reason_codes = ["no_allowed_tier"]
+    minimum_check = config.min_check
+    if platform_minimum_check is not None:
+        minimum_check = max(minimum_check, platform_minimum_check)
+    if capital_remaining < minimum_check:
+        reason_codes.append("capital_below_minimum")
+    base_tiers = _available_nonzero_tiers(
+        config,
+        platform_minimum_check=platform_minimum_check,
+        capital_remaining=capital_remaining,
+    )
+    if risk_cap is not None:
+        risk_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+            check_size_cap=risk_cap,
+        )
+        if base_tiers and not risk_tiers:
+            reason_codes.append(
+                "risk_cap_below_minimum"
+                if risk_cap < minimum_check
+                else "risk_cap_no_tier"
+            )
+    if exposure_cap is not None:
+        cap_before_exposure = risk_cap
+        before_exposure_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+            check_size_cap=cap_before_exposure,
+        )
+        effective_cap = (
+            exposure_cap
+            if cap_before_exposure is None
+            else min(cap_before_exposure, exposure_cap)
+        )
+        after_exposure_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+            check_size_cap=effective_cap,
+        )
+        if before_exposure_tiers and not after_exposure_tiers:
+            reason_codes.append(
+                "exposure_cap_below_minimum"
+                if exposure_cap < minimum_check
+                else "exposure_limit_no_tier"
+            )
+    return reason_codes
+
+
+def _allocation_scenario(
+    *,
+    config: AppConfig,
+    capital_remaining: int,
+    check_size: int,
+) -> PortfolioAllocationScenario:
+    scenario = portfolio_scenario(config)
+    return PortfolioAllocationScenario(
+        starting_capital=scenario.starting_capital,
+        follow_on_reserve=scenario.reserve_amount,
+        allocatable_capital=scenario.allocatable_capital,
+        capital_before_check=capital_remaining,
+        current_check=check_size,
+        capital_after_check=max(0, capital_remaining - check_size),
+    )
 
 
 def _min_optional_cap(current_cap: int | None, candidate_cap: int) -> int:

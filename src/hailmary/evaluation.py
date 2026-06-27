@@ -84,6 +84,7 @@ from hailmary.schemas.scoring import (
     ScoreFactor,
     ScoreSupportStatus,
 )
+from hailmary.scoring.portfolio import portfolio_exposure_state_from_ledger
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -779,6 +780,10 @@ def evaluate_deal_folder(
         config=config,
         capital_remaining=status.available_capital,
         research_context=_diligence_research_context(research_run),
+        exposure_state=portfolio_exposure_state_from_ledger(
+            status.ledger,
+            config=config,
+        ),
     )
 
     packet_created_at = created_at or datetime.now(UTC)

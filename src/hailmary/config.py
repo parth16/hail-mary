@@ -37,6 +37,12 @@ class AppConfig(BaseModel):
     platform_fee_percent: Decimal = Field(default=Decimal("0"))
     carry_percent: Decimal = Field(default=Decimal("0"))
     gross_return_multiple: Decimal = Field(default=Decimal("5"))
+    max_company_exposure_percent: Decimal = Field(default=Decimal("0"))
+    max_category_exposure_percent: Decimal = Field(default=Decimal("0"))
+    max_stage_exposure_percent: Decimal = Field(default=Decimal("0"))
+    max_low_confidence_exposure_percent: Decimal = Field(default=Decimal("0"))
+    max_medium_confidence_exposure_percent: Decimal = Field(default=Decimal("0"))
+    max_high_confidence_exposure_percent: Decimal = Field(default=Decimal("0"))
     meridian_profile_dir: Path = Field(default=Path("./data/browser-profiles/meridian"))
     enable_ocr: bool = False
     enable_web_research: bool = False
@@ -304,6 +310,42 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             config_values=saved_values,
             config_name="gross_return_multiple",
             default=Decimal("5"),
+        ),
+        max_company_exposure_percent=_setting_decimal(
+            env_name="HAILMARY_MAX_COMPANY_EXPOSURE_PERCENT",
+            config_values=saved_values,
+            config_name="max_company_exposure_percent",
+            default=Decimal("0"),
+        ),
+        max_category_exposure_percent=_setting_decimal(
+            env_name="HAILMARY_MAX_CATEGORY_EXPOSURE_PERCENT",
+            config_values=saved_values,
+            config_name="max_category_exposure_percent",
+            default=Decimal("0"),
+        ),
+        max_stage_exposure_percent=_setting_decimal(
+            env_name="HAILMARY_MAX_STAGE_EXPOSURE_PERCENT",
+            config_values=saved_values,
+            config_name="max_stage_exposure_percent",
+            default=Decimal("0"),
+        ),
+        max_low_confidence_exposure_percent=_setting_decimal(
+            env_name="HAILMARY_MAX_LOW_CONFIDENCE_EXPOSURE_PERCENT",
+            config_values=saved_values,
+            config_name="max_low_confidence_exposure_percent",
+            default=Decimal("0"),
+        ),
+        max_medium_confidence_exposure_percent=_setting_decimal(
+            env_name="HAILMARY_MAX_MEDIUM_CONFIDENCE_EXPOSURE_PERCENT",
+            config_values=saved_values,
+            config_name="max_medium_confidence_exposure_percent",
+            default=Decimal("0"),
+        ),
+        max_high_confidence_exposure_percent=_setting_decimal(
+            env_name="HAILMARY_MAX_HIGH_CONFIDENCE_EXPOSURE_PERCENT",
+            config_values=saved_values,
+            config_name="max_high_confidence_exposure_percent",
+            default=Decimal("0"),
         ),
         meridian_profile_dir=_meridian_profile_dir(
             resolved_data_dir,
@@ -601,6 +643,30 @@ def _ensure_investment_limits(config: AppConfig) -> None:
     _ensure_percent(config.estimated_dilution_percent, name="estimated dilution percent")
     _ensure_percent(config.platform_fee_percent, name="platform fee percent")
     _ensure_percent(config.carry_percent, name="carry percent")
+    _ensure_percent(
+        config.max_company_exposure_percent,
+        name="maximum company exposure percent",
+    )
+    _ensure_percent(
+        config.max_category_exposure_percent,
+        name="maximum category exposure percent",
+    )
+    _ensure_percent(
+        config.max_stage_exposure_percent,
+        name="maximum stage exposure percent",
+    )
+    _ensure_percent(
+        config.max_low_confidence_exposure_percent,
+        name="maximum low-confidence exposure percent",
+    )
+    _ensure_percent(
+        config.max_medium_confidence_exposure_percent,
+        name="maximum medium-confidence exposure percent",
+    )
+    _ensure_percent(
+        config.max_high_confidence_exposure_percent,
+        name="maximum high-confidence exposure percent",
+    )
     if not config.gross_return_multiple.is_finite():
         raise ConfigError("The gross return multiple must be a finite number.")
     _ensure_bounded_decimal(
@@ -1124,6 +1190,11 @@ def _default_config_text(config: AppConfig) -> str:
     llm_output_cost_rate = _optional_int_text(
         config.llm_output_cost_per_million_tokens_cents
     )
+    low_confidence_exposure = _decimal_text(config.max_low_confidence_exposure_percent)
+    medium_confidence_exposure = _decimal_text(
+        config.max_medium_confidence_exposure_percent
+    )
+    high_confidence_exposure = _decimal_text(config.max_high_confidence_exposure_percent)
 
     return f"""# Local Hail Mary settings. Do not commit this file.
 data_dir: {_yaml_string(config.data_dir.as_posix())}
@@ -1138,6 +1209,12 @@ estimated_dilution_percent: {_decimal_text(config.estimated_dilution_percent)}
 platform_fee_percent: {_decimal_text(config.platform_fee_percent)}
 carry_percent: {_decimal_text(config.carry_percent)}
 gross_return_multiple: {_decimal_text(config.gross_return_multiple)}
+max_company_exposure_percent: {_decimal_text(config.max_company_exposure_percent)}
+max_category_exposure_percent: {_decimal_text(config.max_category_exposure_percent)}
+max_stage_exposure_percent: {_decimal_text(config.max_stage_exposure_percent)}
+max_low_confidence_exposure_percent: {low_confidence_exposure}
+max_medium_confidence_exposure_percent: {medium_confidence_exposure}
+max_high_confidence_exposure_percent: {high_confidence_exposure}
 meridian_profile_dir: {_yaml_string(config.meridian_profile_dir.as_posix())}
 enable_ocr: {enable_ocr}
 enable_web_research: {web_research}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Self
@@ -65,6 +66,46 @@ class DiligenceQuestionCategory(StrEnum):
     FINANCING_TERMS = "financing terms"
     LEGAL_COMPLIANCE = "legal/compliance"
     PORTFOLIO_FIT = "portfolio fit"
+
+
+class PortfolioExposureDimension(StrEnum):
+    COMPANY = "company"
+    CATEGORY = "category"
+    STAGE = "stage"
+    SOURCE_CONFIDENCE = "source_confidence"
+
+
+class PortfolioAllocationScenario(BaseModel):
+    starting_capital: int = 0
+    follow_on_reserve: int = 0
+    allocatable_capital: int = 0
+    capital_before_check: int | None = None
+    current_check: int = 0
+    capital_after_check: int | None = None
+
+
+class PortfolioExposureCheck(BaseModel):
+    dimension: PortfolioExposureDimension
+    key: str
+    configured_limit_percent: Decimal
+    exposure_before: int
+    limit_amount: int
+    available_capacity: int
+    applied: bool
+    blocking: bool
+    reason_code: str
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class CheckSizingDecision(BaseModel):
+    score_target: int = 0
+    risk_cap: int | None = None
+    platform_minimum_check: int | None = None
+    exposure_cap: int | None = None
+    allowed_tiers: list[int] = Field(default_factory=list)
+    selected_tier: int = 0
+    reason_codes: list[str] = Field(default_factory=list)
+    exposure_checks: list[PortfolioExposureCheck] = Field(default_factory=list)
 
 
 class NetReturnEstimate(BaseModel):
@@ -147,6 +188,10 @@ class ScoredDeal(BaseModel):
     diligence_questions: list[DiligenceQuestion] = Field(default_factory=list)
     capital_remaining_before: int | None = None
     capital_remaining_after: int | None = None
+    allocation_scenario: PortfolioAllocationScenario = Field(
+        default_factory=PortfolioAllocationScenario
+    )
+    check_sizing: CheckSizingDecision = Field(default_factory=CheckSizingDecision)
     memo_path: Path | None = None
     portfolio_rank: int | None = None
 

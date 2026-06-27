@@ -18,6 +18,8 @@ from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import MemoRunSummary, ScoredDeal
 from hailmary.scoring.portfolio import (
     allowed_check_tiers,
+    portfolio_exposure_state_after_score,
+    portfolio_exposure_state_from_ledger,
     portfolio_rank_key,
     portfolio_return_cases,
     skipped_deals,
@@ -61,6 +63,10 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
         status = portfolio_status(config)
     except PortfolioError as exc:
         raise ScoringError(f"Could not read the private portfolio ledger: {exc}") from exc
+    base_exposure_state = portfolio_exposure_state_from_ledger(
+        status.ledger,
+        config=config,
+    )
     scoring_inputs: list[tuple[EvidenceStore, ScoredDeal, Path]] = []
     for deal in summary.deals:
         if deal.evidence_store_path is None:
@@ -87,11 +93,13 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
             store,
             config=config,
             capital_remaining=max(status.available_capital, config.max_check),
+            exposure_state=base_exposure_state,
         )
         memo_path = report_dir / f"{slugify(deal.company_name)}-{deal.id}-memo.md"
         scoring_inputs.append((store, ranking_scored_deal, memo_path))
 
     remaining_capital = status.available_capital
+    exposure_state = base_exposure_state
     scored_by_index: dict[int, ScoredDeal] = {}
     portfolio_rank_by_index: dict[int, int] = {}
     ranked_inputs = sorted(
@@ -103,8 +111,10 @@ def score_latest_ingestion(*, config: AppConfig) -> MemoRunSummary:
             store,
             config=config,
             capital_remaining=remaining_capital,
+            exposure_state=exposure_state,
         )
         remaining_capital = scored_deal.capital_remaining_after or 0
+        exposure_state = portfolio_exposure_state_after_score(exposure_state, scored_deal)
         scored_by_index[index] = scored_deal
         portfolio_rank_by_index[index] = portfolio_rank
 

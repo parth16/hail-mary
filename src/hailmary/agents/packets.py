@@ -42,12 +42,19 @@ from hailmary.schemas.agents import (
 from hailmary.schemas.documents import IngestedDeal, IngestedDocument, IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
 from hailmary.schemas.scoring import (
+    CheckSizingDecision,
     NetReturnEstimate,
+    PortfolioExposureCheck,
     ScoredDeal,
     ScoreFactor,
     ScoreSupportStatus,
 )
-from hailmary.scoring.portfolio import portfolio_rank_key
+from hailmary.scoring.portfolio import (
+    PortfolioExposureState,
+    portfolio_exposure_state_after_score,
+    portfolio_exposure_state_from_ledger,
+    portfolio_rank_key,
+)
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -206,6 +213,10 @@ def prepare_agent_packets(
         raise AgentPacketError(
             f"Could not read the private portfolio ledger: {exc}"
         ) from exc
+    base_exposure_state = portfolio_exposure_state_from_ledger(
+        status.ledger,
+        config=config,
+    )
     packet_files: list[AgentPacketFile] = []
     packet_inputs: list[
         tuple[IngestedDeal, EvidenceStore, ScoredDeal, set[str], EvidenceActionSummary]
@@ -237,6 +248,7 @@ def prepare_agent_packets(
             store,
             config=config,
             capital_remaining=max(status.available_capital, config.max_check),
+            exposure_state=base_exposure_state,
         )
         packet_inputs.append(
             (
@@ -252,6 +264,7 @@ def prepare_agent_packets(
         packet_inputs,
         config=config,
         available_capital=status.available_capital,
+        base_exposure_state=base_exposure_state,
     )
     for index, (
         deal,
@@ -298,8 +311,10 @@ def _score_with_ranked_capital_allocation(
     *,
     config: AppConfig,
     available_capital: int,
+    base_exposure_state: PortfolioExposureState,
 ) -> dict[int, ScoredDeal]:
     remaining_capital = available_capital
+    exposure_state = base_exposure_state
     scored_by_index: dict[int, ScoredDeal] = {}
     ranked_inputs = sorted(
         enumerate(packet_inputs),
@@ -310,8 +325,10 @@ def _score_with_ranked_capital_allocation(
             store,
             config=config,
             capital_remaining=remaining_capital,
+            exposure_state=exposure_state,
         )
         remaining_capital = scored_deal.capital_remaining_after or 0
+        exposure_state = portfolio_exposure_state_after_score(exposure_state, scored_deal)
         scored_by_index[index] = scored_deal
     return scored_by_index
 
@@ -367,6 +384,10 @@ def build_agent_input_packet(
         packet_net_return=packet_net_return,
         allowed_evidence_ids=allowed_evidence_ids,
     )
+    packet_check_sizing = _packet_check_sizing_decision(
+        scored_deal.check_sizing,
+        allowed_evidence_ids=allowed_evidence_ids,
+    )
 
     return AgentInputPacket(
         created_at=created_at or datetime.now(UTC),
@@ -389,6 +410,8 @@ def build_agent_input_packet(
             company_stage=scored_deal.company_stage,
             valuation_risk=scored_deal.valuation_risk,
             net_return=packet_net_return,
+            allocation_scenario=scored_deal.allocation_scenario,
+            check_sizing=packet_check_sizing,
         ),
         score_factors=packet_score_factors,
         triggered_kill_gates=_triggered_kill_gate_items(
@@ -813,7 +836,54 @@ def _scoring_reference_evidence_ids(scored_deal: ScoredDeal) -> list[str]:
             add_id(evidence_id)
     for evidence_id in scored_deal.net_return.evidence_ids:
         add_id(evidence_id)
+    for check in scored_deal.check_sizing.exposure_checks:
+        for evidence_id in check.evidence_ids:
+            add_id(evidence_id)
     return evidence_ids
+
+
+def _packet_check_sizing_decision(
+    check_sizing: CheckSizingDecision,
+    *,
+    allowed_evidence_ids: set[str],
+) -> CheckSizingDecision:
+    return check_sizing.model_copy(
+        update={
+            "exposure_checks": [
+                _packet_exposure_check(
+                    check,
+                    allowed_evidence_ids=allowed_evidence_ids,
+                )
+                for check in check_sizing.exposure_checks
+            ]
+        }
+    )
+
+
+def _packet_exposure_check(
+    check: PortfolioExposureCheck,
+    *,
+    allowed_evidence_ids: set[str],
+) -> PortfolioExposureCheck:
+    if not check.evidence_ids:
+        return check
+    selected_evidence_ids = _allowed_ids(
+        check.evidence_ids,
+        allowed_evidence_ids=allowed_evidence_ids,
+    )
+    if selected_evidence_ids:
+        return check.model_copy(update={"evidence_ids": selected_evidence_ids})
+    return check.model_copy(
+        update={
+            "key": "omitted",
+            "exposure_before": 0,
+            "available_capacity": 0,
+            "applied": False,
+            "blocking": False,
+            "reason_code": f"{check.reason_code}_omitted_from_packet",
+            "evidence_ids": [],
+        }
+    )
 
 
 def load_agent_input_packet(path: Path) -> AgentInputPacket:
