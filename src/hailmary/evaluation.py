@@ -19,8 +19,12 @@ from hailmary.agents.packets import (
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig, ConfigError, create_local_state, validate_local_state
 from hailmary.evidence import (
+    EvidenceAuditReadiness,
+    EvidenceAuditSeverity,
+    EvidenceCompletenessAudit,
     ReviewIssueSeverity,
     build_deal_evidence_review,
+    build_evidence_completeness_audit,
 )
 from hailmary.evidence.actions import (
     EvidenceActionError,
@@ -276,6 +280,7 @@ class DealEvaluationResult:
     ocr_status: str
     research_run: EvaluationResearchRun | None = None
     research_imported_count: int = 0
+    evidence_audit: EvidenceCompletenessAudit | None = None
     evidence_review: DealEvidenceReview | None = None
     operator_limitations: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -345,6 +350,22 @@ def _cli_risk_points(result: DealEvaluationResult) -> list[str]:
                 f"{_operator_factor_name(gate.name)}."
             ),
         )
+    if result.evidence_audit is not None:
+        for finding in result.evidence_audit.findings:
+            if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+                break
+            if finding.severity not in {
+                EvidenceAuditSeverity.BLOCKING,
+                EvidenceAuditSeverity.WARNING,
+            }:
+                continue
+            _add_cli_point(
+                points,
+                (
+                    "Evidence completeness, meaning coverage of the key facts needed "
+                    f"for the decision, flagged: {finding.title}."
+                ),
+            )
     if result.evidence_review is not None:
         for issue in result.evidence_review.issues:
             if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
@@ -785,6 +806,11 @@ def evaluate_deal_folder(
             config=config,
         ),
     )
+    _stage(stage_callback, "evidence completeness audit")
+    evidence_audit = build_evidence_completeness_audit(
+        store,
+        scored_deal=scored_deal,
+    )
 
     packet_created_at = created_at or datetime.now(UTC)
     output_dir = config.data_dir / "agent-outputs" / deal.id
@@ -931,6 +957,7 @@ def evaluate_deal_folder(
         ),
         *_ingestion_ocr_warnings(deal),
         *_research_warnings(research_run),
+        *_evidence_audit_warnings(evidence_audit),
         *_evidence_review_warnings(evidence_review),
         *_evaluation_warnings(specialist_results, guarded_decision),
     ]
@@ -942,6 +969,7 @@ def evaluate_deal_folder(
         specialist_results,
         guarded_decision=guarded_decision,
         no_evidence=store.evidence_count == 0,
+        evidence_audit=evidence_audit,
         evidence_review=evidence_review,
     )
     _write_private_text(
@@ -955,6 +983,7 @@ def evaluate_deal_folder(
             warnings=warnings,
             final_review_was_model=final_review_was_model,
             research_run=research_run,
+            evidence_audit=evidence_audit,
             evidence_review=evidence_review,
             quote_only_evidence_ids=action_application.packet_quote_only_evidence_ids,
         ),
@@ -980,6 +1009,7 @@ def evaluate_deal_folder(
         ocr_status=_ocr_status(config, deal),
         research_run=research_run,
         research_imported_count=research_run.imported_count if research_run else 0,
+        evidence_audit=evidence_audit,
         evidence_review=evidence_review,
         operator_limitations=operator_limitations,
         warnings=warnings,
@@ -1356,6 +1386,7 @@ def render_final_evaluation_memo(
     warnings: Sequence[str] = (),
     final_review_was_model: bool = True,
     research_run: EvaluationResearchRun | None = None,
+    evidence_audit: EvidenceCompletenessAudit | None = None,
     evidence_review: DealEvidenceReview | None = None,
     quote_only_evidence_ids: set[str] | None = None,
 ) -> str:
@@ -1419,6 +1450,9 @@ def render_final_evaluation_memo(
 
     lines.extend(["", "## Evidence Health"])
     lines.extend(_evidence_health_memo_lines(evidence_review))
+
+    lines.extend(["", "## Evidence Completeness Audit"])
+    lines.extend(_evidence_audit_memo_lines(evidence_audit))
 
     lines.extend(["", "## Evidence Quality"])
     lines.extend(_evidence_quality_memo_lines(store, scored_deal))
@@ -2919,6 +2953,75 @@ def _evidence_review_limitations(
     ]
 
 
+def _evidence_audit_warnings(
+    evidence_audit: EvidenceCompletenessAudit | None,
+) -> list[str]:
+    if evidence_audit is None:
+        return []
+    blocking_findings = [
+        finding
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.BLOCKING
+    ]
+    warning_findings = [
+        finding
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.WARNING
+    ]
+    if not blocking_findings and not warning_findings:
+        return []
+    finding_word = "finding" if len(evidence_audit.findings) == 1 else "findings"
+    warning = (
+        "Evidence completeness audit found "
+        f"{len(evidence_audit.findings)} {finding_word}. Evidence completeness means "
+        "whether saved source records cover the key facts needed for the decision."
+    )
+    if blocking_findings:
+        warning += (
+            " Review blocking gaps before relying on this memo: "
+            f"{_evidence_audit_finding_names(blocking_findings)}."
+        )
+    elif warning_findings:
+        warning += (
+            " Review warnings before relying on this memo: "
+            f"{_evidence_audit_finding_names(warning_findings)}."
+        )
+    return [warning]
+
+
+def _evidence_audit_limitations(
+    evidence_audit: EvidenceCompletenessAudit | None,
+) -> list[str]:
+    if evidence_audit is None:
+        return []
+    if evidence_audit.readiness == EvidenceAuditReadiness.SUFFICIENT:
+        return []
+    blocking_findings = [
+        finding
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.BLOCKING
+    ]
+    if blocking_findings:
+        return [
+            "Evidence completeness audit found blocking gaps that need attention "
+            f"before relying on this memo: {_evidence_audit_finding_names(blocking_findings)}."
+        ]
+    return [
+        "Evidence completeness audit found missing, weak, stale, or unresolved inputs "
+        "that should be reviewed before relying on this memo."
+    ]
+
+
+def _evidence_audit_finding_names(findings: Sequence[object]) -> str:
+    names = [
+        _memo_text(getattr(finding, "title", "audit finding"))
+        for finding in findings[:5]
+    ]
+    if len(findings) > 5:
+        names.append(f"{len(findings) - 5} more")
+    return "; ".join(names)
+
+
 def _evidence_health_memo_lines(
     evidence_review: DealEvidenceReview | None,
 ) -> list[str]:
@@ -2960,6 +3063,84 @@ def _evidence_health_memo_lines(
             f"- {_evidence_issue_severity_label(issue.severity)}: "
             f"{_memo_text(issue.issue)} ({issue.count}). "
             f"{_memo_text(issue.guidance)}"
+        )
+    return lines
+
+
+def _evidence_audit_memo_lines(
+    evidence_audit: EvidenceCompletenessAudit | None,
+) -> list[str]:
+    if evidence_audit is None:
+        return ["- Evidence completeness was not audited for this run."]
+
+    blocking_count = sum(
+        1
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.BLOCKING
+    )
+    warning_count = sum(
+        1
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.WARNING
+    )
+    lines = [
+        "- Evidence completeness means whether saved source records cover the key "
+        "facts needed for the decision.",
+        f"- Readiness: {_memo_text(evidence_audit.readiness.value.replace('_', ' '))}.",
+        f"- Findings: {blocking_count} blocking and {warning_count} warning.",
+    ]
+    if evidence_audit.term_statuses:
+        lines.extend(
+            _markdown_table(
+                ["Term", "Status", "Explanation", "Evidence IDs"],
+                [
+                    [
+                        status.label,
+                        status.status.value.replace("_", " "),
+                        status.explanation,
+                        _evidence_id_cell(status.evidence_ids),
+                    ]
+                    for status in evidence_audit.term_statuses
+                ],
+            )
+        )
+    active_findings = [
+        finding
+        for finding in evidence_audit.findings
+        if finding.severity
+        in {EvidenceAuditSeverity.BLOCKING, EvidenceAuditSeverity.WARNING}
+    ]
+    if active_findings:
+        lines.extend(["", "### Audit Findings"])
+        lines.extend(
+            _markdown_table(
+                ["Severity", "Finding", "Explanation", "Evidence IDs"],
+                [
+                    [
+                        finding.severity.value,
+                        finding.title,
+                        finding.explanation,
+                        _evidence_id_cell(finding.evidence_ids),
+                    ]
+                    for finding in active_findings
+                ],
+            )
+        )
+    if evidence_audit.questions:
+        lines.extend(["", "### Audit Questions"])
+        lines.extend(
+            _markdown_table(
+                ["Rank", "Question", "Reason", "Evidence IDs"],
+                [
+                    [
+                        str(question.priority),
+                        question.question,
+                        question.reason,
+                        _evidence_id_cell(question.evidence_ids),
+                    ]
+                    for question in evidence_audit.questions[:10]
+                ],
+            )
         )
     return lines
 
@@ -3447,6 +3628,7 @@ def _operator_limitations(
     *,
     guarded_decision: GuardedFinalDecision,
     no_evidence: bool,
+    evidence_audit: EvidenceCompletenessAudit | None = None,
     evidence_review: DealEvidenceReview | None = None,
 ) -> list[str]:
     limitations: list[str] = []
@@ -3467,6 +3649,8 @@ def _operator_limitations(
                 result.limitation
                 or f"{_role_title(result.role)} model review failed validation."
             )
+    for limitation in _evidence_audit_limitations(evidence_audit):
+        add_limitation(limitation)
     for limitation in _evidence_review_limitations(evidence_review):
         add_limitation(limitation)
     add_limitation(guarded_decision.warning)

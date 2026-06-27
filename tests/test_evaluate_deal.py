@@ -151,6 +151,7 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
 
     assert result.exit_code == 0, result.output
     assert "1. Checking local setup and privacy..." in result.output
+    assert "Checking evidence completeness..." in result.output
     assert "Writing the final memo..." in result.output
     assert "Deal evaluation complete" in result.output
     assert "Final decision: INVEST" in result.output
@@ -168,6 +169,7 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "Evidence records" in result.output
     assert "Claims found" in result.output
     assert "Conflicts found" in result.output
+    assert "Evidence completeness" in result.output
     assert "Rule-based recommendation" in result.output
     assert "Final recommendation" in result.output
     assert "Check size" in result.output
@@ -195,6 +197,7 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "**One-line reason:**" in memo_text
     assert "**Round / Instrument:**" in memo_text
     assert "**Valuation / Cap:**" in memo_text
+    assert "## Evidence Completeness Audit" in memo_text
 
     assert FakeOpenAIReviewClient.instances
     fake_client = FakeOpenAIReviewClient.instances[0]
@@ -308,9 +311,13 @@ def test_evaluate_deal_local_only_succeeds_without_model_env(
     assert client.calls == []
     assert result.final_recommendation.recommendation == result.deterministic_score.recommendation
     assert "Local-only mode was used" in result.mode_explanation
+    assert result.evidence_audit is not None
+    assert result.evidence_audit.findings
     assert any("Local-only mode was used" in warning for warning in result.warnings)
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "Rule-based scoring means fixed checks over source-linked evidence" in memo_text
+    assert "## Evidence Completeness Audit" in memo_text
+    assert "Evidence completeness means whether saved source records cover" in memo_text
     assert "Model review was skipped for this run" in memo_text
     assert "No specialist output passed validation" not in memo_text
 
@@ -467,6 +474,7 @@ def test_evaluate_deal_final_memo_v2_sections_keep_decision_first(
     for section in (
         "## Portfolio Impact And Net Return Math",
         "## Evidence Quality",
+        "## Evidence Completeness Audit",
         "## Missing Data",
         "## Diligence Questions",
     ):

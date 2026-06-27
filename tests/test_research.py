@@ -78,6 +78,7 @@ from hailmary.research.meridian import (
     clean_meridian_url,
 )
 from hailmary.research.schemas import ResearchResultInput
+from hailmary.research.source_urls import validate_http_url
 from hailmary.research.web import (
     WebFetchResponse,
     WebResearchFetchError,
@@ -7591,6 +7592,28 @@ def test_import_research_results_rejects_unsafe_url_like_source_apis(
             results_path=bad_results_path,
             imported_at=datetime(2026, 1, 2, tzinfo=UTC),
         )
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://example.com/result?q=https%3A%2F%2Fprivate.example%2Fdeal%3Ftoken%3Dsecret",
+        "https://example.com/result?q=token%3Dsecret",
+        "https://example.com/result?q=company%26api_key%3Dsecret",
+    ],
+)
+def test_source_url_validation_rejects_sensitive_nested_query_values(
+    source_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="token, signature, credential"):
+        validate_http_url(source_url, field_name="source_url")
+
+
+def test_source_url_validation_allows_plain_search_query_value() -> None:
+    validate_http_url(
+        "https://example.com/search?q=tokenization%20market%20analysis",
+        field_name="source_url",
+    )
 
 
 def test_import_research_results_rejects_wrong_provider_source_url_host(
