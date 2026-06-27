@@ -247,6 +247,7 @@ class ResearchImportDealSummary(BaseModel):
     evidence_store_path: Path
     imported_count: int = 0
     skipped_duplicate_count: int = 0
+    stale_count: int = 0
 
 
 class ResearchImportRunSummary(BaseModel):
@@ -267,6 +268,10 @@ class ResearchImportRunSummary(BaseModel):
     @property
     def skipped_duplicate_count(self) -> int:
         return sum(deal.skipped_duplicate_count for deal in self.deals)
+
+    @property
+    def stale_count(self) -> int:
+        return sum(deal.stale_count for deal in self.deals)
 
     @property
     def updated_store_paths(self) -> list[Path]:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
+import secrets
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -67,9 +71,9 @@ class ResearchWorkflowArtifact(BaseModel):
 
 
 class ResearchProviderRunStatus(StrEnum):
+    NOT_RUN = "not_run"
     PLANNED = "planned"
-    SKIPPED = "skipped"
-    COLLECTED = "collected"
+    MANUAL_NEEDED = "manual_needed"
     IMPORTED = "imported"
     NO_EXACT_RESULTS = "no_exact_results"
     INCOMPLETE_SEARCH = "incomplete_search"
@@ -117,8 +121,12 @@ class ResearchProviderStatusSummary(BaseModel):
 class ResearchWorkflowSummary(BaseModel):
     planned_task_count: int = 0
     imported_record_count: int = 0
+    stale_record_count: int = 0
     failed_provider_count: int = 0
     incomplete_search_count: int = 0
+    no_exact_result_provider_count: int = 0
+    manual_needed_provider_count: int = 0
+    not_run_provider_count: int = 0
     warning_count: int = 0
     provider_statuses: list[ResearchProviderStatusSummary] = Field(default_factory=list)
 
@@ -128,6 +136,7 @@ class ResearchWorkflowImportPreview(BaseModel):
     imported_count: int = 0
     skipped_duplicate_count: int = 0
     skipped_blank_template_row_count: int = 0
+    stale_count: int = 0
     deals: list[ResearchImportDealSummary] = Field(default_factory=list)
     error: str | None = None
 
@@ -137,6 +146,7 @@ class ResearchWorkflowRunSummary(BaseModel):
     plan: ResearchPlan
     plan_path: Path
     result_template_path: Path
+    manual_task_queue_path: Path | None = None
     meridian_workflow_path: Path | None = None
     meridian_result_template_path: Path | None = None
     source_summaries: list[ResearchWorkflowSourceSummary] = Field(default_factory=list)
@@ -199,6 +209,13 @@ class ResearchWorkflowRunSummary(BaseModel):
                 path=self.result_template_path,
             ),
         ]
+        if self.manual_task_queue_path is not None:
+            artifacts.append(
+                ResearchWorkflowArtifact(
+                    kind="manual_task_queue",
+                    path=self.manual_task_queue_path,
+                )
+            )
         if self.meridian_workflow_path is not None:
             artifacts.append(
                 ResearchWorkflowArtifact(
@@ -262,6 +279,11 @@ def run_research_workflow(
         template_result = prepare_research_results_template(
             config=config,
             plan_path=plan_result.output_path,
+            created_at=created_at,
+        )
+        manual_task_queue_path = _write_manual_task_queue(
+            config=config,
+            plan=plan_result.plan,
             created_at=created_at,
         )
     except Exception as exc:
@@ -389,6 +411,7 @@ def run_research_workflow(
         plan=plan_result.plan,
         plan_path=plan_result.output_path,
         result_template_path=template_result.output_path,
+        manual_task_queue_path=manual_task_queue_path,
         meridian_workflow_path=meridian_workflow_path,
         meridian_result_template_path=meridian_result_template_path,
         source_summaries=_source_summaries(plan_result.plan),
@@ -397,6 +420,95 @@ def run_research_workflow(
         issues=issues,
         live_collection_enabled=live_collection_enabled,
     )
+
+
+def _write_manual_task_queue(
+    *,
+    config: AppConfig,
+    plan: ResearchPlan,
+    created_at: datetime,
+) -> Path | None:
+    manual_tasks = [task for task in plan.tasks if _task_needs_manual_work(task)]
+    if not manual_tasks:
+        return None
+    output_dir = config.data_dir / "research-manual-tasks"
+    _ensure_private_directory(output_dir, private_root=config.data_dir)
+    output_path = _unique_manual_task_queue_path(output_dir, created_at)
+    payload = {
+        "version": "1",
+        "created_at": _as_utc(created_at).isoformat(),
+        "task_count": len(manual_tasks),
+        "tasks": [task.model_dump(mode="json") for task in manual_tasks],
+        "privacy_notes": list(PRIVACY_NOTES),
+    }
+    _write_private_json(
+        output_path,
+        json.dumps(payload, indent=2),
+        description="manual research task queue",
+    )
+    return output_path
+
+
+def _ensure_private_directory(path: Path, *, private_root: Path) -> None:
+    root_path = private_root if private_root.is_absolute() else Path.cwd() / private_root
+    resolved_root = root_path.resolve(strict=False)
+    resolved_path = (path if path.is_absolute() else Path.cwd() / path).resolve(strict=False)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError:
+        raise ResearchWorkflowError(
+            f"Manual research task queue folder {path} resolves outside the private data directory."
+        ) from None
+    if path.is_symlink():
+        raise ResearchWorkflowError(f"Manual research task queue folder {path} is a symlink.")
+    try:
+        root_path.mkdir(parents=True, exist_ok=True)
+        root_path.chmod(0o700)
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+    except OSError as exc:
+        raise ResearchWorkflowError(
+            f"Could not create manual research task queue folder at {path}: {exc}"
+        ) from exc
+
+
+def _unique_manual_task_queue_path(output_dir: Path, created_at: datetime) -> Path:
+    base_name = f"research-manual-tasks-{created_at.strftime('%Y%m%d-%H%M%S')}"
+    candidate = output_dir / f"{base_name}.json"
+    suffix = 2
+    while candidate.exists():
+        candidate = output_dir / f"{base_name}-{suffix}.json"
+        suffix += 1
+    return candidate
+
+
+def _write_private_json(path: Path, text: str, *, description: str) -> None:
+    if path.is_symlink():
+        raise ResearchWorkflowError(
+            f"Could not write {description} at {path}: output file is a symlink."
+        )
+    token = secrets.token_hex(8)
+    temp_path = path.with_name(f".{path.name}.{token}.tmp")
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        file_descriptor = os.open(temp_path, flags, 0o600)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        temp_path.chmod(0o600)
+        os.replace(temp_path, path)
+        path.chmod(0o600)
+    except UnicodeEncodeError as exc:
+        raise ResearchWorkflowError(
+            f"Could not write {description} at {path}: the queue contains text that "
+            "cannot be saved as UTF-8."
+        ) from exc
+    except OSError as exc:
+        raise ResearchWorkflowError(f"Could not write {description} at {path}: {exc}") from exc
+    finally:
+        with suppress(OSError):
+            temp_path.unlink()
 
 
 def _prepare_local_public_sources(
@@ -684,6 +796,7 @@ def _import_preview_from_result(
         imported_count=result.imported_count,
         skipped_duplicate_count=result.skipped_duplicate_count,
         skipped_blank_template_row_count=result.skipped_blank_template_row_count,
+        stale_count=result.stale_count,
         deals=result.deals,
     )
 
@@ -706,10 +819,10 @@ def _collection_status(
     if _warnings_indicate_incomplete_search(warnings):
         return ResearchProviderRunStatus.INCOMPLETE_SEARCH
     if result_count > 0:
-        return ResearchProviderRunStatus.COLLECTED
+        return ResearchProviderRunStatus.IMPORTED
     if no_result_companies:
         return ResearchProviderRunStatus.NO_EXACT_RESULTS
-    return ResearchProviderRunStatus.SKIPPED
+    return ResearchProviderRunStatus.NOT_RUN
 
 
 def _web_provider_statuses(
@@ -734,13 +847,17 @@ def _web_provider_statuses(
         if warnings:
             status = ResearchProviderRunStatus.FAILED
         elif fetched_count > 0:
-            status = ResearchProviderRunStatus.COLLECTED
+            status = ResearchProviderRunStatus.IMPORTED
         elif planned_count > 0:
             status = ResearchProviderRunStatus.PLANNED
         elif skipped_count > 0:
-            status = ResearchProviderRunStatus.SKIPPED
+            status = (
+                ResearchProviderRunStatus.MANUAL_NEEDED
+                if any(_web_task_needs_manual_work(task) for task in provider_tasks)
+                else ResearchProviderRunStatus.NOT_RUN
+            )
         else:
-            status = ResearchProviderRunStatus.SKIPPED
+            status = ResearchProviderRunStatus.NOT_RUN
         statuses.append(
             ResearchProviderStatusSummary(
                 provider_id=provider_id,
@@ -776,6 +893,11 @@ def _warnings_indicate_incomplete_search(warnings: list[str]) -> bool:
     )
 
 
+def _web_task_needs_manual_work(task: WebResearchTaskSummary) -> bool:
+    reason = task.reason.casefold()
+    return "manual" in reason or "paid" in reason or "authenticated" in reason
+
+
 def _research_workflow_summary(
     workflow: ResearchWorkflowRunSummary,
 ) -> ResearchWorkflowSummary:
@@ -783,11 +905,7 @@ def _research_workflow_summary(
         source.provider_id: ResearchProviderStatusSummary(
             provider_id=source.provider_id,
             provider_name=source.provider_name,
-            status=(
-                ResearchProviderRunStatus.PLANNED
-                if not _source_skipped_by_live_gate(source, workflow)
-                else ResearchProviderRunStatus.SKIPPED
-            ),
+            status=_initial_provider_status(source, workflow),
             planned_count=source.planned_count,
         )
         for source in workflow.source_summaries
@@ -890,6 +1008,7 @@ def _research_workflow_summary(
         imported_record_count=sum(
             preview.imported_count for preview in workflow.import_previews
         ),
+        stale_record_count=sum(preview.stale_count for preview in workflow.import_previews),
         failed_provider_count=sum(
             1
             for status in provider_statuses
@@ -897,6 +1016,21 @@ def _research_workflow_summary(
         ),
         incomplete_search_count=sum(
             1 for status in provider_statuses if status.incomplete_search
+        ),
+        no_exact_result_provider_count=sum(
+            1
+            for status in provider_statuses
+            if status.status == ResearchProviderRunStatus.NO_EXACT_RESULTS
+        ),
+        manual_needed_provider_count=sum(
+            1
+            for status in provider_statuses
+            if status.status == ResearchProviderRunStatus.MANUAL_NEEDED
+        ),
+        not_run_provider_count=sum(
+            1
+            for status in provider_statuses
+            if status.status == ResearchProviderRunStatus.NOT_RUN
         ),
         warning_count=warning_count,
         provider_statuses=provider_statuses,
@@ -911,15 +1045,26 @@ def _merge_provider_status(
         ResearchProviderRunStatus.FAILED: 0,
         ResearchProviderRunStatus.INCOMPLETE_SEARCH: 1,
         ResearchProviderRunStatus.IMPORTED: 2,
-        ResearchProviderRunStatus.COLLECTED: 3,
-        ResearchProviderRunStatus.NO_EXACT_RESULTS: 4,
-        ResearchProviderRunStatus.SKIPPED: 5,
-        ResearchProviderRunStatus.PLANNED: 6,
+        ResearchProviderRunStatus.NO_EXACT_RESULTS: 3,
+        ResearchProviderRunStatus.MANUAL_NEEDED: 4,
+        ResearchProviderRunStatus.PLANNED: 5,
+        ResearchProviderRunStatus.NOT_RUN: 6,
     }
     return existing if rank[existing] <= rank[incoming] else incoming
 
 
-def _source_skipped_by_live_gate(
+def _initial_provider_status(
+    source: ResearchWorkflowSourceSummary,
+    workflow: ResearchWorkflowRunSummary,
+) -> ResearchProviderRunStatus:
+    if source.manual_count:
+        return ResearchProviderRunStatus.MANUAL_NEEDED
+    if _source_not_run_by_live_gate(source, workflow):
+        return ResearchProviderRunStatus.NOT_RUN
+    return ResearchProviderRunStatus.PLANNED
+
+
+def _source_not_run_by_live_gate(
     source: ResearchWorkflowSourceSummary,
     workflow: ResearchWorkflowRunSummary,
 ) -> bool:

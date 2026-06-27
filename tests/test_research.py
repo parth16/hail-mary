@@ -82,7 +82,7 @@ from hailmary.research.web import (
 )
 from hailmary.schemas.agents import AgentRole
 from hailmary.schemas.documents import DocumentType, IngestedDeal, SourceKind
-from hailmary.schemas.evidence import EvidenceStore
+from hailmary.schemas.evidence import EvidenceStore, SourceFreshness
 from hailmary.scoring.memo import render_markdown_memo
 from hailmary.scoring.scorer import score_evidence_store
 
@@ -283,13 +283,16 @@ def test_research_workflow_command_creates_artifacts_and_reports_status(
     assert "Research workflow" in result.output
     assert "Saved the private research plan" in result.output
     assert "Saved the fillable results template" in result.output
+    assert "Saved the manual follow-up queue" in result.output
     assert "Saved the Meridian workflow" in result.output
     assert "Meridian is a manual authenticated workflow" in result.output
     assert "need manual or local-file work" in result.output
+    assert "Provider statuses" in result.output
     assert "Live public collection did not run" in result.output
     assert "Ready to import: no completed result files were found yet" in result.output
     assert "No screenshots, cookies, browser profiles" in result.output
     assert len(list((data_dir / "research-plans").glob("research-plan-*.json"))) == 1
+    assert len(list((data_dir / "research-manual-tasks").glob("*.json"))) == 1
     assert len(list((data_dir / "research-results-templates").glob("*.json"))) == 2
     assert len(list((data_dir / "meridian-workflows").glob("*.json"))) == 1
 
@@ -318,11 +321,19 @@ def test_research_workflow_command_json_includes_summary(
     assert payload["summary"]["planned_task_count"] == len(payload["plan"]["tasks"])
     assert payload["summary"]["failed_provider_count"] == 0
     assert payload["summary"]["incomplete_search_count"] == 0
+    assert payload["summary"]["manual_needed_provider_count"] >= 3
+    assert payload["manual_task_queue_path"]
     assert payload["summary"]["provider_statuses"]
     assert any(
         status["provider_id"] == "sec_form_d"
         for status in payload["summary"]["provider_statuses"]
     )
+    sec_status = next(
+        status
+        for status in payload["summary"]["provider_statuses"]
+        if status["provider_id"] == "sec_form_d"
+    )
+    assert sec_status["status"] == ResearchProviderRunStatus.NOT_RUN
 
 
 def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
@@ -487,15 +498,21 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
         for status in result.summary.provider_statuses
         if status.provider_id == "sam_gov"
     )
-    assert sam_status.status == ResearchProviderRunStatus.SKIPPED
+    assert sam_status.status == ResearchProviderRunStatus.MANUAL_NEEDED
     assert sam_status.no_exact_result_companies == []
     uspto_status = next(
         status
         for status in result.summary.provider_statuses
         if status.provider_id == "uspto"
     )
-    assert uspto_status.status == ResearchProviderRunStatus.SKIPPED
+    assert uspto_status.status == ResearchProviderRunStatus.MANUAL_NEEDED
     assert uspto_status.no_exact_result_companies == []
+    public_web_status = next(
+        status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "public_web"
+    )
+    assert public_web_status.status == ResearchProviderRunStatus.MANUAL_NEEDED
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
@@ -666,7 +683,7 @@ def test_run_research_workflow_reports_local_public_skips_and_no_results(
     )
     assert local_public.result_count == 1
     assert local_public.skipped_non_exact_company_names == ["Acme AI Holdings"]
-    assert local_public.status == ResearchProviderRunStatus.COLLECTED
+    assert local_public.status == ResearchProviderRunStatus.IMPORTED
     assert {match.kind for match in local_public.match_details} == {
         CompanyMatchKind.EXACT,
         CompanyMatchKind.RELATED,
@@ -6562,6 +6579,42 @@ def test_import_research_results_requires_source_url_or_api(tmp_path: Path) -> N
         )
 
 
+def test_import_research_results_imports_stale_sources_as_stale(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(
+        tmp_path,
+        extra_results=[
+            _research_result(
+                title="Older public source",
+                text="Acme AI reported customer traction in an older public source.",
+                retrieved_at="2024-01-01T12:00:00Z",
+                source_url="https://www.sec.gov/example/acme-ai-old",
+            )
+        ],
+    )
+
+    summary = import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert summary.imported_count == 2
+    assert summary.stale_count == 1
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    stale_records = [
+        evidence
+        for evidence in saved_store.evidence
+        if evidence.source_freshness == SourceFreshness.STALE
+    ]
+    assert len(stale_records) == 1
+    assert "older public source" in stale_records[0].text
+
+
 def test_import_research_results_requires_plain_english_licensing_notes(
     tmp_path: Path,
 ) -> None:
@@ -6580,6 +6633,40 @@ def test_import_research_results_requires_plain_english_licensing_notes(
         ResearchImportError,
         match="licensing_notes is required",
     ):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize(
+    ("licensing_notes", "message"),
+    [
+        ("n/a", "not a placeholder"),
+        ("unknown", "not a placeholder"),
+        ("todo", "not a placeholder"),
+        ("https://example.com/license", "not only provide a URL"),
+        ("[license](https://example.com/license)", "not only contain Markdown"),
+    ],
+)
+def test_import_research_results_rejects_placeholder_or_markdown_only_licensing_notes(
+    tmp_path: Path,
+    licensing_notes: str,
+    message: str,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-bad-licensing.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                licensing_notes=licensing_notes,
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match=message):
         import_research_results(
             config=config,
             results_path=bad_results_path,
