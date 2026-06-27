@@ -455,6 +455,7 @@ def _packet_net_return_estimate(
     return net_return.model_copy(
         update={
             "entry_valuation": entry_valuation,
+            "estimated_ownership_percent": None,
             "estimated_dilution_percent": None,
             "estimated_fees_and_carry_percent": None,
             "gross_exit_value": None,

@@ -214,7 +214,7 @@ def test_score_evidence_store_invests_when_verified_evidence_is_strong() -> None
     )
 
     assert scored.recommendation == Recommendation.INVEST
-    assert scored.check_size == 5_000
+    assert scored.check_size == 2_500
     assert scored.total_score >= 70
     assert not scored.triggered_kill_gates
 
@@ -485,6 +485,71 @@ def test_unknown_stage_valuation_risk_stays_conservative_with_traction() -> None
 
 
 @pytest.mark.parametrize(
+    ("stage_text", "valuation_text", "expected_stage", "expected_risk", "triggers_gate"),
+    [
+        (
+            "Pre-seed company with ARR revenue growth and paid customers.",
+            "$25M",
+            CompanyStage.PRE_SEED,
+            ValuationRisk.MEDIUM,
+            False,
+        ),
+        (
+            "Seed company with a beta design partner.",
+            "$60M",
+            CompanyStage.SEED,
+            ValuationRisk.HIGH,
+            True,
+        ),
+        (
+            "Series A company with ARR revenue growth and paid customers.",
+            "$150M",
+            CompanyStage.SERIES_A,
+            ValuationRisk.MEDIUM,
+            False,
+        ),
+        (
+            "ARR revenue growth with paid customers and retention.",
+            "$40M",
+            CompanyStage.UNKNOWN,
+            ValuationRisk.HIGH,
+            True,
+        ),
+    ],
+)
+def test_balanced_stage_valuation_thresholds(
+    stage_text: str,
+    valuation_text: str,
+    expected_stage: CompanyStage,
+    expected_risk: ValuationRisk,
+    triggers_gate: bool,
+) -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            f"{stage_text} Valuation cap {valuation_text}. Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", valuation_text, "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.company_stage == expected_stage
+    assert scored.valuation_risk == expected_risk
+    assert any(
+        gate.name == "Valuation far ahead of evidence"
+        for gate in scored.triggered_kill_gates
+    ) is triggers_gate
+
+
+@pytest.mark.parametrize(
     ("stage_text", "valuation_text"),
     [
         ("Series B stage with paid customers and retention.", "$2B"),
@@ -528,6 +593,7 @@ def test_net_return_math_reports_missing_inputs_without_inventing_data() -> None
     assert scored.net_return.entry_valuation == 8_000_000
     assert scored.net_return.net_return_multiple is None
     assert scored.net_return.missing_inputs == [
+        "ownership",
         "dilution",
         "fees or carry",
         "gross exit scenario",
@@ -545,7 +611,8 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
         _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
         _evidence(
             "ev_return",
-            "Estimated dilution 20%. SPV expenses 5%. Carry 20%. Exit value $1B.",
+            "Ownership 1%. Estimated dilution 20%. SPV expenses 5%. Carry 20%. "
+            "Exit value $1B.",
         ),
         _evidence("ev_traction", "ARR revenue growth with paid customers and retention."),
         _evidence("ev_funding", "Lead investor committed and seed round is active."),
@@ -562,6 +629,7 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
     )
 
     assert scored.net_return.net_return_multiple == 75
+    assert scored.net_return.estimated_ownership_percent == 1
     assert scored.net_return.missing_inputs == []
     assert scored.net_return.evidence_ids == ["ev_terms", "ev_return"]
     assert _score_factor(scored, "Valuation and net return").score == 20
@@ -617,7 +685,8 @@ def test_net_return_math_adds_round_size_to_pre_money_valuation() -> None:
         _evidence("ev_round", "Round size $20M."),
         _evidence(
             "ev_return",
-            "Estimated dilution 20%. SPV expenses 5%. Carry 20%. Exit value $1B.",
+            "Ownership 1%. Estimated dilution 20%. SPV expenses 5%. Carry 20%. "
+            "Exit value $1B.",
         ),
     ]
     claims = [
@@ -982,6 +1051,7 @@ def test_valuation_net_return_factor_keeps_all_return_input_evidence_ids() -> No
     evidence = [
         _evidence("ev_valuation", "Pre-money valuation $40M."),
         _evidence("ev_round", "Round size $20M."),
+        _evidence("ev_ownership", "Ownership 1%."),
         _evidence("ev_dilution", "Estimated dilution 20%."),
         _evidence("ev_fees", "SPV expenses 5%."),
         _evidence("ev_carry", "Carry 20%."),
@@ -1001,6 +1071,7 @@ def test_valuation_net_return_factor_keeps_all_return_input_evidence_ids() -> No
     assert factor.evidence_ids == [
         "ev_valuation",
         "ev_round",
+        "ev_ownership",
         "ev_dilution",
         "ev_fees",
         "ev_carry",
@@ -1334,6 +1405,36 @@ def test_score_evidence_store_ignores_common_negative_traction_phrases(
 @pytest.mark.parametrize(
     "traction_text",
     [
+        "The plan shows projected revenue next year.",
+        "The roadmap targets future customers after launch.",
+        "The company has not-yet customers.",
+    ],
+)
+def test_score_evidence_store_ignores_planned_or_not_yet_traction(
+    traction_text: str,
+) -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_planned_traction", traction_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+@pytest.mark.parametrize(
+    "traction_text",
+    [
         "No churn among paid customers.",
         "No retention issues among enterprise customers.",
     ],
@@ -1404,8 +1505,8 @@ def test_score_evidence_store_ignores_negated_funding_language() -> None:
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert scored.fundability_risk == FundabilityRisk.MEDIUM
-    assert _score_factor(scored, "Next-round fundability").evidence_ids == []
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+    assert _score_factor(scored, "Next-round fundability").evidence_ids == ["ev_funding"]
 
 
 def test_score_evidence_store_ignores_qualified_negated_funding_language() -> None:
@@ -1425,8 +1526,8 @@ def test_score_evidence_store_ignores_qualified_negated_funding_language() -> No
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert scored.fundability_risk == FundabilityRisk.MEDIUM
-    assert _score_factor(scored, "Next-round fundability").evidence_ids == []
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+    assert _score_factor(scored, "Next-round fundability").evidence_ids == ["ev_funding"]
 
 
 @pytest.mark.parametrize(
@@ -1457,8 +1558,43 @@ def test_score_evidence_store_ignores_common_negative_funding_phrases(
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert scored.fundability_risk == FundabilityRisk.MEDIUM
-    assert _score_factor(scored, "Next-round fundability").evidence_ids == []
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+    assert _score_factor(scored, "Next-round fundability").evidence_ids == [
+        "ev_negative_funding"
+    ]
+
+
+@pytest.mark.parametrize(
+    "funding_text",
+    [
+        "The company expects a future lead investor.",
+        "The round has planned institutional investors.",
+        "The company has not-yet secured follow-on financing.",
+    ],
+)
+def test_score_evidence_store_treats_planned_funding_as_missing(
+    funding_text: str,
+) -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", "ARR revenue growth with paid customers."),
+        _evidence("ev_planned_funding", funding_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+    assert _score_factor(scored, "Next-round fundability").evidence_ids == [
+        "ev_planned_funding"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1693,6 +1829,47 @@ def test_score_evidence_store_can_mark_multiple_claim_sources_high_confidence() 
     assert scored.confidence == ConfidenceLevel.HIGH
 
 
+def test_score_evidence_store_passes_when_support_is_stale_only() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M.",
+            source_freshness=SourceFreshness.STALE,
+        ),
+        _evidence(
+            "ev_traction",
+            "ARR revenue growth with paid customers and retention.",
+            source_freshness=SourceFreshness.STALE,
+        ),
+        _evidence(
+            "ev_funding",
+            "Lead investor committed and seed round is active.",
+            source_freshness=SourceFreshness.STALE,
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+    assert _score_factor(scored, "Evidence authority and freshness").evidence_ids[0] == (
+        "ev_terms"
+    )
+    assert "current source dates" in _score_factor(
+        scored,
+        "Evidence authority and freshness",
+    ).missing_inputs
+
+
 def test_score_evidence_store_requires_verified_pricing_terms_to_invest() -> None:
     evidence = [
         _evidence("ev_terms", "Discount 20%. Round size $1M."),
@@ -1812,7 +1989,7 @@ def test_render_markdown_memo_includes_v2_score_context_and_citations() -> None:
     assert "**Stage:** seed" in markdown
     assert "**Valuation risk:** low" in markdown
     assert (
-        "**Net return math:** $8M entry valuation; missing dilution, fees or carry, "
+        "**Net return math:** $8M entry valuation; missing ownership, dilution, fees or carry, "
         "gross exit scenario"
     ) in markdown
     assert "- Valuation and net return: 13/20." in markdown
@@ -2383,8 +2560,8 @@ def test_render_portfolio_report_includes_net_return_math_after_fees_carry_and_d
     assert "Carry means the share of profits paid to the fund manager or platform." in report
     assert "Dilution means ownership reduction from future fundraising." in report
     assert (
-        "| Configured | 3x | $5,000 | $15,000 | $13,500 | $100 | $1,700 | "
-        "$11,800 | $6,700 | 2.31x |"
+        "| Configured | 3x | $2,500 | $7,500 | $6,750 | $50 | $850 | "
+        "$5,900 | $3,350 | 2.31x |"
     ) in report
     assert "| Sensitivity 1x | 1x |" in report
     assert "| Sensitivity 3x | 3x |" in report
@@ -2429,7 +2606,7 @@ def test_render_portfolio_report_bounds_extreme_return_assumption_formatting(
     report = render_portfolio_report([scored], config=config)
 
     assert "Gross return multiple: 1E+1000000x" in report
-    assert "| Configured | 1E+1000000x | $5,000 | $5E+1000003 |" in report
+    assert "| Configured | 1E+1000000x | $2,500 | $2.5E+1000003 |" in report
     assert len(report) < 20_000
 
 

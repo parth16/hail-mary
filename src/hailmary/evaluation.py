@@ -2819,7 +2819,15 @@ def _missing_input_text(missing_inputs: Sequence[str]) -> str:
 def _net_return_summary(scored_deal: ScoredDeal) -> str:
     net_return = scored_deal.net_return
     if net_return.net_return_multiple is not None:
-        return f"{net_return.net_return_multiple:g}x estimated net return"
+        summary = f"{net_return.net_return_multiple:g}x estimated net return"
+        if net_return.estimated_ownership_percent is not None:
+            summary = f"{summary}; ownership {net_return.estimated_ownership_percent:g}%"
+        if net_return.missing_inputs:
+            summary = (
+                f"{summary}; missing "
+                f"{_memo_text(', '.join(net_return.missing_inputs))}"
+            )
+        return summary
     if net_return.entry_valuation is not None:
         return (
             f"{_format_money(net_return.entry_valuation)} entry valuation; "
