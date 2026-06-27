@@ -410,6 +410,126 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="score-strong-team-weak-pmf-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Strong team weak PMF PASS calibration",
+                description=(
+                    "Checks that strong team, funding, and terms do not become INVEST "
+                    "without source-linked product-market fit evidence."
+                ),
+            ),
+            run=lambda _: fixtures.run_strong_team_weak_pmf_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-high-traction-overvalued-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="High traction overvalued PASS calibration",
+                description=(
+                    "Checks that strong traction does not override a valuation that is "
+                    "far ahead of current stage evidence."
+                ),
+            ),
+            run=lambda _: fixtures.run_high_traction_overvalued_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-missing-deal-terms-v3-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Missing deal terms v3 PASS calibration",
+                description=(
+                    "Checks that strong traction and funding still PASS when verified "
+                    "pricing terms are missing."
+                ),
+            ),
+            run=lambda _: fixtures.run_missing_deal_terms_v3_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-conflicting-revenue-customers-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Conflicting revenue and customers PASS calibration",
+                description=(
+                    "Checks that conflicting revenue or customer evidence keeps the "
+                    "deterministic recommendation at PASS."
+                ),
+            ),
+            run=fixtures.run_conflicting_revenue_customers_score_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-stale-public-validation-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Stale public validation PASS calibration",
+                description=(
+                    "Checks that strong public validation marked stale remains a "
+                    "diligence gap and produces PASS."
+                ),
+            ),
+            run=lambda _: fixtures.run_stale_public_validation_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-model-invest-guardrail-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Model INVEST guardrail PASS calibration",
+                description=(
+                    "Checks that a model INVEST recommendation cannot override "
+                    "deterministic PASS guardrails."
+                ),
+            ),
+            run=lambda _: fixtures.run_model_invest_guardrail_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-no-or-unsafe-evidence-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="No or unsafe evidence PASS calibration",
+                description=(
+                    "Checks no-evidence PASS behavior and unsafe source-instruction "
+                    "evidence filtering before final recommendations."
+                ),
+            ),
+            run=lambda _: fixtures.run_no_or_unsafe_evidence_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-small-budget-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Small budget PASS calibration",
+                description=(
+                    "Checks that strong evidence still PASSes when no allowed check "
+                    "fits the available portfolio budget."
+                ),
+            ),
+            run=lambda _: fixtures.run_small_budget_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-platform-minimum-above-capital-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Platform minimum above capital PASS calibration",
+                description=(
+                    "Checks that a platform minimum above available capital forces "
+                    "PASS even when it fits the configured maximum check."
+                ),
+            ),
+            run=lambda _: fixtures.run_platform_minimum_above_capital_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="score-negated-traction-funding-pass",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Negated traction and funding PASS calibration",
+                description=(
+                    "Checks that negated traction and funding phrases are treated as "
+                    "risk evidence instead of positive PMF or fundability support."
+                ),
+            ),
+            run=lambda _: fixtures.run_negated_traction_funding_score_fixture(),
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="missing-data-pass",
                 category=EvalCategory.MISSING_DATA,
                 name="Missing data pass gate",

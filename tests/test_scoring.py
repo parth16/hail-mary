@@ -531,6 +531,38 @@ def test_conflicting_traction_creates_high_priority_customer_question() -> None:
     _assert_questions_have_lineage(scored.diligence_questions)
 
 
+def test_without_negative_traction_creates_customer_conflict_question() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_positive_traction",
+            "ARR revenue growth with paid customers and retention.",
+        ),
+        _evidence("ev_negative_traction", "The company operates without customers."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    question = next(
+        question
+        for question in scored.diligence_questions
+        if question.question == "Resolve the conflicting customer traction signals."
+    )
+
+    assert question.supporting_evidence_ids == ["ev_positive_traction"]
+    assert question.conflicting_evidence_ids == ["ev_negative_traction"]
+    assert question.evidence_ids == ["ev_positive_traction", "ev_negative_traction"]
+
+
 def test_conflicting_traction_question_preserves_conflicting_ids_when_support_is_capped() -> None:
     evidence = [
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
@@ -1854,9 +1886,15 @@ def test_score_evidence_store_ignores_qualified_negated_traction() -> None:
     [
         "The company is operating without any customers yet.",
         "The company is operating without any revenue yet.",
+        "The company is operating without customers now.",
+        "A company without revenue is not fundable.",
+        "A company without customers or revenue is not fundable.",
+        "The company operates without customers, revenue, or retention now.",
+        "The company operates without customers, revenue, or retention is not fundable.",
         "The company has no actual customers yet.",
         "The company has no customer revenue yet.",
         "The company lacks customers and revenue.",
+        "The company operates without any customers or revenue and lacks usage and retention.",
     ],
 )
 def test_score_evidence_store_ignores_common_negative_traction_phrases(
@@ -1883,6 +1921,87 @@ def test_score_evidence_store_ignores_common_negative_traction_phrases(
     assert scored.pmf_level == PMFLevel.UNKNOWN
     assert scored.recommendation == Recommendation.PASS
     assert _score_factor(scored, "Product-market fit evidence").evidence_ids == []
+
+
+def test_score_evidence_store_keeps_positive_comma_clause_after_without_negation() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_traction",
+            "The company launched without customers, revenue is now $500K.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.DEVELOPING
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_traction"
+    ]
+
+
+def test_score_evidence_store_keeps_positive_coordinated_clause_after_without_negation() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence(
+            "ev_traction",
+            "The company launched without customers, revenue and retention are now strong.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.DEVELOPING
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_traction"
+    ]
+
+
+@pytest.mark.parametrize(
+    "traction_text",
+    [
+        "The company launched without customers and revenue is now $500K.",
+        "The company launched without customers, revenue and retention metrics are now strong.",
+    ],
+)
+def test_score_evidence_store_keeps_positive_follow_on_clause_after_without_negation(
+    traction_text: str,
+) -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_traction", traction_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.DEVELOPING
+    assert _score_factor(scored, "Product-market fit evidence").evidence_ids == [
+        "ev_traction"
+    ]
 
 
 @pytest.mark.parametrize(
