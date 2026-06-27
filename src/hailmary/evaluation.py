@@ -281,6 +281,7 @@ class DealEvaluationResult:
     specialist_results: list[RoleReviewResult]
     failed_specialist_roles: list[AgentRole]
     final_memo_path: Path
+    final_json_path: Path
     agent_output_dir: Path
     ocr_status: str
     diligence_question_queue_path: Path | None = None
@@ -998,6 +999,7 @@ def evaluate_deal_folder(
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir, description="report")
     final_memo_path = report_dir / f"{deal.id}-final-evaluation.md"
+    final_json_path = report_dir / f"{deal.id}-final-evaluation.json"
     warnings = [
         *_unreadable_path_warnings(
             [*inspection.unreadable_paths, *ingestion_summary.unreadable_paths]
@@ -1037,6 +1039,37 @@ def evaluate_deal_folder(
         ),
         description="final evaluation memo",
     )
+    _write_private_text(
+        final_json_path,
+        json.dumps(
+            build_final_evaluation_export(
+                deal_id=deal.id,
+                company_name=deal.company_name,
+                evaluation_mode=mode.name,
+                mode_explanation=mode.explanation,
+                document_count=len(deal.documents),
+                store=store,
+                scored_deal=scored_deal,
+                final_recommendation=guarded_decision.recommendation,
+                specialist_results=specialist_results,
+                failed_specialist_roles=failed_specialist_roles,
+                final_memo_path=final_memo_path,
+                final_json_path=final_json_path,
+                agent_output_dir=output_dir,
+                ocr_status=_ocr_status(config, deal),
+                research_run=research_run,
+                evidence_audit=evidence_audit,
+                evidence_review=evidence_review,
+                diligence_question_queue=diligence_question_queue,
+                diligence_question_queue_path=diligence_question_queue_path,
+                warnings=warnings,
+                operator_limitations=operator_limitations,
+            ),
+            indent=2,
+            sort_keys=True,
+        ),
+        description="final evaluation JSON export",
+    )
 
     return DealEvaluationResult(
         deal_id=deal.id,
@@ -1053,6 +1086,7 @@ def evaluate_deal_folder(
         specialist_results=specialist_results,
         failed_specialist_roles=failed_specialist_roles,
         final_memo_path=final_memo_path,
+        final_json_path=final_json_path,
         agent_output_dir=output_dir,
         ocr_status=_ocr_status(config, deal),
         diligence_question_queue_path=diligence_question_queue_path,
@@ -1633,6 +1667,280 @@ def render_final_evaluation_memo(
         ]
     )
     return "\n".join(lines)
+
+
+def build_final_evaluation_export(
+    *,
+    deal_id: str,
+    company_name: str,
+    evaluation_mode: str,
+    mode_explanation: str,
+    document_count: int,
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+    final_recommendation: AgentRecommendationRationale,
+    specialist_results: Sequence[RoleReviewResult],
+    failed_specialist_roles: Sequence[AgentRole],
+    final_memo_path: Path,
+    final_json_path: Path,
+    agent_output_dir: Path,
+    ocr_status: str,
+    research_run: EvaluationResearchRun | None,
+    evidence_audit: EvidenceCompletenessAudit | None,
+    evidence_review: DealEvidenceReview | None,
+    diligence_question_queue: DiligenceQuestionQueue | None,
+    diligence_question_queue_path: Path | None,
+    warnings: Sequence[str],
+    operator_limitations: Sequence[str],
+) -> dict[str, object]:
+    """Build a stable JSON export without raw evidence text or model excerpts."""
+
+    return {
+        "schema_version": "1",
+        "deal": {
+            "deal_id": deal_id,
+            "company_name": company_name,
+            "evaluation_mode": evaluation_mode,
+            "mode_explanation": mode_explanation,
+            "document_count": document_count,
+            "evidence_count": store.evidence_count,
+            "claim_count": store.claim_count,
+            "conflict_count": store.conflict_count,
+            "ocr_status": ocr_status,
+        },
+        "final_decision": {
+            "recommendation": final_recommendation.recommendation.value,
+            "check_size": final_recommendation.check_size,
+            "reason": final_recommendation.reason,
+            "evidence_ids": _reference_evidence_ids(final_recommendation.evidence),
+        },
+        "deterministic_score": _score_export(scored_deal),
+        "research": _research_export(research_run),
+        "evidence_completeness": _evidence_audit_export(evidence_audit),
+        "evidence_health": _evidence_review_export(evidence_review),
+        "diligence_questions": _diligence_queue_export(
+            diligence_question_queue,
+            queue_path=diligence_question_queue_path,
+        ),
+        "model_review": {
+            "successful_specialist_roles": [
+                result.role.value for result in specialist_results if result.output is not None
+            ],
+            "failed_specialist_roles": [role.value for role in failed_specialist_roles],
+            "final_review_roles_attempted": [
+                result.role.value for result in specialist_results
+            ],
+        },
+        "warnings": list(warnings),
+        "operator_limitations": list(operator_limitations),
+        "artifacts": {
+            "final_memo_path": str(final_memo_path),
+            "final_json_path": str(final_json_path),
+            "agent_output_dir": str(agent_output_dir),
+            "diligence_question_queue_path": (
+                str(diligence_question_queue_path)
+                if diligence_question_queue_path is not None
+                else None
+            ),
+        },
+        "privacy": {
+            "contains_raw_evidence_text": False,
+            "contains_model_excerpts": False,
+            "evidence_lineage": (
+                "Material exported claims use evidence IDs or are surfaced as "
+                "warnings, limitations, or diligence questions."
+            ),
+        },
+    }
+
+
+def _score_export(scored_deal: ScoredDeal) -> dict[str, object]:
+    return {
+        "recommendation": scored_deal.recommendation.value,
+        "check_size": scored_deal.check_size,
+        "total_score": scored_deal.total_score,
+        "max_score": scored_deal.max_score,
+        "confidence": scored_deal.confidence.value,
+        "one_line_reason": scored_deal.one_line_reason,
+        "pmf_level": scored_deal.pmf_level.value,
+        "fundability_risk": scored_deal.fundability_risk.value,
+        "company_stage": scored_deal.company_stage.value,
+        "valuation_risk": scored_deal.valuation_risk.value,
+        "capital_remaining_before": scored_deal.capital_remaining_before,
+        "capital_remaining_after": scored_deal.capital_remaining_after,
+        "score_factors": [
+            {
+                "name": factor.name,
+                "score": factor.score,
+                "max_score": factor.max_score,
+                "support_status": factor.support_status.value,
+                "missing_inputs": list(factor.missing_inputs),
+                "evidence_ids": list(factor.evidence_ids),
+            }
+            for factor in scored_deal.score_factors
+        ],
+        "triggered_kill_gates": [
+            {
+                "name": gate.name,
+                "reason": gate.reason,
+                "support_status": gate.support_status.value,
+                "evidence_ids": list(gate.evidence_ids),
+            }
+            for gate in scored_deal.triggered_kill_gates
+        ],
+        "net_return": {
+            "entry_valuation": scored_deal.net_return.entry_valuation,
+            "estimated_ownership_percent": (
+                scored_deal.net_return.estimated_ownership_percent
+            ),
+            "estimated_dilution_percent": scored_deal.net_return.estimated_dilution_percent,
+            "estimated_fees_and_carry_percent": (
+                scored_deal.net_return.estimated_fees_and_carry_percent
+            ),
+            "gross_exit_value": scored_deal.net_return.gross_exit_value,
+            "net_return_multiple": scored_deal.net_return.net_return_multiple,
+            "missing_inputs": list(scored_deal.net_return.missing_inputs),
+            "support_status": scored_deal.net_return.support_status.value,
+            "evidence_ids": list(scored_deal.net_return.evidence_ids),
+        },
+        "check_sizing": scored_deal.check_sizing.model_dump(mode="json"),
+        "allocation_scenario": scored_deal.allocation_scenario.model_dump(mode="json"),
+    }
+
+
+def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, object]:
+    if research_run is None:
+        return {
+            "ran": False,
+            "imported_count": 0,
+            "stale_count": 0,
+            "provider_statuses": [],
+            "blocking_issue_count": 0,
+            "warning_count": 0,
+        }
+    workflow = research_run.workflow
+    summary = workflow.summary
+    return {
+        "ran": True,
+        "planned_task_count": workflow.plan.task_count,
+        "imported_count": research_run.imported_count,
+        "stale_count": research_run.stale_count,
+        "skipped_duplicate_count": research_run.skipped_duplicate_count,
+        "blocking_issue_count": workflow.blocking_issue_count,
+        "warning_count": summary.warning_count,
+        "unresolved_manual_task_count": workflow.unresolved_manual_task_count,
+        "provider_statuses": [
+            {
+                "provider_id": status.provider_id,
+                "provider_name": status.provider_name,
+                "status": status.status.value,
+                "planned_count": status.planned_count,
+                "collected_count": status.collected_count,
+                "imported_count": status.imported_count,
+                "warning_count": status.warning_count,
+                "no_exact_result_companies": list(status.no_exact_result_companies),
+                "incomplete_search": status.incomplete_search,
+                "failure": status.failure,
+            }
+            for status in _evaluation_research_provider_statuses(research_run)
+        ],
+    }
+
+
+def _evidence_audit_export(
+    evidence_audit: EvidenceCompletenessAudit | None,
+) -> dict[str, object]:
+    if evidence_audit is None:
+        return {"ran": False}
+    return {
+        "ran": True,
+        "readiness": evidence_audit.readiness.value,
+        "blocking_count": len(evidence_audit.blocking_findings),
+        "finding_count": len(evidence_audit.findings),
+        "findings": [
+            {
+                "id": finding.id,
+                "kind": finding.kind.value,
+                "severity": finding.severity.value,
+                "title": finding.title,
+                "term": finding.term.value if finding.term is not None else None,
+                "evidence_ids": list(finding.evidence_ids),
+                "missing_evidence": finding.missing_evidence,
+                "claim_ids": list(finding.claim_ids),
+            }
+            for finding in evidence_audit.findings
+        ],
+        "term_statuses": [
+            {
+                "term": status.term.value,
+                "label": status.label,
+                "status": status.status.value,
+                "evidence_ids": list(status.evidence_ids),
+                "missing_evidence": status.missing_evidence,
+            }
+            for status in evidence_audit.term_statuses
+        ],
+    }
+
+
+def _evidence_review_export(
+    evidence_review: DealEvidenceReview | None,
+) -> dict[str, object]:
+    if evidence_review is None:
+        return {"ran": False}
+    active_issues = _active_evidence_review_issues(evidence_review)
+    return {
+        "ran": True,
+        "evidence_count": evidence_review.evidence_count,
+        "claim_count": evidence_review.claim_count,
+        "conflict_count": evidence_review.conflict_count,
+        "issues": [
+            {
+                "code": issue.code,
+                "severity": issue.severity.value,
+                "issue": issue.issue,
+                "count": issue.count,
+            }
+            for issue in active_issues
+        ],
+    }
+
+
+def _diligence_queue_export(
+    queue: DiligenceQuestionQueue | None,
+    *,
+    queue_path: Path | None,
+) -> dict[str, object]:
+    if queue is None:
+        return {
+            "ran": False,
+            "question_count": 0,
+            "resolved_count": 0,
+            "unresolved_count": 0,
+            "queue_path": str(queue_path) if queue_path is not None else None,
+            "questions": [],
+        }
+    return {
+        "ran": True,
+        "question_count": len(queue.questions),
+        "resolved_count": queue.resolved_count,
+        "unresolved_count": queue.unresolved_count,
+        "queue_path": str(queue_path) if queue_path is not None else None,
+        "questions": [
+            {
+                "question_id": question.question_id,
+                "source": question.source.value,
+                "priority": question.priority,
+                "question": question.question,
+                "category": question.category,
+                "evidence_ids": list(question.evidence_ids),
+                "missing_evidence": question.missing_evidence,
+                "answer_status": question.answer_status.value,
+                "answer_evidence_ids": list(question.answer_evidence_ids),
+            }
+            for question in queue.questions
+        ],
+    }
 
 
 def _stage(callback: Callable[[str], None] | None, stage: str) -> None:

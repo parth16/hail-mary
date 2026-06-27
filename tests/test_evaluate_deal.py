@@ -188,6 +188,7 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "Valuation risk" in result.output
     assert "Triggered scoring gates" in result.output
     assert "Scoring missing inputs" in result.output
+    assert "Final JSON" in result.output
     assert "Failed model roles" in result.output
     assert "OCR means reading text from images" in result.output
     assert "\x1b[" not in result.output
@@ -206,6 +207,24 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "**Round / Instrument:**" in memo_text
     assert "**Valuation / Cap:**" in memo_text
     assert "## Evidence Completeness Audit" in memo_text
+
+    json_paths = list((tmp_path / "data" / "reports").glob("*-final-evaluation.json"))
+    assert len(json_paths) == 1
+    export = json.loads(json_paths[0].read_text(encoding="utf-8"))
+    assert export["schema_version"] == "1"
+    assert export["deal"]["company_name"] == "ExampleCo"
+    assert export["final_decision"]["recommendation"] == "INVEST"
+    assert export["final_decision"]["check_size"] in {1_000, 2_500, 5_000, 7_500, 10_000}
+    assert export["deterministic_score"]["recommendation"] == "INVEST"
+    assert export["evidence_completeness"]["ran"] is True
+    assert export["evidence_health"]["ran"] is True
+    assert export["diligence_questions"]["ran"] is True
+    assert export["privacy"]["contains_raw_evidence_text"] is False
+    assert export["privacy"]["contains_model_excerpts"] is False
+    export_text = json.dumps(export, sort_keys=True)
+    assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in export_text
+    assert local_path_text not in export_text
+    assert '"quote"' not in export_text
 
     assert FakeOpenAIReviewClient.instances
     fake_client = FakeOpenAIReviewClient.instances[0]
@@ -3380,6 +3399,7 @@ def _commentary_result(
         specialist_results=[],
         failed_specialist_roles=[],
         final_memo_path=root / "final-evaluation.md",
+        final_json_path=root / "final-evaluation.json",
         agent_output_dir=root / "agent-outputs",
         ocr_status="OCR was not enabled.",
     )
