@@ -63,6 +63,7 @@ class ResearchProvider(BaseModel):
     default_enabled: bool = True
     requires_api_key: bool = False
     requires_authenticated_session: bool = False
+    credential_env_var: str | None = None
     licensing_notes: str
     operator_note: str
 

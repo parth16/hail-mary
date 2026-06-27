@@ -21,6 +21,70 @@ def _init_git_repo(path: Path) -> None:
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True, text=True)
 
 
+def test_load_config_parses_enabled_paid_provider_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "HAILMARY_ENABLED_PAID_PROVIDERS",
+        "Crunchbase, newsapi, crunchbase, similarweb",
+    )
+
+    config = load_config()
+
+    assert config.enabled_paid_providers == (
+        "crunchbase",
+        "newsapi",
+        "similarweb",
+    )
+
+
+def test_load_config_parses_saved_enabled_paid_provider_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "enabled_paid_providers: crunchbase, pitchbook\n",
+        encoding="utf-8",
+    )
+
+    config = load_config()
+
+    assert config.enabled_paid_providers == ("crunchbase", "pitchbook")
+
+
+def test_load_config_rejects_blank_enabled_paid_provider_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_ENABLED_PAID_PROVIDERS", "crunchbase,,newsapi")
+
+    with pytest.raises(ConfigError, match="blank comma-separated entries"):
+        load_config()
+
+
+def test_env_example_has_blank_paid_provider_placeholders() -> None:
+    env_example = Path(__file__).parents[1] / ".env.example"
+    text = env_example.read_text(encoding="utf-8")
+
+    for placeholder in [
+        "HAILMARY_ENABLED_PAID_PROVIDERS=",
+        "CRUNCHBASE_API_KEY=",
+        "PEOPLE_DATA_LABS_API_KEY=",
+        "NEWSAPI_KEY=",
+        "SIMILARWEB_API_KEY=",
+        "SENSOR_TOWER_API_KEY=",
+        "PITCHBOOK_API_KEY=",
+        "CB_INSIGHTS_API_KEY=",
+    ]:
+        assert placeholder in text
+
+
 def test_init_adds_repo_local_custom_data_dir_to_local_git_exclude(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -12,6 +12,16 @@ from .schemas import (
     ResearchProviderCategory,
 )
 
+PAID_PROVIDER_CREDENTIAL_ENV_VARS: dict[str, str] = {
+    "crunchbase": "CRUNCHBASE_API_KEY",
+    "people_data_labs": "PEOPLE_DATA_LABS_API_KEY",
+    "newsapi": "NEWSAPI_KEY",
+    "similarweb": "SIMILARWEB_API_KEY",
+    "sensor_tower": "SENSOR_TOWER_API_KEY",
+    "pitchbook": "PITCHBOOK_API_KEY",
+    "cb_insights": "CB_INSIGHTS_API_KEY",
+}
+
 
 @dataclass(frozen=True)
 class ProviderAdapter:
@@ -243,36 +253,43 @@ def _paid_optional_adapters() -> list[ProviderAdapter]:
             provider_id="crunchbase",
             name="Crunchbase",
             description="Company profiles, funding rounds, investors, and acquisition data.",
+            credential_env_var=PAID_PROVIDER_CREDENTIAL_ENV_VARS["crunchbase"],
         ),
         _paid_api_provider(
             provider_id="people_data_labs",
             name="People Data Labs",
             description="People and company enrichment data for team and employment checks.",
+            credential_env_var=PAID_PROVIDER_CREDENTIAL_ENV_VARS["people_data_labs"],
         ),
         _paid_api_provider(
             provider_id="newsapi",
             name="NewsAPI",
             description="Programmatic news search for press and announcement coverage.",
+            credential_env_var=PAID_PROVIDER_CREDENTIAL_ENV_VARS["newsapi"],
         ),
         _paid_api_provider(
             provider_id="similarweb",
             name="Similarweb",
             description="Web traffic estimates and digital market signals.",
+            credential_env_var=PAID_PROVIDER_CREDENTIAL_ENV_VARS["similarweb"],
         ),
         _paid_api_provider(
             provider_id="sensor_tower",
             name="Sensor Tower",
             description="Mobile app market and download estimates.",
+            credential_env_var=PAID_PROVIDER_CREDENTIAL_ENV_VARS["sensor_tower"],
         ),
         _paid_manual_provider(
             provider_id="pitchbook",
             name="PitchBook",
             description="Private-company financings, investors, comparables, and fund data.",
+            credential_env_var=PAID_PROVIDER_CREDENTIAL_ENV_VARS["pitchbook"],
         ),
         _paid_manual_provider(
             provider_id="cb_insights",
             name="CB Insights",
             description="Private-company market maps, financings, and competitive data.",
+            credential_env_var=PAID_PROVIDER_CREDENTIAL_ENV_VARS["cb_insights"],
         ),
     ]
 
@@ -282,6 +299,7 @@ def _paid_api_provider(
     provider_id: str,
     name: str,
     description: str,
+    credential_env_var: str,
 ) -> ProviderAdapter:
     return ProviderAdapter(
         provider=ResearchProvider(
@@ -293,6 +311,7 @@ def _paid_api_provider(
             description=description,
             default_enabled=False,
             requires_api_key=True,
+            credential_env_var=credential_env_var,
             licensing_notes=(
                 "Paid optional source. Use only with an active license, keep API keys out "
                 "of the repository, and store provider terms with imported facts."
@@ -308,6 +327,7 @@ def _paid_manual_provider(
     provider_id: str,
     name: str,
     description: str,
+    credential_env_var: str,
 ) -> ProviderAdapter:
     return ProviderAdapter(
         provider=ResearchProvider(
@@ -319,6 +339,7 @@ def _paid_manual_provider(
             description=description,
             default_enabled=False,
             requires_authenticated_session=True,
+            credential_env_var=credential_env_var,
             licensing_notes=(
                 "Paid optional source. Use only with an active license and record source, "
                 "timestamp, confidence, and licensing notes for every imported fact."
