@@ -39,6 +39,7 @@ from hailmary.research import (
     run_research_workflow,
 )
 from hailmary.schemas.agents import (
+    AgentDiligenceQuestion,
     AgentEvidenceItem,
     AgentEvidenceReference,
     AgentFinding,
@@ -64,6 +65,7 @@ from hailmary.schemas.evidence import (
 )
 from hailmary.schemas.scoring import (
     CompanyStage,
+    DiligenceQuestion,
     FundabilityRisk,
     PMFLevel,
     Recommendation,
@@ -2907,8 +2909,11 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "## Decision",
         "## Rule-Based Decision And Guardrails",
         "## Score Factors",
+        "## Portfolio Impact And Net Return Math",
         "## External Research",
         "## Evidence Health",
+        "## Evidence Quality",
+        "## Missing Data",
         "## Model Committee Findings",
         "## Final Recommendation",
         "## Evidence Cited",
@@ -2925,6 +2930,12 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
         "**Recommendation:**",
         "**Suggested check:**",
         "**Score:**",
+        "Unsupported or model-only findings may be shown as diligence notes",
+        "| Metric | Value |",
+        "| Return input | Value |",
+        "| Claim type | Source type | Verification | Recency |",
+        "| What is not known | Why it matters | Confidence effect | Evidence IDs |",
+        "| Rank | Source | Question | Reason | Evidence IDs |",
         "Imported 1 external research evidence record before scoring.",
         (
             "Evidence health means whether saved source records are complete and safe "
@@ -2983,6 +2994,46 @@ def run_memo_v2_score_evidence_fixture() -> None:
         not missing_fragments,
         "Expected v2 memo score impacts to include stage, valuation, return math, and evidence.",
         missing_fragments=", ".join(missing_fragments),
+    )
+
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=scored.recommendation,
+        check_size=scored.check_size,
+        reason=scored.one_line_reason,
+        evidence=[AgentEvidenceReference(evidence_id="ev_terms", quote="Valuation cap $8M")],
+    )
+    final_memo = render_final_evaluation_memo(
+        scored,
+        store,
+        specialist_results=[],
+        final_output=AgentReviewOutput(
+            deal_id=store.deal_id,
+            company_name=store.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            recommendation=final_recommendation,
+        ),
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+    expected_final_fragments = [
+        "## Portfolio Impact And Net Return Math",
+        "| Return input | Value |",
+        "Hail Mary did not invent a net return",
+        "## Evidence Quality",
+        "| Claim type | Source type | Verification | Recency |",
+        "score factor: Valuation and net return",
+        "## Missing Data",
+        "gross exit scenario",
+        "| Rank | Source | Question | Reason | Evidence IDs |",
+    ]
+    missing_final_fragments = [
+        fragment for fragment in expected_final_fragments if fragment not in final_memo
+    ]
+    _expect(
+        not missing_final_fragments,
+        "Expected final memo v2 sections to include evidence quality, missing data, "
+        "ranked questions, and return math.",
+        missing_fragments=", ".join(missing_final_fragments),
     )
 
 
@@ -3102,9 +3153,34 @@ def run_memo_output_guards_fixture() -> None:
         }
     )
     evidence.append(late_evidence)
-    store = _store(evidence=evidence, claims=[_claim("valuation cap", "$8M", late_evidence)])
+    unsafe_claim = _claim("valuation cap", "$8M", late_evidence)
+    unsafe_claim = unsafe_claim.model_copy(
+        update={
+            "quality": unsafe_claim.quality.model_copy(
+                update={
+                    "reliability": "source|reliability\n# Bad Reliability",
+                    "materiality": "high|materiality\n# Bad Materiality",
+                    "score_impact": "impact with [bad](x)\n# Bad Impact",
+                }
+            )
+        }
+    )
+    store = _store(evidence=evidence, claims=[unsafe_claim])
     store = store.model_copy(update={"company_name": "Bad|Co\n# Fake Heading"})
     scored = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored = scored.model_copy(
+        update={
+            "diligence_questions": [
+                *scored.diligence_questions,
+                DiligenceQuestion(
+                    priority=9,
+                    question="Question with [bad](x)\n# Bad Question",
+                    reason="Reason with | pipe\n# Bad Question Reason",
+                    evidence_ids=["ev_29"],
+                ),
+            ]
+        }
+    )
     final_recommendation = AgentRecommendationRationale(
         recommendation=Recommendation.PASS,
         check_size=0,
@@ -3119,6 +3195,12 @@ def run_memo_output_guards_fixture() -> None:
             AgentSummaryPoint(
                 summary="Summary with | pipe\n# bad summary",
                 evidence=[AgentEvidenceReference(evidence_id="ev_29", quote="$8M")],
+            )
+        ],
+        diligence_questions=[
+            AgentDiligenceQuestion(
+                question="Final question | pipe\n# Bad Final Question",
+                reason="Final question reason with [bad](x)\n# Bad Final Reason",
             )
         ],
         recommendation=final_recommendation,
@@ -3147,6 +3229,9 @@ def run_memo_output_guards_fixture() -> None:
         "\n# Bad Provider",
         "\n# Bad Confidence",
         "\n# Bad License",
+        "\n# Bad Reliability",
+        "\n# Bad Question",
+        "\n# Bad Final Question",
     ]
     present_forbidden = [fragment for fragment in forbidden_fragments if fragment in memo]
     _expect(
@@ -3160,6 +3245,11 @@ def run_memo_output_guards_fixture() -> None:
         "source page: https://example.com/source?x=\\[bad\\]\\|value",
         "high\\|confidence \\# Bad Confidence",
         "Allowed notes with \\[bad\\]\\(link\\) \\# Bad License",
+        "source\\|reliability \\# Bad Reliability",
+        "impact with \\[bad\\]\\(x\\) \\# Bad Impact",
+        "Question with \\[bad\\]\\(x\\) \\# Bad Question",
+        "Final question \\| pipe \\# Bad Final Question",
+        "NEEDS\\_DILIGENCE: no source evidence provided",
         "Quote/excerpt: \"Valuation cap $8M. Evidence text with "
         "\\[bad\\]\\(https://example.com\\) markup.\"",
         "Reason with \\[bad\\]\\(https://example.com\\) \\# bad reason",

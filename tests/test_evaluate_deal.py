@@ -25,6 +25,7 @@ from hailmary.research import (
     ResearchWorkflowRunSummary,
 )
 from hailmary.schemas.agents import (
+    AgentDiligenceQuestion,
     AgentEvidenceReference,
     AgentFinding,
     AgentInputPacket,
@@ -55,7 +56,13 @@ from hailmary.schemas.evidence import (
     SourceFreshness,
     VerificationStatus,
 )
-from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal, ScoreFactor
+from hailmary.schemas.scoring import (
+    ConfidenceLevel,
+    DiligenceQuestion,
+    Recommendation,
+    ScoredDeal,
+    ScoreFactor,
+)
 
 runner = CliRunner()
 
@@ -264,6 +271,46 @@ def test_evaluate_deal_local_only_succeeds_without_model_env(
     assert "Rule-based scoring means fixed checks over source-linked evidence" in memo_text
     assert "Model review was skipped for this run" in memo_text
     assert "No specialist output passed validation" not in memo_text
+
+
+def test_evaluate_deal_final_memo_v2_sections_keep_decision_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="MemoV2Co",
+        body=(
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "Seed round is active. ARR revenue growth with paid customers and retention. "
+            "Lead investor committed. Estimated dilution 20%. Platform fees 2%. "
+            "Carry 20%. Gross exit value $100M."
+        ),
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+    )
+
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert memo_text.startswith("# Hail Mary Final Evaluation: MemoV2Co\n\n## Decision")
+    for section in (
+        "## Portfolio Impact And Net Return Math",
+        "## Evidence Quality",
+        "## Missing Data",
+        "## Diligence Questions",
+    ):
+        assert section in memo_text
+    assert "| Metric | Value |" in memo_text
+    assert "| Return input | Value |" in memo_text
+    assert "| Claim type | Source type | Verification | Recency |" in memo_text
+    assert "| Rank | Source | Question | Reason | Evidence IDs |" in memo_text
+    assert "Unsupported or model-only findings may be shown as diligence notes" in memo_text
+    assert "Gross exit value" in memo_text
+    assert "Net return multiple" in memo_text
 
 
 def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
@@ -1380,6 +1427,283 @@ def test_forced_pass_warns_when_rule_based_citations_are_filtered() -> None:
     assert "- Rationale: NEEDS\\_DILIGENCE" in memo_text
 
 
+def test_final_memo_v2_escapes_dynamic_tables_and_questions() -> None:
+    evidence = _evidence_record(
+        "ev-bad",
+        "Valuation cap $8M. Snippet with [bad](https://example.com)\n# bad snippet.",
+        "raw/[bad](memo).txt",
+    ).model_copy(
+        update={
+            "provider_name": "Provider|Name\n# bad provider",
+            "source_url": "https://example.com/source?name=[bad]|x",
+            "external_confidence": "high|confidence\n# bad confidence",
+            "licensing_notes": "Allowed [bad](link)\n# bad license",
+        }
+    )
+    claim = _claim_record("claim-bad", evidence, normalized_value="8000000")
+    claim = claim.model_copy(
+        update={
+            "quality": claim.quality.model_copy(
+                update={
+                    "reliability": "reliable|source\n# bad reliability",
+                    "materiality": "high|material\n# bad materiality",
+                    "score_impact": "impact with [bad](x)\n# bad impact",
+                }
+            )
+        }
+    )
+    company_name = "Bad|Co\n# Fake Heading"
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name=company_name,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence],
+        claims=[claim],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name=company_name,
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=50,
+        one_line_reason="Reason with [bad](https://example.com)\n# bad score reason",
+        score_factors=[
+            ScoreFactor(
+                name="Factor|Name\n# bad factor",
+                score=5,
+                max_score=20,
+                explanation="Explanation with [bad](x)\n# bad explanation",
+                evidence_ids=[evidence.id],
+                missing_inputs=["missing|input\n# bad missing"],
+            )
+        ],
+        diligence_questions=[
+            DiligenceQuestion(
+                priority=1,
+                question="Question with [bad](https://example.com)\n# bad question",
+                reason="Reason with | pipe\n# bad question reason",
+                evidence_ids=[evidence.id],
+            )
+        ],
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Final reason with [bad](https://example.com)\n# bad reason",
+        evidence=[AgentEvidenceReference(evidence_id=evidence.id, quote="$8M")],
+    )
+    final_output = AgentReviewOutput(
+        deal_id=store.deal_id,
+        company_name=company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        diligence_questions=[
+            AgentDiligenceQuestion(
+                question="Final question | pipe\n# bad final question",
+                reason="Final reason [bad](x)\n# bad final reason",
+            )
+        ],
+        recommendation=final_recommendation,
+    )
+
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        store,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+
+    assert memo_text.startswith(
+        "# Hail Mary Final Evaluation: Bad\\|Co \\# Fake Heading\n\n## Decision"
+    )
+    for forbidden in (
+        "\n# Fake Heading",
+        "\n# bad provider",
+        "\n# bad reliability",
+        "\n# bad question",
+        "\n# bad reason",
+    ):
+        assert forbidden not in memo_text
+    for expected in (
+        "Provider\\|Name \\# bad provider",
+        "source page: https://example.com/source?name=\\[bad\\]\\|x",
+        "reliable\\|source \\# bad reliability",
+        "impact with \\[bad\\]\\(x\\) \\# bad impact",
+        "Question with \\[bad\\]\\(https://example.com\\) \\# bad question",
+        "Final question \\| pipe \\# bad final question",
+        "NEEDS\\_DILIGENCE: no source evidence provided",
+        "Final reason with \\[bad\\]\\(https://example.com\\) \\# bad reason",
+    ):
+        assert expected in memo_text
+
+
+def test_final_memo_evidence_quality_revalidates_stale_claim_status() -> None:
+    evidence = _evidence_record("ev-stale", "Valuation cap $8M.", "memo.txt")
+    claim = _claim_record("claim-stale", evidence, normalized_value="8000000")
+    stale_citation = claim.citations[0].model_copy(
+        update={"quote": "Valuation cap $10M."}
+    )
+    claim = claim.model_copy(update={"citations": [stale_citation]})
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="StaleClaimCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence],
+        claims=[claim],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="StaleClaimCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Synthetic stale claim test.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Synthetic stale claim test.",
+    )
+    final_output = AgentReviewOutput(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        store,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+
+    assert "| deal\\_term | local\\_file | quote\\_mismatch |" in memo_text
+    assert "not used directly by deterministic score" in memo_text
+    assert "- ev-stale:" in memo_text
+
+
+def test_final_memo_evidence_quality_recomputes_stale_conflict_status() -> None:
+    evidence_a = _evidence_record("ev-live", "Valuation cap $8M.", "memo-a.txt")
+    evidence_b = _evidence_record("ev-stale-conflict", "Valuation cap $10M.", "memo-b.txt")
+    claim_a = _claim_record("claim-live", evidence_a, normalized_value="8000000")
+    claim_b = _claim_record("claim-stale-conflict", evidence_b, normalized_value="10000000")
+    stale_citation = claim_b.citations[0].model_copy(
+        update={"quote": "Valuation cap $12M."}
+    )
+    claim_b = claim_b.model_copy(update={"citations": [stale_citation]})
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="StaleConflictCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence_a, evidence_b],
+        claims=[claim_a, claim_b],
+        conflicts=[
+            ClaimConflict(
+                id="conflict-1",
+                deal_id="deal-1",
+                claim_type=ClaimType.DEAL_TERM,
+                label="valuation cap",
+                normalized_values=["8000000", "10000000"],
+                claim_ids=[claim_a.id, claim_b.id],
+                notes="Synthetic stale conflict.",
+            )
+        ],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="StaleConflictCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Synthetic stale conflict test.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Synthetic stale conflict test.",
+    )
+    final_output = AgentReviewOutput(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        store,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+
+    assert "| deal\\_term | local\\_file | verified |" in memo_text
+    assert "| deal\\_term | local\\_file | quote\\_mismatch |" in memo_text
+    assert "score factor: Deal terms; score factor: Valuation and net return" in memo_text
+
+
+def test_final_memo_evidence_quality_citations_are_in_evidence_cited() -> None:
+    evidence = _evidence_record("ev-quality-only", "Unverified side note.", "note.txt")
+    claim = _claim_record("claim-quality-only", evidence, normalized_value="side-note")
+    citation = claim.citations[0].model_copy(
+        update={"verification_status": VerificationStatus.MISSING_CITATION}
+    )
+    claim = claim.model_copy(
+        update={
+            "label": "side note",
+            "citations": [citation],
+            "verification_status": VerificationStatus.MISSING_CITATION,
+            "quality": claim.quality.model_copy(
+                update={"verification_status": VerificationStatus.MISSING_CITATION}
+            ),
+        }
+    )
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="QualityOnlyCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence],
+        claims=[claim],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="QualityOnlyCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Synthetic quality-only claim test.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Synthetic quality-only claim test.",
+    )
+    final_output = AgentReviewOutput(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        store,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+
+    assert "| deal\\_term | local\\_file | missing\\_citation |" in memo_text
+    assert "ev-quality-only" in memo_text
+    assert "- ev-quality-only:" in memo_text
+
+
 def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1514,6 +1838,9 @@ def test_evaluate_deal_final_memo_includes_conflict_evidence_for_forced_pass(
     assert "Conflicting material deal terms" in memo_text
     assert "Valuation cap $8M" in memo_text
     assert "Valuation cap $10M" in memo_text
+    assert "## Evidence Quality" in memo_text
+    assert "excluded\\_until\\_conflict\\_is\\_resolved" in memo_text
+    assert "## Missing Data" in memo_text
 
 
 def test_evaluate_deal_no_evidence_writes_pass_memo_without_model_calls(
@@ -1542,6 +1869,12 @@ def test_evaluate_deal_no_evidence_writes_pass_memo_without_model_calls(
     assert "NEEDS\\_DILIGENCE: No usable source-linked evidence was available" in memo_text
     assert "skipped model committee review" in memo_text
     assert "Model recommendation before guardrails" not in memo_text
+    assert "## Portfolio Impact And Net Return Math" in memo_text
+    assert "## Evidence Quality" in memo_text
+    assert "- No claim-level evidence quality rows were available." in memo_text
+    assert "## Missing Data" in memo_text
+    assert "source-linked evidence" in memo_text
+    assert "| Rank | Source | Question | Reason | Evidence IDs |" in memo_text
 
 
 def test_evaluate_deal_renders_final_decision_findings(
@@ -1564,6 +1897,69 @@ def test_evaluate_deal_renders_final_decision_findings(
 
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "Final caveat: Validate customer concentration before wiring funds." in memo_text
+
+
+def test_evaluate_deal_unsupported_model_findings_do_not_change_score_or_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+    company_dir = _write_company_folder(tmp_path, company_name="UnsupportedFindingCo")
+
+    def unsupported_final_output(packet: AgentInputPacket) -> str:
+        evidence = packet.evidence[0]
+        reference = AgentEvidenceReference(
+            evidence_id=evidence.id,
+            quote=_quote(evidence.text),
+        )
+        return AgentReviewOutput(
+            deal_id=packet.deal_id,
+            company_name=packet.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            summary=[
+                AgentSummaryPoint(
+                    summary="The final review cites the same source-linked evidence.",
+                    evidence=[reference],
+                )
+            ],
+            findings=[
+                AgentFinding(
+                    title="Unsupported score change",
+                    finding="A model-only concern should not change deterministic scoring.",
+                    confidence=ConfidenceLevel.LOW,
+                    materiality="high",
+                    unsupported=True,
+                )
+            ],
+            recommendation=AgentRecommendationRationale(
+                recommendation=packet.score.recommendation,
+                check_size=packet.score.check_size,
+                reason="The cited deterministic evidence supports the guarded decision.",
+                evidence=[reference],
+            ),
+        ).model_dump_json()
+
+    client = RecordingReviewClient(
+        outputs_by_role={AgentRole.FINAL_DECISION: [unsupported_final_output]}
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
+        model_client=client,
+        max_concurrency=1,
+    )
+
+    assert result.final_output.findings[0].unsupported
+    assert result.final_output.findings[0].score_delta == 0
+    assert result.final_recommendation.check_size == result.deterministic_score.check_size
+    assert f"**Score:** {result.deterministic_score.total_score}/100" in (
+        result.final_memo_path.read_text(encoding="utf-8")
+    )
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "UNVERIFIED: Unsupported score change" in memo_text
+    assert "do not change the deterministic score or check size" in memo_text
 
 
 def test_cited_evidence_lines_include_validated_conflict_claim_citations() -> None:

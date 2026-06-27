@@ -62,7 +62,12 @@ from hailmary.schemas.agents import (
     AgentValidationResult,
 )
 from hailmary.schemas.documents import IngestedDeal, IngestedDocument, IngestionSummary
-from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
+from hailmary.schemas.evidence import (
+    ClaimRecord,
+    EvidenceRecord,
+    EvidenceStore,
+    VerificationStatus,
+)
 from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal
 from hailmary.scoring.scorer import (
     score_evidence_store,
@@ -911,6 +916,8 @@ def render_final_evaluation_memo(
         "",
         "- Rule-based scoring means fixed checks over source-linked evidence. "
         "This is the deterministic score.",
+        "- Unsupported or model-only findings may be shown as diligence notes, "
+        "but they do not change the deterministic score or check size.",
         f"- Rule-based recommendation: {scored_deal.recommendation}.",
         f"- Rule-based suggested check: {_format_check_size(scored_deal.check_size)}.",
         f"- Rule-based reason: {_memo_text(scored_deal.one_line_reason)}",
@@ -932,11 +939,25 @@ def render_final_evaluation_memo(
             f"{_evidence_reference_text(factor.evidence_ids)}"
         )
 
+    lines.extend(["", "## Portfolio Impact And Net Return Math"])
+    lines.extend(
+        _portfolio_impact_memo_lines(
+            scored_deal,
+            final_recommendation=final_recommendation,
+        )
+    )
+
     lines.extend(["", "## External Research"])
     lines.extend(_research_memo_lines(research_run))
 
     lines.extend(["", "## Evidence Health"])
     lines.extend(_evidence_health_memo_lines(evidence_review))
+
+    lines.extend(["", "## Evidence Quality"])
+    lines.extend(_evidence_quality_memo_lines(store, scored_deal))
+
+    lines.extend(["", "## Missing Data"])
+    lines.extend(_missing_data_memo_lines(scored_deal, evidence_review=evidence_review))
 
     lines.extend(["", "## Model Committee Findings"])
     successful_results = [result for result in specialist_results if result.output is not None]
@@ -1027,28 +1048,13 @@ def render_final_evaluation_memo(
     lines.extend(limitation_lines or ["- No model-validation limitations were recorded."])
 
     lines.extend(["", "## Diligence Questions"])
-    for scored_question in scored_deal.diligence_questions:
-        lines.append(
-            f"{scored_question.priority}. {_memo_text(scored_question.question)} "
-            f"Reason: {_memo_text(scored_question.reason)}"
-            f"{_evidence_reference_text(scored_question.evidence_ids)}"
+    lines.extend(
+        _ranked_diligence_question_lines(
+            scored_deal,
+            final_output=final_output,
+            specialist_results=successful_results,
         )
-    for final_question in final_output.diligence_questions:
-        lines.append(
-            f"- {_memo_text(final_question.question)} "
-            f"Reason: {_memo_text(final_question.reason)}"
-            f"{_citation_text(final_question.evidence)}"
-        )
-    for result in successful_results:
-        output = result.output
-        if output is None:
-            continue
-        for agent_question in output.diligence_questions:
-            lines.append(
-                f"- {_role_title(result.role)}: {_memo_text(agent_question.question)} "
-                f"Reason: {_memo_text(agent_question.reason)}"
-                f"{_citation_text(agent_question.evidence)}"
-            )
+    )
 
     lines.extend(
         [
@@ -1944,6 +1950,412 @@ def _evidence_health_memo_lines(
     return lines
 
 
+def _portfolio_impact_memo_lines(
+    scored_deal: ScoredDeal,
+    *,
+    final_recommendation: AgentRecommendationRationale,
+) -> list[str]:
+    capital_before = scored_deal.capital_remaining_before
+    capital_after = (
+        None
+        if capital_before is None
+        else max(0, capital_before - final_recommendation.check_size)
+    )
+    allocation_effect = (
+        "Allocates new capital from the available portfolio budget."
+        if final_recommendation.recommendation == Recommendation.INVEST
+        and final_recommendation.check_size > 0
+        else "Allocates no new capital because the final recommendation is PASS/$0."
+    )
+    lines = [
+        "- Portfolio impact uses the final guarded recommendation. The deterministic "
+        "score and check size are not changed by model-only findings.",
+        "- Dilution means future fundraising can reduce ownership. Fees or carry means "
+        "platform, fund, or investment wrapper costs. Gross exit value means the total "
+        "company sale or exit value before those adjustments.",
+    ]
+    lines.extend(
+        _markdown_table(
+            ["Metric", "Value"],
+            [
+                ["Suggested check", _format_check_size(final_recommendation.check_size)],
+                ["Available capital before this memo", _money_or_unknown(capital_before)],
+                ["Available capital after this memo", _money_or_unknown(capital_after)],
+                ["Allocation effect", allocation_effect],
+            ],
+        )
+    )
+    lines.extend(_net_return_detail_lines(scored_deal))
+    return lines
+
+
+def _net_return_detail_lines(scored_deal: ScoredDeal) -> list[str]:
+    net_return = scored_deal.net_return
+    if net_return.net_return_multiple is None:
+        intro = (
+            "Hail Mary did not invent a net return because verified inputs are missing."
+        )
+    else:
+        intro = (
+            "Hail Mary estimated net return as gross exit value divided by entry "
+            "valuation, adjusted for dilution and fees or carry."
+        )
+    lines = [f"- {intro} {_memo_text(net_return.explanation)}"]
+    lines.extend(
+        _markdown_table(
+            ["Return input", "Value"],
+            [
+                ["Entry valuation", _money_or_unknown(net_return.entry_valuation)],
+                ["Gross exit value", _money_or_unknown(net_return.gross_exit_value)],
+                ["Dilution", _percent_or_unknown(net_return.estimated_dilution_percent)],
+                [
+                    "Fees or carry",
+                    _percent_or_unknown(net_return.estimated_fees_and_carry_percent),
+                ],
+                [
+                    "Net return multiple",
+                    (
+                        "unknown"
+                        if net_return.net_return_multiple is None
+                        else f"{net_return.net_return_multiple:g}x"
+                    ),
+                ],
+                ["Evidence IDs", _evidence_id_cell(net_return.evidence_ids)],
+            ],
+        )
+    )
+    return lines
+
+
+def _evidence_quality_memo_lines(
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> list[str]:
+    if not store.claims:
+        return ["- No claim-level evidence quality rows were available."]
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
+    live_conflict_claim_ids = {
+        claim_id for conflict in validated_conflicts(store) for claim_id in conflict.claim_ids
+    }
+    rows: list[list[object]] = []
+    for claim in store.claims:
+        quality = claim.quality
+        verification_status = _claim_live_verification_status(
+            claim,
+            evidence_by_id,
+            live_conflict_claim_ids=live_conflict_claim_ids,
+        )
+        rows.append(
+            [
+                quality.claim_type,
+                quality.source_type,
+                verification_status,
+                quality.recency,
+                quality.reliability,
+                f"{quality.confidence:.0%}",
+                quality.materiality,
+                _claim_score_impact(
+                    claim,
+                    scored_deal,
+                    verification_status=verification_status,
+                ),
+                _evidence_id_cell(_claim_citation_evidence_ids(claim)),
+            ]
+        )
+    return _markdown_table(
+        [
+            "Claim type",
+            "Source type",
+            "Verification",
+            "Recency",
+            "Reliability",
+            "Confidence",
+            "Materiality",
+            "Score impact",
+            "Evidence IDs",
+        ],
+        rows,
+    )
+
+
+def _claim_score_impact(
+    claim: ClaimRecord,
+    scored_deal: ScoredDeal,
+    *,
+    verification_status: VerificationStatus,
+) -> str:
+    quality_impact = claim.quality.score_impact
+    if quality_impact and quality_impact != "not_scored_yet":
+        return quality_impact
+
+    impacts: list[str] = []
+
+    def add_impact(text: str) -> None:
+        if text not in impacts:
+            impacts.append(text)
+
+    for gate in scored_deal.kill_gates:
+        if not gate.triggered:
+            continue
+        gate_matches_claim = (
+            gate.name == "Conflicting material deal terms"
+            and verification_status == VerificationStatus.CONFLICTED
+        ) or (
+            gate.name == "Valuation far ahead of evidence" and _claim_is_pricing(claim)
+        ) or (
+            gate.name == "Platform minimum above maximum check"
+            and claim.label == "minimum investment"
+        )
+        if gate_matches_claim:
+            add_impact(f"triggered kill gate: {gate.name}")
+
+    score_trusted_statuses = {VerificationStatus.VERIFIED, VerificationStatus.CONFLICTED}
+    if verification_status in score_trusted_statuses:
+        add_impact("score factor: Deal terms")
+        if _claim_is_pricing(claim):
+            add_impact("score factor: Valuation and net return")
+            add_impact("return math input")
+    return "; ".join(impacts) if impacts else "not used directly by deterministic score"
+
+
+def _claim_is_pricing(claim: ClaimRecord) -> bool:
+    return claim.label in {
+        "valuation cap",
+        "post-money valuation",
+        "pre-money valuation",
+    }
+
+
+def _claim_live_verification_status(
+    claim: ClaimRecord,
+    evidence_by_id: Mapping[str, EvidenceRecord],
+    *,
+    live_conflict_claim_ids: set[str],
+) -> VerificationStatus:
+    if not claim.citations:
+        return VerificationStatus.MISSING_CITATION
+    for citation in claim.citations:
+        if citation.verification_status != VerificationStatus.VERIFIED:
+            return citation.verification_status
+        evidence = evidence_by_id.get(citation.evidence_id)
+        if evidence is None:
+            return VerificationStatus.EVIDENCE_NOT_FOUND
+        start = citation.source_span_start
+        end = citation.source_span_end
+        if not (0 <= start < end <= len(evidence.text)):
+            return VerificationStatus.SPAN_MISMATCH
+        if evidence.text[start:end] != citation.quote:
+            return VerificationStatus.QUOTE_MISMATCH
+    if claim.verification_status not in {
+        VerificationStatus.VERIFIED,
+        VerificationStatus.CONFLICTED,
+    }:
+        return claim.verification_status
+    if claim.id in live_conflict_claim_ids:
+        return VerificationStatus.CONFLICTED
+    return VerificationStatus.VERIFIED
+
+
+def _missing_data_memo_lines(
+    scored_deal: ScoredDeal,
+    *,
+    evidence_review: DealEvidenceReview | None,
+) -> list[str]:
+    rows: list[list[object]] = []
+    seen_unknowns: set[str] = set()
+
+    def add_row(
+        *,
+        unknown: str,
+        why_it_matters: str,
+        confidence_effect: str,
+        evidence_ids: Sequence[str] = (),
+    ) -> None:
+        key = unknown.casefold()
+        if key in seen_unknowns:
+            return
+        seen_unknowns.add(key)
+        rows.append(
+            [
+                unknown,
+                why_it_matters,
+                confidence_effect,
+                _evidence_id_cell(evidence_ids),
+            ]
+        )
+
+    for missing_input in scored_deal.net_return.missing_inputs:
+        add_row(
+            unknown=missing_input,
+            why_it_matters=(
+                "Needed to model net return after dilution, fees or carry, and exit "
+                "assumptions."
+            ),
+            confidence_effect="Blocks net return math until verified.",
+            evidence_ids=scored_deal.net_return.evidence_ids,
+        )
+    for gate in scored_deal.kill_gates:
+        if not gate.triggered:
+            continue
+        if gate.name == "No usable source-linked evidence":
+            add_row(
+                unknown="source-linked evidence",
+                why_it_matters=(
+                    "Without usable source evidence, material memo claims cannot be "
+                    "verified."
+                ),
+                confidence_effect="Forces PASS/$0 and keeps confidence low.",
+                evidence_ids=gate.evidence_ids,
+            )
+        elif gate.name == "No verified deal terms":
+            add_row(
+                unknown="verified deal terms",
+                why_it_matters="Needed to verify pricing and basic investment terms.",
+                confidence_effect="Can force PASS until terms are verified.",
+                evidence_ids=gate.evidence_ids,
+            )
+    for factor in scored_deal.score_factors:
+        for missing_input in factor.missing_inputs:
+            add_row(
+                unknown=missing_input,
+                why_it_matters=f"Needed for deterministic score factor: {factor.name}.",
+                confidence_effect=_support_status_confidence_effect(factor.support_status),
+                evidence_ids=factor.evidence_ids,
+            )
+    if evidence_review is not None:
+        for issue in _active_evidence_review_issues(evidence_review):
+            add_row(
+                unknown=f"evidence health: {issue.issue}",
+                why_it_matters=issue.guidance,
+                confidence_effect=_review_issue_confidence_effect(issue.severity),
+            )
+
+    if not rows:
+        return [
+            "- No deterministic missing inputs were recorded. Source freshness still "
+            "needs operator review before relying on the memo."
+        ]
+    return _markdown_table(
+        ["What is not known", "Why it matters", "Confidence effect", "Evidence IDs"],
+        rows,
+    )
+
+
+def _ranked_diligence_question_lines(
+    scored_deal: ScoredDeal,
+    *,
+    final_output: AgentReviewOutput,
+    specialist_results: Sequence[RoleReviewResult],
+) -> list[str]:
+    rows: list[list[object]] = []
+    max_rank = 0
+    for question in sorted(
+        scored_deal.diligence_questions,
+        key=lambda item: (item.priority, item.question.casefold()),
+    ):
+        max_rank = max(max_rank, question.priority)
+        rows.append(
+            [
+                str(question.priority),
+                "Rule-based",
+                question.question,
+                question.reason,
+                _evidence_id_cell(question.evidence_ids),
+            ]
+        )
+
+    next_rank = max_rank + 1 if max_rank else 1
+    for final_question in final_output.diligence_questions:
+        rows.append(
+            [
+                str(next_rank),
+                "Final Decision",
+                final_question.question,
+                final_question.reason,
+                _evidence_id_cell(_reference_evidence_ids(final_question.evidence)),
+            ]
+        )
+        next_rank += 1
+    for result in specialist_results:
+        output = result.output
+        if output is None:
+            continue
+        for agent_question in output.diligence_questions:
+            rows.append(
+                [
+                    str(next_rank),
+                    _role_title(result.role),
+                    agent_question.question,
+                    agent_question.reason,
+                    _evidence_id_cell(_reference_evidence_ids(agent_question.evidence)),
+                ]
+            )
+            next_rank += 1
+
+    if not rows:
+        return ["- No diligence questions were recorded."]
+    return _markdown_table(["Rank", "Source", "Question", "Reason", "Evidence IDs"], rows)
+
+
+def _markdown_table(headers: Sequence[object], rows: Sequence[Sequence[object]]) -> list[str]:
+    lines = [
+        "| " + " | ".join(_memo_text(header) for header in headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    header_count = len(headers)
+    for row in rows:
+        cells = list(row[:header_count])
+        if len(cells) < header_count:
+            cells.extend([""] * (header_count - len(cells)))
+        lines.append("| " + " | ".join(_memo_text(cell) for cell in cells) + " |")
+    return lines
+
+
+def _money_or_unknown(value: int | None) -> str:
+    return "unknown" if value is None else _format_money(value)
+
+
+def _percent_or_unknown(value: float | None) -> str:
+    return "unknown" if value is None else f"{value:g}%"
+
+
+def _evidence_id_cell(evidence_ids: Sequence[str]) -> str:
+    if not evidence_ids:
+        return "NEEDS_DILIGENCE: no source evidence provided"
+    return ", ".join(evidence_ids)
+
+
+def _claim_citation_evidence_ids(claim: ClaimRecord) -> list[str]:
+    evidence_ids: list[str] = []
+    for citation in claim.citations:
+        if citation.evidence_id not in evidence_ids:
+            evidence_ids.append(citation.evidence_id)
+    return evidence_ids
+
+
+def _reference_evidence_ids(references: Sequence[AgentEvidenceReference]) -> list[str]:
+    evidence_ids: list[str] = []
+    for reference in references:
+        if reference.evidence_id not in evidence_ids:
+            evidence_ids.append(reference.evidence_id)
+    return evidence_ids
+
+
+def _support_status_confidence_effect(status: object) -> str:
+    status_text = str(status).upper()
+    if status_text == "VERIFIED":
+        return "Does not lower confidence by itself."
+    return f"Lowers confidence because support is {status_text}."
+
+
+def _review_issue_confidence_effect(severity: ReviewIssueSeverity) -> str:
+    if severity == ReviewIssueSeverity.BLOCKING:
+        return "Needs attention before relying on the memo."
+    if severity == ReviewIssueSeverity.WARNING:
+        return "May lower confidence until reviewed."
+    return "Does not change score by itself."
+
+
 def _active_evidence_review_issues(
     evidence_review: DealEvidenceReview,
 ) -> list[ReviewIssueSummary]:
@@ -2395,6 +2807,9 @@ def _cited_evidence_lines(
     for question in scored_deal.diligence_questions:
         for evidence_id in question.evidence_ids:
             add_id(evidence_id)
+    for claim in store.claims:
+        for citation in claim.citations:
+            add_id(citation.evidence_id)
     for claim in validated_verified_claims(store):
         for citation in claim.citations:
             add_id(citation.evidence_id)
