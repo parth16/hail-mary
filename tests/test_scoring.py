@@ -36,6 +36,7 @@ from hailmary.schemas.scoring import (
     ConfidenceLevel,
     DiligenceQuestion,
     DiligenceQuestionCategory,
+    DiligenceResearchContext,
     FundabilityRisk,
     KillGate,
     PMFLevel,
@@ -529,6 +530,66 @@ def test_conflicting_traction_creates_high_priority_customer_question() -> None:
     _assert_questions_have_lineage(scored.diligence_questions)
 
 
+def test_conflicting_traction_question_preserves_conflicting_ids_when_support_is_capped() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        *[
+            _evidence(
+                f"ev_positive_{index}",
+                f"ARR revenue growth with paid customers in cohort {index}.",
+            )
+            for index in range(1, 7)
+        ],
+        _evidence("ev_negative_traction", "No customers or revenue yet."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    question = next(
+        question
+        for question in scored.diligence_questions
+        if question.question == "Resolve the conflicting customer traction signals."
+    )
+
+    assert len(question.supporting_evidence_ids) == 5
+    assert question.conflicting_evidence_ids == ["ev_negative_traction"]
+    assert "ev_negative_traction" in question.evidence_ids
+    assert len(question.evidence_ids) <= 5
+
+
+def test_projected_growth_does_not_create_traction_conflict() -> None:
+    evidence = [
+        _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),
+        _evidence("ev_current", "Current ARR revenue with paid customers."),
+        _evidence("ev_projection", "Projected growth is expected next year."),
+        _evidence("ev_funding", "Lead investor committed and seed round is active."),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert all(
+        question.question != "Resolve the conflicting customer traction signals."
+        for question in scored.diligence_questions
+    )
+
+
 def test_weak_evidence_creates_verification_question() -> None:
     evidence = [
         _evidence(
@@ -564,6 +625,26 @@ def test_weak_evidence_creates_verification_question() -> None:
     _assert_questions_have_lineage(scored.diligence_questions)
 
 
+def test_pre_money_without_round_size_asks_for_round_size() -> None:
+    evidence = [_evidence("ev_valuation", "Pre-money valuation $40M.")]
+    claims = [_claim("pre-money valuation", "$40M", "ev_valuation")]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    question = next(
+        question
+        for question in scored.diligence_questions
+        if question.question == "Confirm the round size for the verified pre-money valuation."
+    )
+
+    assert question.category == DiligenceQuestionCategory.FINANCING_TERMS
+    assert question.evidence_ids == ["ev_valuation"]
+    assert question.missing_evidence == ["verified round size for pre-money valuation"]
+
+
 def test_empty_evidence_creates_compact_baseline_question_set() -> None:
     scored = score_evidence_store(
         _store(evidence=[], claims=[]),
@@ -581,6 +662,49 @@ def test_empty_evidence_creates_compact_baseline_question_set() -> None:
     }
     assert all(question.rank_score > 0 for question in scored.diligence_questions)
     assert all(question.missing_evidence for question in scored.diligence_questions)
+    _assert_questions_have_lineage(scored.diligence_questions)
+
+
+def test_empty_evidence_includes_research_gap_question() -> None:
+    scored = score_evidence_store(
+        _store(evidence=[], claims=[]),
+        config=AppConfig(data_dir=Path("data")),
+        research_context=DiligenceResearchContext(
+            planned_task_count=2,
+            incomplete_search_count=1,
+            no_prepared_result_companies=["ResearchCo"],
+        ),
+    )
+
+    question = next(
+        question
+        for question in scored.diligence_questions
+        if question.category == DiligenceQuestionCategory.MARKET
+    )
+
+    assert "completed external research searches" in question.missing_evidence
+    assert "prepared external research for requested companies" in question.missing_evidence
+    _assert_questions_have_lineage(scored.diligence_questions)
+
+
+def test_warning_only_research_context_creates_research_question() -> None:
+    scored = score_evidence_store(
+        _strong_store(deal_id="deal_research", company_name="ResearchCo"),
+        config=AppConfig(data_dir=Path("data")),
+        research_context=DiligenceResearchContext(
+            planned_task_count=1,
+            imported_record_count=1,
+            warning_count=1,
+        ),
+    )
+
+    question = next(
+        question
+        for question in scored.diligence_questions
+        if question.category == DiligenceQuestionCategory.MARKET
+    )
+
+    assert question.missing_evidence == ["resolved external research warnings"]
     _assert_questions_have_lineage(scored.diligence_questions)
 
 

@@ -213,6 +213,10 @@ NEGATED_TRACTION_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+ABSENCE_TRACTION_PATTERNS = (
+    NEGATED_TRACTION_PATTERNS[0],
+    *NEGATED_TRACTION_PATTERNS[2:],
+)
 BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_FUNDING_CONCERN_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
@@ -1507,6 +1511,9 @@ def _diligence_questions(
                 ),
             ]
         )
+        research_question = _research_status_question(research_context)
+        if research_question is not None:
+            questions.append(research_question)
         return _rank_questions(questions)
 
     if valid_conflicts:
@@ -1565,6 +1572,23 @@ def _diligence_questions(
                     "verified discount",
                     "verified minimum check",
                 ],
+            )
+        )
+    elif "verified round size for pre-money valuation" in net_return.missing_inputs:
+        questions.append(
+            _question(
+                category=DiligenceQuestionCategory.FINANCING_TERMS,
+                question="Confirm the round size for the verified pre-money valuation.",
+                reason=(
+                    "A pre-money valuation needs the round size before Hail Mary can "
+                    "calculate the post-money entry valuation."
+                ),
+                materiality_score=5,
+                decision_impact_score=5,
+                missing_evidence_score=5,
+                confidence_gap_score=4,
+                supporting_evidence_ids=net_return.evidence_ids,
+                missing_evidence=["verified round size for pre-money valuation"],
             )
         )
     elif not _has_readable_pricing_term(verified_claims):
@@ -1711,7 +1735,7 @@ def _question(
     supporting_ids = _dedupe_strings(supporting_evidence_ids)
     conflicting_ids = _dedupe_strings(conflicting_evidence_ids)
     missing_labels = _dedupe_strings(missing_evidence, limit=None)
-    evidence_ids = _dedupe_strings([*supporting_ids, *conflicting_ids])
+    evidence_ids = _question_evidence_ids(supporting_ids, conflicting_ids)
     return DiligenceQuestion(
         priority=0,
         question=question,
@@ -1733,6 +1757,22 @@ def _question(
         conflicting_evidence_ids=conflicting_ids,
         missing_evidence=missing_labels,
     )
+
+
+def _question_evidence_ids(
+    supporting_evidence_ids: list[str],
+    conflicting_evidence_ids: list[str],
+) -> list[str]:
+    if not conflicting_evidence_ids:
+        return _dedupe_strings(supporting_evidence_ids)
+    if not supporting_evidence_ids:
+        return _dedupe_strings(conflicting_evidence_ids)
+    evidence_ids = _dedupe_strings(
+        [*supporting_evidence_ids[:4], *conflicting_evidence_ids]
+    )
+    if any(evidence_id in evidence_ids for evidence_id in conflicting_evidence_ids):
+        return evidence_ids
+    return _dedupe_strings([*supporting_evidence_ids[:4], conflicting_evidence_ids[0]])
 
 
 def _rank_questions(questions: list[DiligenceQuestion]) -> list[DiligenceQuestion]:
@@ -1847,6 +1887,8 @@ def _research_status_question(
         missing_evidence.append("run or explicitly skipped external research providers")
     if research_context.stale_record_count:
         missing_evidence.append("current external research records")
+    if research_context.warning_count:
+        missing_evidence.append("resolved external research warnings")
     if research_context.no_prepared_result_companies:
         missing_evidence.append("prepared external research for requested companies")
     if not missing_evidence:
@@ -2204,7 +2246,7 @@ def _negative_traction_evidence(evidence: list[EvidenceRecord]) -> list[Evidence
     return [
         record
         for record in evidence
-        if _negated_spans(record.text, NEGATED_TRACTION_PATTERNS)
+        if _negated_spans(record.text, ABSENCE_TRACTION_PATTERNS)
     ]
 
 
