@@ -1857,6 +1857,7 @@ def test_score_evidence_store_ignores_qualified_negated_traction() -> None:
         "The company has no actual customers yet.",
         "The company has no customer revenue yet.",
         "The company lacks customers and revenue.",
+        "The company operates without any customers or revenue and lacks usage and retention.",
     ],
 )
 def test_score_evidence_store_ignores_common_negative_traction_phrases(

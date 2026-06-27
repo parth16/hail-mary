@@ -38,7 +38,7 @@ def test_builtin_eval_metadata_covers_required_phase_6_categories() -> None:
 def test_run_builtin_evals_passes_all_synthetic_cases(tmp_path: Path) -> None:
     summary = run_builtin_evals(work_dir=tmp_path)
 
-    assert summary.total_count == 37
+    assert summary.total_count == 47
     assert summary.passed
     assert summary.failed_results == []
 
@@ -68,6 +68,16 @@ def test_run_builtin_evals_filters_by_category(tmp_path: Path) -> None:
         "score-stage-aware-v2",
         "score-return-math-missing-v2",
         "score-calibration-guards",
+        "score-strong-team-weak-pmf-pass",
+        "score-high-traction-overvalued-pass",
+        "score-missing-deal-terms-v3-pass",
+        "score-conflicting-revenue-customers-pass",
+        "score-stale-public-validation-pass",
+        "score-model-invest-guardrail-pass",
+        "score-no-or-unsafe-evidence-pass",
+        "score-small-budget-pass",
+        "score-platform-minimum-above-capital-pass",
+        "score-negated-traction-funding-pass",
     }
     assert summary.passed
 
