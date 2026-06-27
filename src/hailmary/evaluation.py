@@ -41,6 +41,8 @@ from hailmary.research import (
     GitHubRepositorySearchClient,
     ResearchImportError,
     ResearchImportRunSummary,
+    ResearchProviderRunStatus,
+    ResearchProviderStatusSummary,
     ResearchWorkflowError,
     ResearchWorkflowRunSummary,
     SbirAwardsClient,
@@ -1822,7 +1824,7 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
             f"- {workflow.unresolved_manual_task_count} planned source tasks still need manual "
             "or local-file work."
         )
-    lines.extend(_research_provider_status_memo_lines(workflow))
+    lines.extend(_research_provider_status_memo_lines(research_run))
     if workflow.no_prepared_result_companies:
         lines.append(
             "- No prepared external research results yet for: "
@@ -1854,9 +1856,11 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
     return lines
 
 
-def _research_provider_status_memo_lines(workflow: ResearchWorkflowRunSummary) -> list[str]:
+def _research_provider_status_memo_lines(
+    research_run: EvaluationResearchRun,
+) -> list[str]:
     statuses = sorted(
-        workflow.summary.provider_statuses,
+        _evaluation_research_provider_statuses(research_run),
         key=lambda status: (status.provider_name.casefold(), status.provider_id),
     )
     if not statuses:
@@ -1885,6 +1889,57 @@ def _research_provider_status_memo_lines(workflow: ResearchWorkflowRunSummary) -
             f"{status.status.value.replace('_', ' ')}{detail_text}."
         )
     return lines
+
+
+def _evaluation_research_provider_statuses(
+    research_run: EvaluationResearchRun,
+) -> list[ResearchProviderStatusSummary]:
+    statuses = {
+        status.provider_id: status
+        for status in research_run.workflow.summary.provider_statuses
+    }
+    for import_summary in research_run.imports:
+        for provider_id, imported_count in import_summary.provider_imported_counts.items():
+            if imported_count <= 0:
+                continue
+            existing = statuses.get(provider_id)
+            provider_name = (
+                import_summary.provider_names.get(provider_id)
+                or (existing.provider_name if existing is not None else provider_id)
+            )
+            statuses[provider_id] = ResearchProviderStatusSummary(
+                provider_id=provider_id,
+                provider_name=provider_name,
+                status=_provider_status_after_import(existing),
+                planned_count=existing.planned_count if existing is not None else 0,
+                collected_count=0,
+                imported_count=(
+                    (existing.imported_count if existing is not None else 0)
+                    + imported_count
+                ),
+                warning_count=existing.warning_count if existing is not None else 0,
+                no_exact_result_companies=(
+                    existing.no_exact_result_companies if existing is not None else []
+                ),
+                incomplete_search=(
+                    existing.incomplete_search if existing is not None else False
+                ),
+                failure=existing.failure if existing is not None else None,
+            )
+    return list(statuses.values())
+
+
+def _provider_status_after_import(
+    existing: ResearchProviderStatusSummary | None,
+) -> ResearchProviderRunStatus:
+    if existing is None:
+        return ResearchProviderRunStatus.IMPORTED
+    if existing.status in {
+        ResearchProviderRunStatus.FAILED,
+        ResearchProviderRunStatus.INCOMPLETE_SEARCH,
+    }:
+        return existing.status
+    return ResearchProviderRunStatus.IMPORTED
 
 
 def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:

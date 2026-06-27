@@ -6684,6 +6684,9 @@ def test_import_research_results_imports_stale_sources_as_stale(
 
     assert summary.imported_count == 2
     assert summary.stale_count == 1
+    assert summary.provider_imported_counts == {"sec_form_d": 2}
+    assert summary.provider_stale_counts == {"sec_form_d": 1}
+    assert summary.provider_names == {"sec_form_d": "SEC EDGAR Form D search"}
     assert deal.evidence_store_path is not None
     saved_store = EvidenceStore.model_validate_json(
         deal.evidence_store_path.read_text(encoding="utf-8")

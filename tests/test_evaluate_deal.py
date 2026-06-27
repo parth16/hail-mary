@@ -458,6 +458,8 @@ def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "## External Research" in memo_text
     assert "Imported 1 external research evidence record before scoring." in memo_text
+    assert "Company website: imported (1 imported record)." in memo_text
+    assert "Company website: planned (1 ready-to-import result)." not in memo_text
 
 
 def test_evaluate_deal_excludes_actioned_evidence_before_scoring_and_packets(
