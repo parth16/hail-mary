@@ -63,6 +63,7 @@ from hailmary.schemas.scoring import (
     Recommendation,
     ScoredDeal,
     ScoreFactor,
+    ScoreSupportStatus,
 )
 
 runner = CliRunner()
@@ -1724,6 +1725,124 @@ def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(
     assert "Valuation cap" not in result.output
 
 
+def test_evaluate_deal_cli_commentary_omits_factor_and_model_rationale_details(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="CommentaryPrivacyCo",
+        recommendation=Recommendation.INVEST,
+        check_size=1_000,
+        total_score=85,
+        confidence=ConfidenceLevel.HIGH,
+        one_line_reason=(
+            "Recommended because the score was 85/100, confidence was high, "
+            "and no kill gate triggered."
+        ),
+        score_factors=[
+            ScoreFactor(
+                name="Valuation and net return",
+                score=20,
+                max_score=20,
+                explanation="PRIVATE_FACTOR_DETAIL: verified entry valuation was synthetic.",
+                support_status=ScoreSupportStatus.VERIFIED,
+            )
+        ],
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="PRIVATE_MODEL_REASON: synthetic model rationale should stay private.",
+        evidence=[AgentEvidenceReference(evidence_id="ev-1")],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        final_output=AgentReviewOutput(
+            deal_id=scored_deal.deal_id,
+            company_name=scored_deal.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            recommendation=final_recommendation,
+        ),
+    )
+
+    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+    rendered = "\n".join([*commentary.positives, *commentary.risks, commentary.decisive_factor])
+
+    assert "PRIVATE_FACTOR_DETAIL" not in rendered
+    assert "PRIVATE_MODEL_REASON" not in rendered
+    assert "valuation and return math looked strongest" in rendered
+    assert "Review the private memo for the source-linked rationale" in rendered
+
+
+def test_evaluate_deal_cli_commentary_preserves_uncertainty_labels(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="NeedsDiligenceCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Passed because no usable source-linked evidence was available.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="NEEDS_DILIGENCE: No usable source-linked evidence was available.",
+        evidence=[],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+    )
+
+    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+
+    assert commentary.decisive_factor.startswith("Needs diligence:")
+
+
+def test_evaluate_deal_cli_commentary_separates_check_size_caps_from_overrides(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="CappedCheckCo",
+        recommendation=Recommendation.INVEST,
+        check_size=5_000,
+        total_score=85,
+        one_line_reason=(
+            "Recommended because the score was 85/100, confidence was high, "
+            "and no kill gate triggered."
+        ),
+    )
+    model_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.INVEST,
+        check_size=10_000,
+        reason="Synthetic model recommendation.",
+        evidence=[AgentEvidenceReference(evidence_id="ev-1")],
+    )
+    final_recommendation = model_recommendation.model_copy(update={"check_size": 5_000})
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        final_output=AgentReviewOutput(
+            deal_id=scored_deal.deal_id,
+            company_name=scored_deal.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            recommendation=model_recommendation,
+        ),
+    )
+
+    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+
+    assert "deterministic allocation set the final check size" in commentary.decisive_factor
+    assert "controlled the final recommendation" not in commentary.decisive_factor
+
+
 def test_forced_pass_warns_when_rule_based_citations_are_filtered() -> None:
     evidence = _evidence_record(
         "ev-instruction",
@@ -2799,6 +2918,39 @@ def _write_company_folder(
         text = f"{text} " + ("filler " * 500) + "PRIVATE_FULL_TEXT_MARKER_AT_END"
     (company_dir / "memo.txt").write_text(text, encoding="utf-8")
     return company_dir
+
+
+def _commentary_result(
+    root: Path,
+    *,
+    scored_deal: ScoredDeal,
+    final_recommendation: AgentRecommendationRationale,
+    final_output: AgentReviewOutput | None = None,
+) -> evaluation.DealEvaluationResult:
+    return evaluation.DealEvaluationResult(
+        deal_id=scored_deal.deal_id,
+        company_name=scored_deal.company_name,
+        evaluation_mode="model-backed",
+        mode_explanation="Synthetic test mode.",
+        document_count=1,
+        evidence_count=1,
+        claim_count=0,
+        conflict_count=0,
+        deterministic_score=scored_deal,
+        final_recommendation=final_recommendation,
+        final_output=final_output
+        or AgentReviewOutput(
+            deal_id=scored_deal.deal_id,
+            company_name=scored_deal.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            recommendation=final_recommendation,
+        ),
+        specialist_results=[],
+        failed_specialist_roles=[],
+        final_memo_path=root / "final-evaluation.md",
+        agent_output_dir=root / "agent-outputs",
+        ocr_status="OCR was not enabled.",
+    )
 
 
 def _research_workflow_summary(

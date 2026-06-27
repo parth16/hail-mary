@@ -269,7 +269,10 @@ def _cli_positive_points(result: DealEvaluationResult) -> list[str]:
             continue
         _add_cli_point(
             points,
-            f"{_operator_factor_name(factor.name)} looked strongest: {factor.explanation}",
+            (
+                f"{_operator_factor_name(factor.name)} looked strongest among the "
+                "rule-based categories with verified or inferred support."
+            ),
         )
     if points:
         return points
@@ -294,7 +297,7 @@ def _cli_risk_points(result: DealEvaluationResult) -> list[str]:
             points,
             (
                 "A rule-based guardrail, meaning a fixed safety rule, triggered: "
-                f"{gate.reason}"
+                f"{_operator_factor_name(gate.name)}."
             ),
         )
     if result.evidence_review is not None:
@@ -328,7 +331,10 @@ def _cli_risk_points(result: DealEvaluationResult) -> list[str]:
         elif _score_factor_ratio(factor) <= 0.50:
             _add_cli_point(
                 points,
-                f"{_operator_factor_name(factor.name)} was weak: {factor.explanation}",
+                (
+                    f"{_operator_factor_name(factor.name)} was one of the weakest "
+                    "rule-based categories."
+                ),
             )
     if len(points) < MAX_CLI_COMMENTARY_ITEMS and result.failed_specialist_roles:
         _add_cli_point(
@@ -355,20 +361,33 @@ def _cli_decisive_factor(result: DealEvaluationResult) -> str:
     final_recommendation = result.final_recommendation.recommendation
     deterministic = result.deterministic_score
     reason = _reason_fragment(deterministic.one_line_reason)
-    if _final_model_was_overridden(result):
+    uncertainty_prefix = _uncertainty_prefix(result.final_recommendation.reason)
+    if _final_recommendation_was_overridden(result):
         return _clean_cli_commentary_text(
             (
-                f"The recommendation is {final_recommendation} because deterministic "
-                f"guardrails controlled the final recommendation: {reason}. The model "
-                "recommendation could not override the fixed rule-based score or gates."
+                f"{uncertainty_prefix}The recommendation is {final_recommendation} "
+                "because deterministic guardrails controlled the final recommendation: "
+                f"{reason}. The model recommendation could not override the fixed "
+                "rule-based score or gates."
+            ),
+            max_chars=360,
+        )
+    if _final_check_size_was_capped(result):
+        return _clean_cli_commentary_text(
+            (
+                f"{uncertainty_prefix}The recommendation is INVEST because final "
+                "review and rule-based scoring both cleared the deal. The recommended check is "
+                f"{_format_check_size(result.final_recommendation.check_size)} because "
+                "the deterministic allocation set the final check size."
             ),
             max_chars=360,
         )
     if final_recommendation == Recommendation.INVEST:
         return _clean_cli_commentary_text(
             (
-                "The recommendation is INVEST because rule-based scoring cleared the "
-                f"bar at {deterministic.total_score}/{deterministic.max_score}, "
+                f"{uncertainty_prefix}The recommendation is INVEST because rule-based "
+                "scoring cleared the bar at "
+                f"{deterministic.total_score}/{deterministic.max_score}, "
                 "the final check stayed at "
                 f"{_format_check_size(result.final_recommendation.check_size)}, "
                 f"and no rule-based guardrail forced a pass. {reason}."
@@ -377,29 +396,24 @@ def _cli_decisive_factor(result: DealEvaluationResult) -> str:
         )
     if deterministic.recommendation == Recommendation.PASS:
         return _clean_cli_commentary_text(
-            f"The recommendation is PASS because {reason}.",
-            max_chars=360,
-        )
-    model_reason = _safe_model_reason(result.final_recommendation)
-    if model_reason is not None:
-        return _clean_cli_commentary_text(
-            (
-                "The recommendation is PASS because final review did not clear the deal "
-                f"after rule-based scoring had suggested INVEST. {model_reason}"
-            ),
+            f"{uncertainty_prefix}The recommendation is PASS because {reason}.",
             max_chars=360,
         )
     return _clean_cli_commentary_text(
         (
-            "The recommendation is PASS because final review did not clear the deal "
-            "after rule-based scoring had suggested INVEST."
+            f"{uncertainty_prefix}The recommendation is PASS because final review did "
+            "not clear the deal after rule-based scoring had suggested INVEST. Review "
+            "the private memo for the source-linked rationale."
         ),
         max_chars=360,
     )
 
 
 def _cli_commentary_source(result: DealEvaluationResult) -> str:
-    if result.evaluation_mode == "model-backed" and not _final_model_was_overridden(result):
+    if (
+        result.evaluation_mode == "model-backed"
+        and not _final_recommendation_was_overridden(result)
+    ):
         return "mixed"
     return "deterministic"
 
@@ -441,8 +455,10 @@ def _clean_cli_commentary_text(
     max_chars: int = MAX_CLI_COMMENTARY_CHARS,
 ) -> str:
     collapsed = " ".join(str(text).split())
-    while collapsed.startswith(("INFERRED:", "NEEDS_DILIGENCE:")):
-        collapsed = collapsed.split(":", 1)[1].strip()
+    if collapsed.startswith("NEEDS_DILIGENCE:"):
+        collapsed = f"Needs diligence: {collapsed.split(':', 1)[1].strip()}"
+    elif collapsed.startswith("INFERRED:"):
+        collapsed = f"Inferred: {collapsed.split(':', 1)[1].strip()}"
     if len(collapsed) <= max_chars:
         return collapsed
     return collapsed[:max_chars].rstrip() + "..."
@@ -463,25 +479,29 @@ def _reason_fragment(reason: str) -> str:
     return (cleaned[0].lower() + cleaned[1:]).rstrip(".")
 
 
-def _final_model_was_overridden(result: DealEvaluationResult) -> bool:
+def _uncertainty_prefix(reason: str) -> str:
+    if reason.startswith("NEEDS_DILIGENCE:"):
+        return "Needs diligence: "
+    if reason.startswith("INFERRED:"):
+        return "Inferred: "
+    return ""
+
+
+def _final_recommendation_was_overridden(result: DealEvaluationResult) -> bool:
+    model_recommendation = result.final_output.recommendation
+    if model_recommendation is None:
+        return False
+    return model_recommendation.recommendation != result.final_recommendation.recommendation
+
+
+def _final_check_size_was_capped(result: DealEvaluationResult) -> bool:
     model_recommendation = result.final_output.recommendation
     if model_recommendation is None:
         return False
     return (
-        model_recommendation.recommendation != result.final_recommendation.recommendation
-        or model_recommendation.check_size != result.final_recommendation.check_size
+        model_recommendation.recommendation == result.final_recommendation.recommendation
+        and model_recommendation.check_size != result.final_recommendation.check_size
     )
-
-
-def _safe_model_reason(
-    recommendation: AgentRecommendationRationale,
-) -> str | None:
-    reason = _clean_cli_commentary_text(recommendation.reason, max_chars=260)
-    for reference in recommendation.evidence:
-        quote = reference.quote
-        if quote and len(quote) >= 20 and quote in reason:
-            return None
-    return reason or None
 
 
 def _human_list(values: Sequence[str]) -> str:
