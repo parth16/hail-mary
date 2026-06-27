@@ -1538,6 +1538,111 @@ def test_final_memo_v2_escapes_dynamic_tables_and_questions() -> None:
         assert expected in memo_text
 
 
+def test_final_memo_evidence_quality_revalidates_stale_claim_status() -> None:
+    evidence = _evidence_record("ev-stale", "Valuation cap $8M.", "memo.txt")
+    claim = _claim_record("claim-stale", evidence, normalized_value="8000000")
+    stale_citation = claim.citations[0].model_copy(
+        update={"quote": "Valuation cap $10M."}
+    )
+    claim = claim.model_copy(update={"citations": [stale_citation]})
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="StaleClaimCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence],
+        claims=[claim],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="StaleClaimCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Synthetic stale claim test.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Synthetic stale claim test.",
+    )
+    final_output = AgentReviewOutput(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        store,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+
+    assert "| deal\\_term | local\\_file | quote\\_mismatch |" in memo_text
+    assert "not used directly by deterministic score" in memo_text
+    assert "- ev-stale:" in memo_text
+
+
+def test_final_memo_evidence_quality_citations_are_in_evidence_cited() -> None:
+    evidence = _evidence_record("ev-quality-only", "Unverified side note.", "note.txt")
+    claim = _claim_record("claim-quality-only", evidence, normalized_value="side-note")
+    citation = claim.citations[0].model_copy(
+        update={"verification_status": VerificationStatus.MISSING_CITATION}
+    )
+    claim = claim.model_copy(
+        update={
+            "label": "side note",
+            "citations": [citation],
+            "verification_status": VerificationStatus.MISSING_CITATION,
+            "quality": claim.quality.model_copy(
+                update={"verification_status": VerificationStatus.MISSING_CITATION}
+            ),
+        }
+    )
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="QualityOnlyCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        evidence=[evidence],
+        claims=[claim],
+    )
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="QualityOnlyCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Synthetic quality-only claim test.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Synthetic quality-only claim test.",
+    )
+    final_output = AgentReviewOutput(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        store,
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+        final_review_was_model=False,
+    )
+
+    assert "| deal\\_term | local\\_file | missing\\_citation |" in memo_text
+    assert "ev-quality-only" in memo_text
+    assert "- ev-quality-only:" in memo_text
+
+
 def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

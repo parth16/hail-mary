@@ -62,7 +62,12 @@ from hailmary.schemas.agents import (
     AgentValidationResult,
 )
 from hailmary.schemas.documents import IngestedDeal, IngestedDocument, IngestionSummary
-from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
+from hailmary.schemas.evidence import (
+    ClaimRecord,
+    EvidenceRecord,
+    EvidenceStore,
+    VerificationStatus,
+)
 from hailmary.schemas.scoring import ConfidenceLevel, Recommendation, ScoredDeal
 from hailmary.scoring.scorer import (
     score_evidence_store,
@@ -2028,19 +2033,25 @@ def _evidence_quality_memo_lines(
 ) -> list[str]:
     if not store.claims:
         return ["- No claim-level evidence quality rows were available."]
+    evidence_by_id = {evidence.id: evidence for evidence in store.evidence}
     rows: list[list[object]] = []
     for claim in store.claims:
         quality = claim.quality
+        verification_status = _claim_live_verification_status(claim, evidence_by_id)
         rows.append(
             [
                 quality.claim_type,
                 quality.source_type,
-                quality.verification_status,
+                verification_status,
                 quality.recency,
                 quality.reliability,
                 f"{quality.confidence:.0%}",
                 quality.materiality,
-                _claim_score_impact(claim, scored_deal),
+                _claim_score_impact(
+                    claim,
+                    scored_deal,
+                    verification_status=verification_status,
+                ),
                 _evidence_id_cell(_claim_citation_evidence_ids(claim)),
             ]
         )
@@ -2060,12 +2071,16 @@ def _evidence_quality_memo_lines(
     )
 
 
-def _claim_score_impact(claim: ClaimRecord, scored_deal: ScoredDeal) -> str:
+def _claim_score_impact(
+    claim: ClaimRecord,
+    scored_deal: ScoredDeal,
+    *,
+    verification_status: VerificationStatus,
+) -> str:
     quality_impact = claim.quality.score_impact
     if quality_impact and quality_impact != "not_scored_yet":
         return quality_impact
 
-    claim_evidence_ids = set(_claim_citation_evidence_ids(claim))
     impacts: list[str] = []
 
     def add_impact(text: str) -> None:
@@ -2073,14 +2088,58 @@ def _claim_score_impact(claim: ClaimRecord, scored_deal: ScoredDeal) -> str:
             impacts.append(text)
 
     for gate in scored_deal.kill_gates:
-        if gate.triggered and claim_evidence_ids.intersection(gate.evidence_ids):
+        if not gate.triggered:
+            continue
+        gate_matches_claim = (
+            gate.name == "Conflicting material deal terms"
+            and verification_status == VerificationStatus.CONFLICTED
+        ) or (
+            gate.name == "Valuation far ahead of evidence" and _claim_is_pricing(claim)
+        ) or (
+            gate.name == "Platform minimum above maximum check"
+            and claim.label == "minimum investment"
+        )
+        if gate_matches_claim:
             add_impact(f"triggered kill gate: {gate.name}")
-    for factor in scored_deal.score_factors:
-        if claim_evidence_ids.intersection(factor.evidence_ids):
-            add_impact(f"score factor: {factor.name}")
-    if claim_evidence_ids.intersection(scored_deal.net_return.evidence_ids):
-        add_impact("return math input")
+
+    score_trusted_statuses = {VerificationStatus.VERIFIED, VerificationStatus.CONFLICTED}
+    if verification_status in score_trusted_statuses:
+        add_impact("score factor: Deal terms")
+        if _claim_is_pricing(claim):
+            add_impact("score factor: Valuation and net return")
+            add_impact("return math input")
     return "; ".join(impacts) if impacts else "not used directly by deterministic score"
+
+
+def _claim_is_pricing(claim: ClaimRecord) -> bool:
+    return claim.label in {
+        "valuation cap",
+        "post-money valuation",
+        "pre-money valuation",
+    }
+
+
+def _claim_live_verification_status(
+    claim: ClaimRecord,
+    evidence_by_id: Mapping[str, EvidenceRecord],
+) -> VerificationStatus:
+    if not claim.citations:
+        return VerificationStatus.MISSING_CITATION
+    for citation in claim.citations:
+        if citation.verification_status != VerificationStatus.VERIFIED:
+            return citation.verification_status
+        evidence = evidence_by_id.get(citation.evidence_id)
+        if evidence is None:
+            return VerificationStatus.EVIDENCE_NOT_FOUND
+        start = citation.source_span_start
+        end = citation.source_span_end
+        if not (0 <= start < end <= len(evidence.text)):
+            return VerificationStatus.SPAN_MISMATCH
+        if evidence.text[start:end] != citation.quote:
+            return VerificationStatus.QUOTE_MISMATCH
+    if claim.verification_status == VerificationStatus.CONFLICTED:
+        return VerificationStatus.CONFLICTED
+    return VerificationStatus.VERIFIED
 
 
 def _missing_data_memo_lines(
@@ -2734,6 +2793,9 @@ def _cited_evidence_lines(
     for question in scored_deal.diligence_questions:
         for evidence_id in question.evidence_ids:
             add_id(evidence_id)
+    for claim in store.claims:
+        for citation in claim.citations:
+            add_id(citation.evidence_id)
     for claim in validated_verified_claims(store):
         for citation in claim.citations:
             add_id(citation.evidence_id)
