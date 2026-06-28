@@ -1401,6 +1401,48 @@ def test_run_research_workflow_counts_only_unresolved_manual_tasks(
     assert all(task["provider_id"] != "sam_gov" for task in queue_payload["tasks"])
 
 
+def test_run_research_workflow_keeps_public_web_topics_unresolved_individually(
+    tmp_path: Path,
+) -> None:
+    config, _deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    _write_results(
+        results_path,
+        [
+            _research_result(
+                provider_id="public_web",
+                provider_name="Public web and press search",
+                research_topic="market",
+                title="Acme AI market source",
+                text="Acme AI participates in a growing synthetic market.",
+                retrieved_at="2025-12-31T12:00:00Z",
+                source_url="https://example.com/acme-ai-market",
+                licensing_notes="Public web source.",
+            )
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        results_files=[results_path],
+        created_at=BUILT_AT,
+    )
+
+    public_web_statuses = {
+        status.research_topic: status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "public_web"
+    }
+    assert public_web_statuses["market"].status == ResearchProviderRunStatus.PLANNED
+    assert public_web_statuses["market"].collected_count == 1
+    assert public_web_statuses["competition"].status == (
+        ResearchProviderRunStatus.MANUAL_NEEDED
+    )
+    assert public_web_statuses["industry"].status == ResearchProviderRunStatus.MANUAL_NEEDED
+    assert result.summary.manual_needed_provider_count >= 2
+    assert result.unresolved_manual_task_count >= 2
+
+
 def test_run_research_workflow_local_public_manual_provider_is_ready_to_import(
     tmp_path: Path,
 ) -> None:

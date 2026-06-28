@@ -19,6 +19,7 @@ from hailmary.config import (
 from hailmary.evaluation import (
     DealEvaluationResult,
     EvaluationError,
+    _diligence_research_context,
     evaluate_deal_folder,
 )
 from hailmary.evidence.actions import EvidenceActionError, apply_evidence_actions
@@ -485,6 +486,7 @@ def _allocate_batch(
             config=config,
             capital_remaining=ranking_capital,
             exposure_state=base_exposure_state,
+            research_context=_diligence_research_context(result.research_run),
         )
     ranked_successes = sorted(
         [outcome for outcome in successful_outcomes if outcome.folder in ranking_scores],
@@ -516,6 +518,7 @@ def _allocate_batch(
             config=config,
             capital_remaining=remaining_capital,
             exposure_state=exposure_state,
+            research_context=_diligence_research_context(result.research_run),
         )
         if reallocated_score.recommendation == Recommendation.INVEST:
             allocation_sequence += 1

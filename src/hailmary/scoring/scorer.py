@@ -466,6 +466,8 @@ def score_evidence_store(
         )
     if recommendation == Recommendation.INVEST and check_size == 0:
         recommendation = Recommendation.PASS
+        calculated_risk = False
+        calculated_risk_reason = None
         kill_gates.append(
             KillGate(
                 name="No available check size",

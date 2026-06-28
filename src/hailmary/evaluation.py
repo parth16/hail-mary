@@ -1469,7 +1469,7 @@ def _rule_based_final_decision(
     audit_guardrail_reason = (
         _evidence_audit_guardrail_reason(
             evidence_audit,
-            calculated_risk_mode=scored_deal.calculated_risk_mode,
+            calculated_risk=scored_deal.calculated_risk,
         )
         if scored_deal.recommendation == Recommendation.INVEST
         else None
@@ -2879,7 +2879,7 @@ def _guard_final_decision(
 
     audit_guardrail_reason = _evidence_audit_guardrail_reason(
         evidence_audit,
-        calculated_risk_mode=scored_deal.calculated_risk_mode,
+        calculated_risk=scored_deal.calculated_risk,
     )
     if audit_guardrail_reason and scored_deal.recommendation == Recommendation.INVEST:
         warning = (
@@ -3198,11 +3198,11 @@ def _positive_decision_evidence_ids(
             continue
         if factor.score / factor.max_score < 0.65:
             continue
-        for evidence_id in factor.evidence_ids[:3]:
+        for evidence_id in factor.evidence_ids:
             add_id(evidence_id)
-        if len(evidence_ids) >= 5:
-            return evidence_ids
-    for evidence in _safe_evidence_records(store):
+    if evidence_ids:
+        return evidence_ids
+    for evidence in store.evidence:
         if evidence.id in evidence_ids:
             continue
         if any(
@@ -3210,8 +3210,6 @@ def _positive_decision_evidence_ids(
             for keyword in ("customer", "revenue", "retention", "growth", "lead investor")
         ):
             add_id(evidence.id)
-        if len(evidence_ids) >= 5:
-            break
     return evidence_ids
 
 
@@ -3762,7 +3760,7 @@ def _evidence_audit_limitations(
 def _evidence_audit_guardrail_reason(
     evidence_audit: EvidenceCompletenessAudit | None,
     *,
-    calculated_risk_mode: bool = False,
+    calculated_risk: bool = False,
 ) -> str | None:
     if evidence_audit is None:
         return None
@@ -3771,7 +3769,7 @@ def _evidence_audit_guardrail_reason(
         for finding in evidence_audit.findings
         if finding.severity == EvidenceAuditSeverity.BLOCKING
     ]
-    if calculated_risk_mode:
+    if calculated_risk:
         blocking_findings = [
             finding
             for finding in blocking_findings

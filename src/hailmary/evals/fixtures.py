@@ -3921,8 +3921,7 @@ def run_evaluate_deal_audit_guardrails_fixture(work_dir: Path) -> None:
         company_name="Synthetic AuditInvestCo",
         body=(
             "Valuation cap $8M. Discount 20%. Round size $1M. "
-            "ARR revenue growth with paid customers and retention. "
-            "Lead investor committed and seed round is active."
+            "One paid customer."
         ),
     )
     pass_company = _write_evaluate_deal_fixture_company(
@@ -3958,6 +3957,10 @@ def run_evaluate_deal_audit_guardrails_fixture(work_dir: Path) -> None:
         forced.deterministic_score.recommendation,
         Recommendation.INVEST,
         "Expected audit fixture scoring to otherwise allow INVEST.",
+    )
+    _expect(
+        forced.deterministic_score.calculated_risk,
+        "Expected audit fixture to use calculated-risk scoring.",
     )
     _expect_equal(
         forced.final_recommendation.recommendation,

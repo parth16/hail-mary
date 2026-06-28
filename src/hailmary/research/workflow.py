@@ -102,6 +102,7 @@ class ResearchProviderRunStatus(StrEnum):
 class ResearchWorkflowSourceSummary(BaseModel):
     provider_id: str
     provider_name: str
+    research_topic: str = "company"
     planned_count: int = 0
     manual_count: int = 0
     live_collectable_count: int = 0
@@ -130,6 +131,7 @@ class ResearchWorkflowCollectionSummary(BaseModel):
 class ResearchProviderStatusSummary(BaseModel):
     provider_id: str
     provider_name: str
+    research_topic: str = "company"
     status: ResearchProviderRunStatus
     planned_count: int = 0
     collected_count: int = 0
@@ -1052,6 +1054,7 @@ def _local_public_provider_statuses(
 ) -> list[ResearchProviderStatusSummary]:
     statuses: list[ResearchProviderStatusSummary] = []
     for provider_id in provider_ids:
+        research_topic = _single_provider_default_research_topic(provider_id)
         result_count = provider_result_counts.get(provider_id, 0)
         company_counts = provider_company_result_counts.get(provider_id, {})
         no_exact_result_companies = sorted(
@@ -1063,6 +1066,7 @@ def _local_public_provider_statuses(
             ResearchProviderStatusSummary(
                 provider_id=provider_id,
                 provider_name=_provider_display_name(provider_id),
+                research_topic=research_topic,
                 status=(
                     ResearchProviderRunStatus.PLANNED
                     if result_count > 0
@@ -1078,12 +1082,15 @@ def _local_public_provider_statuses(
 def _web_provider_statuses(
     tasks: list[WebResearchTaskSummary],
 ) -> list[ResearchProviderStatusSummary]:
-    by_provider: dict[str, list[WebResearchTaskSummary]] = {}
+    by_provider: dict[tuple[str, str], list[WebResearchTaskSummary]] = {}
     for task in tasks:
-        by_provider.setdefault(task.provider_id, []).append(task)
+        by_provider.setdefault(
+            _provider_topic_key(task.provider_id, task.research_topic),
+            [],
+        ).append(task)
 
     statuses: list[ResearchProviderStatusSummary] = []
-    for provider_id, provider_tasks in by_provider.items():
+    for (provider_id, research_topic), provider_tasks in by_provider.items():
         provider_name = provider_tasks[0].provider_name
         fetched_count = sum(1 for task in provider_tasks if task.status == "fetched")
         planned_count = sum(1 for task in provider_tasks if task.status == "planned")
@@ -1110,6 +1117,7 @@ def _web_provider_statuses(
             ResearchProviderStatusSummary(
                 provider_id=provider_id,
                 provider_name=provider_name,
+                research_topic=research_topic,
                 status=status,
                 collected_count=fetched_count,
                 warning_count=len(warnings),
@@ -1146,22 +1154,28 @@ def _import_preview_provider_statuses(
         deal.deal_id: deal.company_name
         for deal in plan.deals
     }
-    provider_counts: dict[str, int] = {}
+    provider_counts: dict[tuple[str, str], int] = {}
     for result in results_file.results:
         company_name = result.company_name
         if company_name is None and result.deal_id is not None:
             company_name = deal_company_names.get(result.deal_id)
         if company_name is None:
             continue
-        provider_counts[result.provider_id] = provider_counts.get(result.provider_id, 0) + 1
+        for research_topic in _resolved_research_result_topics(
+            result.provider_id,
+            result.research_topic,
+        ):
+            key = _provider_topic_key(result.provider_id, research_topic)
+            provider_counts[key] = provider_counts.get(key, 0) + 1
     return [
         ResearchProviderStatusSummary(
             provider_id=provider_id,
             provider_name=_provider_display_name(provider_id),
+            research_topic=research_topic,
             status=ResearchProviderRunStatus.PLANNED,
             collected_count=result_count,
         )
-        for provider_id, result_count in sorted(provider_counts.items())
+        for (provider_id, research_topic), result_count in sorted(provider_counts.items())
         if result_count > 0
     ]
 
@@ -1183,15 +1197,19 @@ def _web_task_needs_manual_work(task: WebResearchTaskSummary) -> bool:
 def _research_workflow_summary(
     workflow: ResearchWorkflowRunSummary,
 ) -> ResearchWorkflowSummary:
-    provider_ids_with_ready_results = _provider_ids_with_ready_results(workflow)
+    provider_topics_with_ready_results = _provider_topics_with_ready_results(workflow)
     statuses = {
-        source.provider_id: ResearchProviderStatusSummary(
+        _provider_topic_key(
+            source.provider_id,
+            source.research_topic,
+        ): ResearchProviderStatusSummary(
             provider_id=source.provider_id,
             provider_name=source.provider_name,
+            research_topic=source.research_topic,
             status=_initial_provider_status(
                 source,
                 workflow,
-                provider_ids_with_ready_results=provider_ids_with_ready_results,
+                provider_topics_with_ready_results=provider_topics_with_ready_results,
             ),
             planned_count=source.planned_count,
         )
@@ -1205,16 +1223,22 @@ def _research_workflow_summary(
 
     for collection in workflow.collections:
         for provider_status in collection.provider_statuses:
-            existing_status = statuses.get(provider_status.provider_id)
+            key = _provider_topic_key(
+                provider_status.provider_id,
+                provider_status.research_topic,
+            )
+            existing_status = statuses.get(key)
             if existing_status is None:
                 existing_status = ResearchProviderStatusSummary(
                     provider_id=provider_status.provider_id,
                     provider_name=provider_status.provider_name,
+                    research_topic=provider_status.research_topic,
                     status=provider_status.status,
                 )
-            statuses[provider_status.provider_id] = existing_status.model_copy(
+            statuses[key] = existing_status.model_copy(
                 update={
                     "provider_name": provider_status.provider_name,
+                    "research_topic": provider_status.research_topic,
                     "status": _merge_provider_status_summary(
                         existing=existing_status,
                         incoming=provider_status,
@@ -1239,21 +1263,26 @@ def _research_workflow_summary(
             )
         if collection.provider_statuses:
             continue
-        status = statuses.get(collection.source_id)
+        collection_topic = _single_provider_default_research_topic(collection.source_id)
+        collection_key = _provider_topic_key(collection.source_id, collection_topic)
+        status = statuses.get(collection_key)
         if status is None:
             status = ResearchProviderStatusSummary(
                 provider_id=collection.source_id,
                 provider_name=collection.source_name,
+                research_topic=collection_topic,
                 status=collection.status,
             )
-        statuses[collection.source_id] = status.model_copy(
+        statuses[collection_key] = status.model_copy(
             update={
                 "provider_name": collection.source_name,
+                "research_topic": collection_topic,
                 "status": _merge_provider_status_summary(
                     existing=status,
                     incoming=ResearchProviderStatusSummary(
                         provider_id=collection.source_id,
                         provider_name=collection.source_name,
+                        research_topic=collection_topic,
                         status=collection.status,
                         collected_count=collection.result_count,
                     ),
@@ -1278,16 +1307,22 @@ def _research_workflow_summary(
             preview,
             plan=workflow.plan,
         ):
-            existing_status = statuses.get(provider_status.provider_id)
+            key = _provider_topic_key(
+                provider_status.provider_id,
+                provider_status.research_topic,
+            )
+            existing_status = statuses.get(key)
             if existing_status is None:
                 existing_status = ResearchProviderStatusSummary(
                     provider_id=provider_status.provider_id,
                     provider_name=provider_status.provider_name,
+                    research_topic=provider_status.research_topic,
                     status=provider_status.status,
                 )
-            statuses[provider_status.provider_id] = existing_status.model_copy(
+            statuses[key] = existing_status.model_copy(
                 update={
                     "provider_name": provider_status.provider_name,
+                    "research_topic": provider_status.research_topic,
                     "status": _merge_provider_status_summary(
                         existing=existing_status,
                         incoming=provider_status,
@@ -1405,11 +1440,14 @@ def _has_ready_results(status: ResearchProviderStatusSummary) -> bool:
     )
 
 
-def _provider_ids_with_ready_results(
+def _provider_topics_with_ready_results(
     workflow: ResearchWorkflowRunSummary,
-) -> set[str]:
-    provider_ids = {
-        provider_status.provider_id
+) -> set[tuple[str, str]]:
+    provider_topics = {
+        _provider_topic_key(
+            provider_status.provider_id,
+            provider_status.research_topic,
+        )
         for collection in workflow.collections
         for provider_status in collection.provider_statuses
         if provider_status.collected_count > 0
@@ -1422,24 +1460,30 @@ def _provider_ids_with_ready_results(
     for preview in workflow.import_previews:
         if preview.input_path.resolve(strict=False) in collection_output_paths:
             continue
-        provider_ids.update(
-            provider_status.provider_id
+        provider_topics.update(
+            _provider_topic_key(
+                provider_status.provider_id,
+                provider_status.research_topic,
+            )
             for provider_status in _import_preview_provider_statuses(
                 preview,
                 plan=workflow.plan,
             )
             if provider_status.collected_count > 0
         )
-    return provider_ids
+    return provider_topics
 
 
 def _initial_provider_status(
     source: ResearchWorkflowSourceSummary,
     workflow: ResearchWorkflowRunSummary,
     *,
-    provider_ids_with_ready_results: set[str],
+    provider_topics_with_ready_results: set[tuple[str, str]],
 ) -> ResearchProviderRunStatus:
-    if source.provider_id in provider_ids_with_ready_results:
+    if (
+        _provider_topic_key(source.provider_id, source.research_topic)
+        in provider_topics_with_ready_results
+    ):
         return ResearchProviderRunStatus.PLANNED
     if source.manual_count:
         return ResearchProviderRunStatus.MANUAL_NEEDED
@@ -1460,16 +1504,18 @@ def _source_not_run_by_live_gate(
 
 
 def _source_summaries(plan: ResearchPlan) -> list[ResearchWorkflowSourceSummary]:
-    summaries: dict[str, ResearchWorkflowSourceSummary] = {}
+    summaries: dict[tuple[str, str], ResearchWorkflowSourceSummary] = {}
     for task in plan.tasks:
+        key = _provider_topic_key(task.provider_id, task.research_topic)
         summary = summaries.setdefault(
-            task.provider_id,
+            key,
             ResearchWorkflowSourceSummary(
                 provider_id=task.provider_id,
                 provider_name=task.provider_name,
+                research_topic=task.research_topic,
             ),
         )
-        summaries[task.provider_id] = summary.model_copy(
+        summaries[key] = summary.model_copy(
             update={
                 "planned_count": summary.planned_count + 1,
                 "manual_count": summary.manual_count + int(_task_needs_manual_work(task)),
@@ -1576,6 +1622,13 @@ def _research_result_key(
         company_name.strip().casefold(),
         provider_id.strip(),
         research_topic.strip().casefold(),
+    )
+
+
+def _provider_topic_key(provider_id: str, research_topic: str) -> tuple[str, str]:
+    return (
+        provider_id.strip(),
+        research_topic.strip().casefold() or "company",
     )
 
 

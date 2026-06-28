@@ -270,6 +270,35 @@ def test_score_evidence_store_invests_calculated_risk_with_borderline_evidence()
     assert "calculated_risk_target" in scored.check_sizing.reason_codes
 
 
+def test_score_evidence_store_clears_calculated_risk_when_no_check_tier_fits() -> None:
+    evidence = [
+        _evidence(
+            "ev_all",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_all"),
+        _claim("discount", "20%", "ev_all"),
+        _claim("round size", "$1M", "ev_all"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data"), min_check=2_500),
+    )
+
+    assert 65 <= scored.total_score <= 74
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert scored.calculated_risk is False
+    assert scored.calculated_risk_reason is None
+    assert any(
+        gate.name == "No available check size"
+        for gate in scored.triggered_hard_blockers
+    )
+
+
 def test_stage_aware_score_changes_are_deterministic_and_evidence_linked() -> None:
     pre_seed_evidence = [
         _evidence("ev_terms", "Valuation cap $8M. Discount 20%. Round size $1M."),

@@ -21,8 +21,13 @@ from hailmary.batch import (
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.evaluation import DealEvaluationResult
+from hailmary.schemas.agents import (
+    AgentRecommendationRationale,
+    AgentReviewOutput,
+    AgentRole,
+)
 from hailmary.schemas.evidence import EvidenceStore
-from hailmary.schemas.scoring import Recommendation
+from hailmary.schemas.scoring import Recommendation, ScoredDeal
 
 runner = CliRunner()
 PRIVATE_MARKER = "PRIVATE_BATCH_SOURCE_TEXT_DO_NOT_PRINT"
@@ -340,6 +345,93 @@ def test_batch_counts_allocation_stage_failures_in_summary(
     rows = {row.company_name: row for row in result.allocation_rows}
     assert rows["ActionFailureCo"].evaluation_status == "failed"
     assert rows["HealthyCo"].evaluation_status == "allocated"
+
+
+def test_batch_allocation_preserves_child_research_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contexts: list[object] = []
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="ResearchGapBatchCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    scored = ScoredDeal(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        recommendation=Recommendation.INVEST,
+        check_size=1_000,
+        total_score=80,
+        one_line_reason="Synthetic invest score.",
+        capital_remaining_before=10_000,
+        capital_remaining_after=9_000,
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.INVEST,
+        check_size=1_000,
+        reason="Synthetic final recommendation.",
+    )
+    result = DealEvaluationResult(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        evaluation_mode="local-only",
+        mode_explanation="Synthetic test mode.",
+        document_count=1,
+        evidence_count=1,
+        claim_count=0,
+        conflict_count=0,
+        deterministic_score=scored,
+        final_recommendation=final_recommendation,
+        final_output=AgentReviewOutput(
+            deal_id=store.deal_id,
+            company_name=store.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            recommendation=final_recommendation,
+        ),
+        specialist_results=[],
+        failed_specialist_roles=[],
+        final_memo_path=tmp_path / "memo.md",
+        final_json_path=tmp_path / "result.json",
+        agent_output_dir=tmp_path / "agent-outputs",
+        ocr_status="OCR was not enabled.",
+        research_run=object(),
+    )
+
+    monkeypatch.setattr(
+        batch_module,
+        "_diligence_research_context",
+        lambda research_run: "synthetic-research-context" if research_run else None,
+    )
+    monkeypatch.setattr(
+        batch_module,
+        "_load_actioned_store_for_result",
+        lambda _result, *, config: store,
+    )
+
+    def fake_score_evidence_store(
+        _store: EvidenceStore,
+        **kwargs: object,
+    ) -> ScoredDeal:
+        contexts.append(kwargs.get("research_context"))
+        return scored
+
+    monkeypatch.setattr(batch_module, "score_evidence_store", fake_score_evidence_store)
+
+    rows, _constraints = batch_module._allocate_batch(
+        [
+            BatchDealOutcome(
+                folder=tmp_path / "deal",
+                company_name=store.company_name,
+                result=result,
+            )
+        ],
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=10_000),
+    )
+
+    assert contexts == ["synthetic-research-context", "synthetic-research-context"]
+    assert rows[0].evaluation_status == "allocated"
+    assert rows[0].batch_check_size == 1_000
 
 
 def test_batch_rejects_symlinked_parent_paths(
