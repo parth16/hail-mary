@@ -1120,7 +1120,7 @@ def test_numeric_env_value_overrides_invalid_saved_config(
     assert config.max_check == 7500
 
 
-def test_web_research_ignores_legacy_env_gates(
+def test_load_config_preserves_legacy_env_gates_for_non_public_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -1130,7 +1130,20 @@ def test_web_research_ignores_legacy_env_gates(
     config = load_config()
 
     assert config.local_only is True
-    assert config.enable_web_research is True
+    assert config.enable_web_research is False
+
+
+def test_invalid_web_research_env_still_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "flase")
+
+    with pytest.raises(
+        ConfigError,
+        match="HAILMARY_ENABLE_WEB_RESEARCH must be true or false",
+    ):
+        load_config()
 
 
 def test_enable_ocr_env_is_local_and_independent_of_web_research(
@@ -1145,7 +1158,7 @@ def test_enable_ocr_env_is_local_and_independent_of_web_research(
 
     assert config.local_only is True
     assert config.enable_ocr is True
-    assert config.enable_web_research is True
+    assert config.enable_web_research is False
 
 
 def test_enable_ocr_env_overrides_saved_config(
@@ -1162,7 +1175,7 @@ def test_enable_ocr_env_overrides_saved_config(
     assert config.enable_ocr is False
 
 
-def test_web_research_ignores_legacy_saved_config_gates(
+def test_load_config_preserves_legacy_saved_config_gates_for_non_public_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -1176,10 +1189,28 @@ def test_web_research_ignores_legacy_saved_config_gates(
     config = load_config()
 
     assert config.local_only is True
-    assert config.enable_web_research is True
+    assert config.enable_web_research is False
 
 
-def test_init_persists_web_research_on_even_with_legacy_local_only_input(
+def test_invalid_saved_web_research_setting_still_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(
+        "enable_web_research: flase\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="enable_web_research must be true or false",
+    ):
+        load_config()
+
+
+def test_init_clears_web_research_with_legacy_local_only_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -1195,7 +1226,7 @@ def test_init_persists_web_research_on_even_with_legacy_local_only_input(
 
     config_text = (tmp_path / ".hailmary" / "config.yaml").read_text(encoding="utf-8")
     assert "local_only: true" in config_text
-    assert "enable_web_research: true" in config_text
+    assert "enable_web_research: false" in config_text
 
 
 def test_local_state_rejects_file_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
