@@ -26,6 +26,7 @@ from hailmary.agents.packets import (
     prepare_agent_packets,
 )
 from hailmary.agents.validation import validate_agent_output
+from hailmary.batch import BatchEvaluationError, batch_evaluate_folder
 from hailmary.config import (
     AppConfig,
     ConfigError,
@@ -2518,6 +2519,125 @@ def evaluate_deal(
         renderables.append(_plain("Limitations: none beyond the source evidence in the memo."))
 
     _print_panel("Deal evaluation complete", renderables, border_style="green")
+
+
+@app.command("batch-evaluate")
+def batch_evaluate(
+    root_folder: Annotated[
+        Path,
+        typer.Argument(help="Folder containing one child folder per company or deal."),
+    ],
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Where Hail Mary should store private generated files.",
+        ),
+    ] = None,
+    max_concurrency: Annotated[
+        int,
+        typer.Option(
+            "--max-concurrency",
+            help="Maximum number of specialist model reviews to run at once per deal.",
+        ),
+    ] = 3,
+    enable_ocr: Annotated[
+        bool | None,
+        typer.Option(
+            "--enable-ocr/--disable-ocr",
+            help=(
+                "Use local image-based text reading (OCR) during ingestion when local "
+                "tools are installed. OCR means reading text from images."
+            ),
+            show_default=False,
+        ),
+    ] = None,
+    skip_research: Annotated[
+        bool,
+        typer.Option(
+            "--skip-research",
+            help=(
+                "Skip external research planning, collection, and import. Use this only "
+                "for local debugging."
+            ),
+        ),
+    ] = False,
+    include_paid_research: Annotated[
+        bool,
+        typer.Option(
+            "--include-paid-research",
+            help=(
+                "Include optional paid sources as manual research tasks. "
+                "No paid source is contacted."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Evaluate several deal folders and write a private allocation report."""
+
+    config = _config_with_ocr_override(
+        _config_from_options(data_dir),
+        enable_ocr=enable_ocr,
+    )
+    try:
+        result = batch_evaluate_folder(
+            root_folder,
+            config=config,
+            max_concurrency=max_concurrency,
+            run_research=not skip_research,
+            include_paid_research=include_paid_research,
+        )
+    except BatchEvaluationError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    summary = _two_column_table("Result", "Value")
+    summary.add_row(_plain("Deals found"), _plain(str(result.deal_count)))
+    summary.add_row(_plain("Deals evaluated"), _plain(str(result.evaluated_count)))
+    summary.add_row(_plain("Deal-level failures"), _plain(str(result.failed_count)))
+    summary.add_row(_plain("Allocated deals"), _plain(str(result.allocated_count)))
+    summary.add_row(_plain("Skipped deals"), _plain(str(result.skipped_count)))
+    summary.add_row(
+        _plain("New allocated checks"),
+        _plain(_format_dollars(result.constraints.new_allocated_capital)),
+    )
+    summary.add_row(
+        _plain("Remaining allocatable capital"),
+        _plain(_format_dollars(result.constraints.remaining_allocatable_capital)),
+    )
+    summary.add_row(_plain("Batch report"), _plain(str(result.report_path)))
+    summary.add_row(_plain("Batch JSON"), _plain(str(result.json_path)))
+
+    deal_lines: list[RenderableType] = [_plain("Per-deal results", style="bold")]
+    for row in result.allocation_rows:
+        score_text = (
+            "unknown"
+            if row.score is None or row.max_score is None
+            else f"{row.score}/{row.max_score}"
+        )
+        blockers = "; ".join(row.key_blockers) if row.key_blockers else "none"
+        memo_path = str(row.memo_path) if row.memo_path is not None else "not written"
+        json_path = str(row.json_path) if row.json_path is not None else "not written"
+        deal_lines.append(
+            _plain(
+                f"- {row.company_name}: status {row.evaluation_status}; "
+                f"Final recommendation {row.final_recommendation}; "
+                f"Batch check {_format_check_size(row.batch_check_size)}; "
+                f"score {score_text}; key blockers {blockers}; "
+                f"memo {memo_path}; JSON {json_path}."
+            )
+        )
+
+    _print_panel(
+        "Batch evaluation complete",
+        [
+            _plain("Batch portfolio evaluation complete."),
+            summary,
+            *deal_lines,
+            _plain("Batch output does not print raw evidence text or model excerpts."),
+        ],
+        border_style="green",
+    )
 
 
 def _evaluate_deal_commentary_renderables(
