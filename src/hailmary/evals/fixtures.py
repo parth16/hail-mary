@@ -7,6 +7,7 @@ import zipfile
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from docx import Document
 
@@ -14,12 +15,21 @@ from hailmary.agents.packets import DEFAULT_AGENT_ROLES, build_agent_input_packe
 from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig
 from hailmary.evaluation import (
+    EvaluationError,
     EvaluationMode,
     _guard_final_decision,
     _rule_based_final_decision,
     evaluate_deal_folder,
     openai_review_messages,
     render_final_evaluation_memo,
+)
+from hailmary.evidence import (
+    DiligenceAnswerStatus,
+    EvidenceAuditFinding,
+    EvidenceAuditFindingKind,
+    EvidenceAuditReadiness,
+    EvidenceAuditSeverity,
+    EvidenceCompletenessAudit,
 )
 from hailmary.evidence.actions import EvidenceActionStatus, record_evidence_action
 from hailmary.ingest.extractors import extract_document
@@ -80,7 +90,11 @@ from hailmary.schemas.scoring import (
     ScoredDeal,
     ValuationRisk,
 )
-from hailmary.scoring.memo import render_markdown_memo, render_portfolio_report
+from hailmary.scoring.memo import (
+    render_markdown_memo,
+    render_portfolio_report,
+    score_latest_ingestion,
+)
 from hailmary.scoring.scorer import (
     score_evidence_store,
     validated_conflicts,
@@ -3877,6 +3891,620 @@ def run_evaluate_deal_golden_workflow_fixture(work_dir: Path) -> None:
     )
 
 
+def run_evaluate_deal_audit_guardrails_fixture(work_dir: Path) -> None:
+    safe_work_dir = work_dir.resolve(strict=False)
+    config = AppConfig(data_dir=safe_work_dir / "data", local_only=True)
+    strong_company = _write_evaluate_deal_fixture_company(
+        safe_work_dir,
+        company_name="Synthetic AuditInvestCo",
+        body=(
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "ARR revenue growth with paid customers and retention. "
+            "Lead investor committed and seed round is active."
+        ),
+    )
+    pass_company = _write_evaluate_deal_fixture_company(
+        safe_work_dir,
+        company_name="Synthetic AuditPassCo",
+        body="Round size $1M. No customers, no revenue, and no retention yet.",
+    )
+
+    evaluation_globals = evaluate_deal_folder.__globals__
+    original_audit_builder = evaluation_globals["build_evidence_completeness_audit"]
+    try:
+        evaluation_globals["build_evidence_completeness_audit"] = (
+            _fixture_blocking_evidence_audit
+        )
+        forced = evaluate_deal_folder(
+            strong_company,
+            config=config,
+            max_concurrency=1,
+            run_research=False,
+            created_at=BUILT_AT,
+        )
+        neutral = evaluate_deal_folder(
+            pass_company,
+            config=config,
+            max_concurrency=1,
+            run_research=False,
+            created_at=BUILT_AT,
+        )
+    finally:
+        evaluation_globals["build_evidence_completeness_audit"] = original_audit_builder
+
+    _expect_equal(
+        forced.deterministic_score.recommendation,
+        Recommendation.INVEST,
+        "Expected audit fixture scoring to otherwise allow INVEST.",
+    )
+    _expect_equal(
+        forced.final_recommendation.recommendation,
+        Recommendation.PASS,
+        "Expected blocking evidence audit to force final PASS.",
+    )
+    _expect_equal(
+        forced.final_recommendation.check_size,
+        0,
+        "Expected blocking evidence audit to force a $0 check.",
+    )
+    _expect(
+        "Evidence completeness audit forced PASS/$0"
+        in forced.final_recommendation.reason,
+        "Expected forced audit PASS reason to name the evidence completeness guardrail.",
+        actual_reason=forced.final_recommendation.reason,
+    )
+    _expect(
+        any(
+            "Evidence completeness audit forced PASS/$0" in warning
+            for warning in forced.warnings
+        ),
+        "Expected forced audit PASS warning to name the evidence completeness guardrail.",
+        warnings=" | ".join(forced.warnings),
+    )
+
+    forced_export = _load_json_object(forced.final_json_path)
+    _expect_equal(
+        _nested_value(forced_export, "evidence_completeness", "blocking_count"),
+        1,
+        "Expected forced audit JSON export to include one blocking audit finding.",
+    )
+    _expect_equal(
+        _nested_value(forced_export, "final_decision", "recommendation"),
+        "PASS",
+        "Expected forced audit JSON export to show final PASS.",
+    )
+    _expect_equal(
+        _nested_value(forced_export, "deterministic_score", "recommendation"),
+        "INVEST",
+        "Expected forced audit JSON export to preserve the pre-audit score result.",
+    )
+    _assert_evaluation_export_lineage_contract(forced_export)
+
+    _expect_equal(
+        neutral.deterministic_score.recommendation,
+        Recommendation.PASS,
+        "Expected neutral audit fixture scoring to already force PASS.",
+    )
+    _expect_equal(
+        neutral.final_recommendation.recommendation,
+        Recommendation.PASS,
+        "Expected neutral audit fixture final recommendation to remain PASS.",
+    )
+    _expect(
+        "Evidence completeness audit forced PASS/$0"
+        not in neutral.final_recommendation.reason,
+        "Expected audit wording not to claim it forced PASS when scoring already passed.",
+        actual_reason=neutral.final_recommendation.reason,
+    )
+    _expect(
+        all(
+            "Evidence completeness audit forced PASS/$0" not in limitation
+            for limitation in neutral.operator_limitations
+        ),
+        "Expected neutral audit limitations not to claim the audit forced PASS.",
+        limitations=" | ".join(neutral.operator_limitations),
+    )
+    _expect(
+        any(
+            "Evidence completeness audit found blocking gaps" in limitation
+            for limitation in neutral.operator_limitations
+        ),
+        "Expected neutral audit limitations to still surface blocking gaps.",
+        limitations=" | ".join(neutral.operator_limitations),
+    )
+
+
+def run_evaluate_deal_diligence_loop_json_privacy_fixture(work_dir: Path) -> None:
+    from typer.testing import CliRunner
+
+    from hailmary.cli import app
+
+    safe_work_dir = work_dir.resolve(strict=False)
+    private_tail_marker = "PRIVATE_FULL_TEXT_MARKER_AT_END"
+    operator_answer = "PRIVATE_OPERATOR_ANSWER_MARKER resolved by the operator."
+    company = _write_evaluate_deal_fixture_company(
+        safe_work_dir,
+        company_name="Synthetic DiligenceLoopCo",
+        body=(
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "ARR revenue growth with paid customers and retention. "
+            "Lead investor committed and seed round is active. "
+            + ("filler " * 500)
+            + private_tail_marker
+        ),
+    )
+    config = AppConfig(data_dir=safe_work_dir / "data", local_only=True)
+
+    initial = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+        created_at=BUILT_AT,
+    )
+    _expect(
+        initial.diligence_question_queue is not None
+        and bool(initial.diligence_question_queue.questions),
+        "Expected evaluate-deal to write a diligence question queue.",
+    )
+    if initial.diligence_question_queue is None:
+        raise EvalFixtureFailure("Expected a diligence question queue.")
+    first_question = initial.diligence_question_queue.questions[0]
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / (
+        "evidence_store.json"
+    )
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    evidence_id = store.evidence[0].id
+
+    cli_runner = CliRunner()
+    answer_result = cli_runner.invoke(
+        app,
+        [
+            "diligence",
+            "answer",
+            "--data-dir",
+            str(config.data_dir),
+            "--question-id",
+            first_question.question_id,
+            "--answer",
+            operator_answer,
+            "--evidence-id",
+            evidence_id,
+        ],
+    )
+    _expect_equal(
+        answer_result.exit_code,
+        0,
+        "Expected diligence answer CLI command to save the operator answer.",
+    )
+    _expect(
+        operator_answer not in answer_result.output
+        and private_tail_marker not in answer_result.output
+        and "Valuation cap $8M" not in answer_result.output,
+        "Expected diligence answer CLI output to hide answers and raw evidence text.",
+        cli_output=answer_result.output,
+    )
+
+    hidden_list = cli_runner.invoke(
+        app,
+        ["diligence", "list", "--data-dir", str(config.data_dir)],
+    )
+    _expect_equal(
+        hidden_list.exit_code,
+        0,
+        "Expected diligence list CLI command to read the question queue.",
+    )
+    _expect(
+        operator_answer not in hidden_list.output
+        and private_tail_marker not in hidden_list.output
+        and "Valuation cap $8M" not in hidden_list.output,
+        "Expected diligence list CLI output to hide answers and raw evidence by default.",
+        cli_output=hidden_list.output,
+    )
+
+    shown_list = cli_runner.invoke(
+        app,
+        [
+            "diligence",
+            "list",
+            "--data-dir",
+            str(config.data_dir),
+            "--show-answers",
+        ],
+    )
+    _expect_equal(
+        shown_list.exit_code,
+        0,
+        "Expected diligence list --show-answers to succeed.",
+    )
+    _expect(
+        "PRIVATE_OPERATOR_ANSWER_MARKER" in shown_list.output,
+        "Expected diligence list --show-answers to show the operator answer.",
+    )
+
+    rerun = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+        created_at=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+    )
+    _expect(
+        rerun.diligence_question_queue is not None,
+        "Expected rerun to keep a diligence question queue.",
+    )
+    if rerun.diligence_question_queue is None:
+        raise EvalFixtureFailure("Expected rerun to keep a diligence question queue.")
+    answered_question = next(
+        question
+        for question in rerun.diligence_question_queue.questions
+        if question.question_id == first_question.question_id
+    )
+    _expect_equal(
+        answered_question.answer_status,
+        DiligenceAnswerStatus.RESOLVED,
+        "Expected rerun to apply the recorded operator answer.",
+    )
+    _expect_equal(
+        answered_question.answer_evidence_ids,
+        [evidence_id],
+        "Expected rerun to retain the answer evidence ID.",
+    )
+
+    export = _load_json_object(rerun.final_json_path)
+    _expect_equal(
+        _nested_value(export, "diligence_questions", "resolved_count"),
+        1,
+        "Expected final JSON export to count one resolved diligence question.",
+    )
+    _assert_evaluation_export_lineage_contract(export)
+    _assert_json_export_privacy(
+        export,
+        forbidden_markers=[
+            private_tail_marker,
+            operator_answer,
+            str(company / "memo.txt"),
+            "Valuation cap $8M",
+            "ARR revenue growth with paid customers and retention",
+        ],
+    )
+
+
+def run_evaluate_deal_research_status_export_fixture(work_dir: Path) -> None:
+    safe_work_dir = work_dir.resolve(strict=False)
+    company = _write_evaluate_deal_fixture_company(
+        safe_work_dir,
+        company_name="Synthetic ResearchStatusCo",
+        body="Valuation cap $8M. Discount 20%. Round size $1M.",
+    )
+    sec_results_path = safe_work_dir / "research-status-sec-results.json"
+    sec_results_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "Synthetic ResearchStatusCo",
+                        "title": "Synthetic ResearchStatusCo stale Form D",
+                        "text": (
+                            "Synthetic ResearchStatusCo reports stale ARR revenue "
+                            "growth with paid customers and a lead investor."
+                        ),
+                        "retrieved_at": "2024-01-01T12:00:00Z",
+                        "source_url": (
+                            "https://www.sec.gov/Archives/edgar/data/"
+                            "synthetic-research-status/form-d"
+                        ),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = AppConfig(data_dir=safe_work_dir / "data", local_only=True)
+
+    result = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        sec_form_d_results_path=sec_results_path,
+        created_at=BUILT_AT,
+    )
+    _expect_equal(
+        result.research_imported_count,
+        1,
+        "Expected evaluate-deal to import one synthetic public research record.",
+    )
+    _expect(
+        result.research_run is not None and result.research_run.stale_count == 1,
+        "Expected stale-only research to remain visible on the evaluate-deal result.",
+    )
+    stale_warning_text = " ".join(
+        [
+            *result.warnings,
+            *result.operator_limitations,
+            *[
+                f"{question.question} {question.reason} "
+                f"{question.missing_evidence}"
+                for question in (
+                    result.diligence_question_queue.questions
+                    if result.diligence_question_queue is not None
+                    else []
+                )
+            ],
+        ]
+    ).casefold()
+    _expect(
+        "stale" in stale_warning_text or "current source dates" in stale_warning_text,
+        "Expected stale-only research to create a warning, limitation, or question.",
+        observed_text=stale_warning_text,
+    )
+
+    export = _load_json_object(result.final_json_path)
+    _expect_equal(
+        _nested_value(export, "research", "imported_count"),
+        1,
+        "Expected final JSON export to report imported research count.",
+    )
+    _expect_equal(
+        _nested_value(export, "research", "stale_count"),
+        1,
+        "Expected final JSON export to report stale research count.",
+    )
+    provider_statuses = _provider_statuses_from_export(export)
+    _expect(
+        any(
+            status.get("provider_id") == "sec_form_d"
+            and status.get("imported_count") == 1
+            for status in provider_statuses
+        ),
+        "Expected final JSON export to keep SEC provider status visible.",
+        provider_statuses=json.dumps(provider_statuses, sort_keys=True),
+    )
+    memo = result.final_memo_path.read_text(encoding="utf-8")
+    expected_fragments = [
+        "Imported 1 external research evidence record before scoring.",
+        "Imported 1 stale external research record",
+        "Provider statuses:",
+        "SEC EDGAR Form D search",
+    ]
+    missing_fragments = [fragment for fragment in expected_fragments if fragment not in memo]
+    _expect(
+        not missing_fragments,
+        "Expected final memo to surface research provider status and stale limitations.",
+        missing_fragments=", ".join(missing_fragments),
+    )
+
+
+def run_evaluate_deal_meridian_manual_loop_fixture(work_dir: Path) -> None:
+    safe_work_dir = work_dir.resolve(strict=False)
+    company = _write_evaluate_deal_fixture_company(
+        safe_work_dir,
+        company_name="Synthetic MeridianEvalCo",
+        body="Valuation cap $8M. Discount 20%. Round size $1M.",
+    )
+    config = AppConfig(data_dir=safe_work_dir / "data", local_only=True)
+    unsafe_url = "https://portal.angellist.com:444/m/synthetic-meridianevalco/invest"
+    safe_url = "https://portal.angellist.com/m/synthetic-meridianevalco/invest"
+
+    try:
+        evaluate_deal_folder(
+            company,
+            config=config,
+            max_concurrency=1,
+            meridian_url=unsafe_url,
+            created_at=BUILT_AT,
+        )
+    except EvaluationError as exc:
+        _expect(
+            "Meridian" in str(exc) and "URL" in str(exc),
+            "Expected unsafe Meridian URLs to be rejected through evaluate-deal.",
+            actual_error=str(exc),
+        )
+    else:
+        raise EvalFixtureFailure("Expected unsafe Meridian URL to be rejected.")
+
+    placeholder_run = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        meridian_url=safe_url,
+        created_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+    )
+    _expect_equal(
+        placeholder_run.research_imported_count,
+        0,
+        "Expected untouched Meridian placeholder rows not to import.",
+    )
+    _expect(
+        placeholder_run.research_run is not None
+        and placeholder_run.research_run.workflow.meridian_result_template_path
+        is not None,
+        "Expected evaluate-deal to write a Meridian result template.",
+    )
+    if (
+        placeholder_run.research_run is None
+        or placeholder_run.research_run.workflow.meridian_result_template_path is None
+    ):
+        raise EvalFixtureFailure("Expected a Meridian result template.")
+    _expect(
+        any(
+            issue.source == "meridian" and issue.severity == "warning"
+            for issue in placeholder_run.research_run.workflow.issues
+        ),
+        "Expected unresolved Meridian fields to appear as workflow issues.",
+    )
+    _expect(
+        placeholder_run.research_run.workflow.unresolved_manual_task_count > 0,
+        "Expected unresolved Meridian workflow to keep manual follow-up tasks visible.",
+    )
+
+    completed_template_path = placeholder_run.research_run.workflow.meridian_result_template_path
+    completed_payload = json.loads(completed_template_path.read_text(encoding="utf-8"))
+    completed_payload["results"][0].update(
+        {
+            "title": "Meridian page synthetic excerpt",
+            "text": (
+                "Synthetic MeridianEvalCo reports customer revenue growth and a "
+                "$2,500 minimum investment."
+            ),
+            "retrieved_at": "2025-12-31T12:00:00Z",
+            "confidence": "high: exact synthetic Meridian page excerpt",
+        }
+    )
+    completed_template_path.write_text(json.dumps(completed_payload), encoding="utf-8")
+
+    completed_run = evaluate_deal_folder(
+        company,
+        config=config,
+        max_concurrency=1,
+        meridian_url=safe_url,
+        research_results_files=[completed_template_path],
+        created_at=datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+    )
+    _expect_equal(
+        completed_run.research_imported_count,
+        1,
+        "Expected completed synthetic Meridian row to import through evaluate-deal.",
+    )
+    completed_export = _load_json_object(completed_run.final_json_path)
+    _expect_equal(
+        _nested_value(completed_export, "research", "imported_count"),
+        1,
+        "Expected final JSON export to report the imported Meridian row.",
+    )
+    meridian_statuses = _provider_statuses_from_export(completed_export)
+    _expect(
+        any(
+            status.get("provider_id") == "meridian"
+            and status.get("imported_count") == 1
+            for status in meridian_statuses
+        ),
+        "Expected final JSON export to keep Meridian provider status visible.",
+        provider_statuses=json.dumps(meridian_statuses, sort_keys=True),
+    )
+    store_path = config.data_dir / "processed" / "deals" / completed_run.deal_id / (
+        "evidence_store.json"
+    )
+    saved_store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    meridian_evidence = [
+        evidence
+        for evidence in saved_store.evidence
+        if evidence.provider_id == "meridian"
+    ]
+    _expect_equal(
+        len(meridian_evidence),
+        1,
+        "Expected one Meridian evidence record after evaluate-deal import.",
+    )
+    licensing_notes = meridian_evidence[0].licensing_notes or ""
+    _expect_equal(
+        meridian_evidence[0].source_url,
+        safe_url,
+        "Expected Meridian evidence to preserve only the safe canonical source URL.",
+    )
+    _expect(
+        "Generated Meridian placeholder" not in licensing_notes
+        and "Generated Meridian source URL" not in licensing_notes,
+        "Expected generated Meridian markers to be stripped before saving evidence.",
+        actual_licensing_notes=licensing_notes,
+    )
+
+
+def run_portfolio_batch_allocation_fixture(work_dir: Path) -> None:
+    safe_work_dir = work_dir.resolve(strict=False)
+    root = safe_work_dir / "pitch-decks"
+    _write_evaluate_deal_fixture_company(
+        safe_work_dir,
+        company_name="Alpha Batch",
+        body=(
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "ARR revenue growth with paid customers and retention. "
+            "Lead investor committed and seed round is active."
+        ),
+    )
+    _write_evaluate_deal_fixture_company(
+        safe_work_dir,
+        company_name="Zeta Batch",
+        body=(
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "ARR revenue growth with paid customers and retention. "
+            "Lead investor committed and seed round is active."
+        ),
+    )
+    _write_evaluate_deal_fixture_company(
+        safe_work_dir,
+        company_name="Beta Weak Batch",
+        body=(
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "No customers, no revenue, and no retention yet."
+        ),
+    )
+    config = AppConfig(data_dir=safe_work_dir / "data", capital_budget=1_000)
+    ingest_folder(root, config=config)
+
+    result = score_latest_ingestion(config=config)
+    scored_by_company = {deal.company_name: deal for deal in result.scored_deals}
+    _expect_equal(
+        scored_by_company["Alpha Batch"].recommendation,
+        Recommendation.INVEST,
+        "Expected the highest-ranked batch deal to receive the remaining budget.",
+    )
+    _expect_equal(
+        scored_by_company["Alpha Batch"].check_size,
+        1_000,
+        "Expected the highest-ranked batch deal to use the $1K budget cap.",
+    )
+    _expect_equal(
+        scored_by_company["Zeta Batch"].recommendation,
+        Recommendation.PASS,
+        "Expected tied later batch deal to PASS after budget is consumed.",
+    )
+    _expect_equal(
+        scored_by_company["Zeta Batch"].capital_remaining_before,
+        0,
+        "Expected tied later batch deal to see zero remaining capital.",
+    )
+    _expect_equal(
+        scored_by_company["Beta Weak Batch"].recommendation,
+        Recommendation.PASS,
+        "Expected weak batch deal to PASS on score before budget scarcity.",
+    )
+
+    _expect(
+        result.portfolio_report_path is not None
+        and result.portfolio_report_path.exists(),
+        "Expected batch scoring to write a private portfolio report.",
+    )
+    if result.portfolio_report_path is None:
+        raise EvalFixtureFailure("Expected a portfolio report.")
+    report = result.portfolio_report_path.read_text(encoding="utf-8")
+    alpha_row = "| 1 | Alpha Batch | INVEST | $1K |"
+    zeta_row = "| 2 | Zeta Batch | PASS | $0 |"
+    beta_row = "| 3 | Beta Weak Batch | PASS | $0 |"
+    missing_rows = [
+        row for row in (alpha_row, zeta_row, beta_row) if row not in report
+    ]
+    _expect(
+        not missing_rows,
+        "Expected batch portfolio report to preserve allocation rank order.",
+        missing_rows=", ".join(missing_rows),
+    )
+    _expect(
+        report.index(alpha_row) < report.index(zeta_row) < report.index(beta_row),
+        "Expected batch report rows to follow allocation ranking.",
+    )
+    expected_reasons = [
+        "No allocatable capital remained for an allowed nonzero check.",
+        "Score below the 75/100 INVEST threshold.",
+    ]
+    missing_reasons = [reason for reason in expected_reasons if reason not in report]
+    _expect(
+        not missing_reasons,
+        "Expected batch skipped-deal reasons to distinguish budget and score failures.",
+        missing_reasons=", ".join(missing_reasons),
+    )
+
+
 def run_evidence_actions_fixture(work_dir: Path) -> None:
     safe_work_dir = work_dir.resolve(strict=False)
     root = safe_work_dir / "pitch-decks"
@@ -4386,6 +5014,209 @@ def run_privacy_output_guards_fixture(work_dir: Path) -> None:
         "to stay out of generated outputs.",
         leaked_sentinels=", ".join(leaked_sentinels),
     )
+
+
+def _write_evaluate_deal_fixture_company(
+    work_dir: Path,
+    *,
+    company_name: str,
+    body: str,
+) -> Path:
+    root = work_dir / "pitch-decks"
+    company = root / company_name
+    company.mkdir(parents=True, exist_ok=True)
+    (company / "memo.txt").write_text(body, encoding="utf-8")
+    return company
+
+
+def _fixture_blocking_evidence_audit(
+    store: EvidenceStore,
+    *,
+    scored_deal: ScoredDeal | None = None,
+) -> EvidenceCompletenessAudit:
+    del scored_deal
+    return EvidenceCompletenessAudit(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        readiness=EvidenceAuditReadiness.INSUFFICIENT,
+        findings=[
+            EvidenceAuditFinding(
+                id="finding_missing_price_valuation",
+                kind=EvidenceAuditFindingKind.MISSING_TERM,
+                severity=EvidenceAuditSeverity.BLOCKING,
+                title="Missing price or valuation",
+                explanation=(
+                    "No usable current source confirms the price or valuation needed "
+                    "to rely on an investment decision."
+                ),
+                missing_evidence=True,
+            )
+        ],
+    )
+
+
+def _load_json_object(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    _expect(
+        isinstance(payload, dict),
+        "Expected JSON artifact to contain an object.",
+        path=str(path),
+        actual_type=type(payload).__name__,
+    )
+    return cast(dict[str, object], payload)
+
+
+def _nested_value(payload: dict[str, object], first_key: str, second_key: str) -> object:
+    first_value = payload.get(first_key)
+    _expect(
+        isinstance(first_value, dict),
+        "Expected JSON export section to contain an object.",
+        section=first_key,
+        actual_type=type(first_value).__name__,
+    )
+    if not isinstance(first_value, dict):
+        return None
+    return first_value.get(second_key)
+
+
+def _provider_statuses_from_export(
+    export: dict[str, object],
+) -> list[dict[str, object]]:
+    research = export.get("research")
+    _expect(
+        isinstance(research, dict),
+        "Expected JSON export research section to contain an object.",
+        actual_type=type(research).__name__,
+    )
+    if not isinstance(research, dict):
+        return []
+    statuses = research.get("provider_statuses")
+    _expect(
+        isinstance(statuses, list),
+        "Expected JSON export research provider statuses to be a list.",
+        actual_type=type(statuses).__name__,
+    )
+    if not isinstance(statuses, list):
+        return []
+    status_objects: list[dict[str, object]] = []
+    for index, status in enumerate(statuses):
+        _expect(
+            isinstance(status, dict),
+            "Expected every research provider status to be an object.",
+            index=str(index),
+            actual_type=type(status).__name__,
+        )
+        if isinstance(status, dict):
+            status_objects.append(cast(dict[str, object], status))
+    return status_objects
+
+
+def _assert_json_export_privacy(
+    export: dict[str, object],
+    *,
+    forbidden_markers: Sequence[str],
+) -> None:
+    serialized = json.dumps(export, sort_keys=True)
+    leaked_markers = [
+        marker for marker in forbidden_markers if marker and marker in serialized
+    ]
+    _expect(
+        not leaked_markers,
+        "Expected final JSON export not to contain raw evidence, answers, or local paths.",
+        leaked_markers=", ".join(leaked_markers),
+    )
+    _expect(
+        '"quote"' not in serialized,
+        "Expected final JSON export not to contain model quote fields.",
+    )
+    privacy = export.get("privacy")
+    _expect(
+        isinstance(privacy, dict),
+        "Expected final JSON export to include a privacy section.",
+        actual_type=type(privacy).__name__,
+    )
+    if not isinstance(privacy, dict):
+        return
+    _expect_equal(
+        privacy.get("contains_raw_evidence_text"),
+        False,
+        "Expected final JSON export privacy metadata to reject raw evidence text.",
+    )
+    _expect_equal(
+        privacy.get("contains_model_excerpts"),
+        False,
+        "Expected final JSON export privacy metadata to reject model excerpts.",
+    )
+
+
+def _assert_evaluation_export_lineage_contract(export: dict[str, object]) -> None:
+    final_decision = export.get("final_decision")
+    _expect(
+        isinstance(final_decision, dict),
+        "Expected final JSON export to include final_decision as an object.",
+        actual_type=type(final_decision).__name__,
+    )
+    if isinstance(final_decision, dict):
+        evidence_ids = final_decision.get("evidence_ids")
+        reason = str(final_decision.get("reason") or "")
+        _expect(
+            isinstance(evidence_ids, list),
+            "Expected final_decision.evidence_ids to be a list.",
+            actual_type=type(evidence_ids).__name__,
+        )
+        if isinstance(evidence_ids, list) and not evidence_ids:
+            _expect(
+                any(
+                    label in reason
+                    for label in ("NEEDS_DILIGENCE", "INFERRED", "UNVERIFIED")
+                ),
+                "Expected uncited final decisions to carry an uncertainty label.",
+                actual_reason=reason,
+            )
+
+    score = export.get("deterministic_score")
+    _expect(
+        isinstance(score, dict),
+        "Expected final JSON export to include deterministic_score as an object.",
+        actual_type=type(score).__name__,
+    )
+    if not isinstance(score, dict):
+        return
+    factors = score.get("score_factors")
+    _expect(
+        isinstance(factors, list),
+        "Expected deterministic_score.score_factors to be a list.",
+        actual_type=type(factors).__name__,
+    )
+    if not isinstance(factors, list):
+        return
+    for index, factor in enumerate(factors):
+        _expect(
+            isinstance(factor, dict),
+            "Expected every score factor export to be an object.",
+            index=str(index),
+            actual_type=type(factor).__name__,
+        )
+        if not isinstance(factor, dict):
+            continue
+        evidence_ids = factor.get("evidence_ids")
+        missing_inputs = factor.get("missing_inputs")
+        support_status = factor.get("support_status")
+        _expect(
+            isinstance(evidence_ids, list),
+            "Expected score factor evidence_ids to be a list.",
+            factor=str(factor.get("name")),
+            actual_type=type(evidence_ids).__name__,
+        )
+        if isinstance(evidence_ids, list) and not evidence_ids:
+            _expect(
+                support_status != "verified"
+                or (isinstance(missing_inputs, list) and bool(missing_inputs)),
+                "Expected score factors without evidence IDs to stay uncertain.",
+                factor=str(factor.get("name")),
+                support_status=str(support_status),
+                missing_inputs=str(missing_inputs),
+            )
 
 
 def _expect(condition: bool, message: str, **details: str) -> None:
