@@ -24,6 +24,7 @@ QUESTION_QUEUE_VERSION = "1"
 ANSWER_LOG_VERSION = "1"
 MAX_OPERATOR_ANSWER_CHARS = 2_000
 MAX_TRIAGE_QUESTION_IDS = 8
+MAX_EMAIL_QUESTION_CHARS = 280
 
 
 class DiligenceLoopError(RuntimeError):
@@ -798,6 +799,19 @@ def _dedupe_questions(
 def _triage_theme_key(question: DiligenceQuestionItem) -> str:
     category_text = (question.category or "").casefold()
     if _contains_any(category_text, ("financing terms",)):
+        text_without_category = f"{question.question} {question.reason}".casefold()
+        if _contains_any(
+            text_without_category,
+            (
+                "valuation is justified",
+                "valuation justified",
+                "entry valuation is high",
+                "high valuation",
+                "valuation support",
+                "valuation benchmark",
+            ),
+        ):
+            return "valuation"
         return "deal_terms"
     if category_text in {"team", "use_of_funds"}:
         return "team_and_runway"
@@ -1123,16 +1137,17 @@ def _meridian_email_draft(
     ]
     if not email_items:
         return None
-    subject = f"Follow-up diligence questions for {company_name}"
+    clean_company_name = _email_line(company_name, max_chars=120)
+    subject = f"Follow-up diligence questions for {clean_company_name}"
     bullets = [
-        f"- {item.title}: {question_text}"
+        f"- {item.title}: {_email_line(question_text)}"
         for item in email_items
         for question_text in (item.question_texts or [item.representative_question])
     ]
     body_lines = [
         "Hi AngelList Meridian team,",
         "",
-        f"I am reviewing {company_name} and need source-backed answers to a few "
+        f"I am reviewing {clean_company_name} and need source-backed answers to a few "
         "diligence questions before I can decide whether to invest or size a check.",
         "",
         *bullets,
@@ -1173,6 +1188,15 @@ def _contains_phrase(text: str, needle: str) -> bool:
     if any(character.isalnum() for character in normalized_needle):
         return re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", text) is not None
     return normalized_needle in text
+
+
+def _email_line(value: str, *, max_chars: int = MAX_EMAIL_QUESTION_CHARS) -> str:
+    line = re.sub(r"(?m)^\s*[-*#>]+\s*", "", value)
+    line = re.sub(r"\s+", " ", line).strip()
+    line = line.lstrip("-*#> ")
+    if len(line) <= max_chars:
+        return line
+    return f"{line[: max_chars - 1].rstrip()}..."
 
 
 def _dedupe_strings(values: Iterable[str]) -> list[str]:

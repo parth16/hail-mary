@@ -2057,7 +2057,6 @@ def _diligence_triage_export(queue: DiligenceQuestionQueue) -> dict[str, object]
         "meridian_email_draft": (
             {
                 "subject": triage.meridian_email_draft.subject,
-                "body": triage.meridian_email_draft.body,
                 "question_ids": list(triage.meridian_email_draft.question_ids),
             }
             if triage.meridian_email_draft is not None

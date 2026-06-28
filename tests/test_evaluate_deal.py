@@ -15,12 +15,15 @@ from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.evaluation import EvaluationError, evaluate_deal_folder, openai_review_messages
 from hailmary.evidence import (
+    DiligenceQuestionItem,
     DiligenceQuestionQueue,
+    DiligenceQuestionSource,
     EvidenceAuditFinding,
     EvidenceAuditFindingKind,
     EvidenceAuditReadiness,
     EvidenceAuditSeverity,
     EvidenceCompletenessAudit,
+    build_diligence_triage,
 )
 from hailmary.evidence.actions import EvidenceActionStatus, record_evidence_action
 from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
@@ -2165,6 +2168,35 @@ def test_evaluate_deal_writes_diligence_question_queue_and_applies_answers(
     )
     assert queue.resolved_count == 1
     assert queue.triage is not None
+
+
+def test_diligence_queue_export_omits_meridian_email_body() -> None:
+    queue = DiligenceQuestionQueue(
+        deal_id="synthetic-deal",
+        company_name="SyntheticCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        questions=[
+            DiligenceQuestionItem(
+                question_id="dq_meridian_round_size",
+                priority=21,
+                source=DiligenceQuestionSource.MERIDIAN_WORKFLOW,
+                question="Resolve the Meridian field: Round size.",
+                reason="The Meridian manual workflow still needs this portal field.",
+                category="meridian:round_size",
+            )
+        ],
+    )
+    queue = queue.model_copy(update={"triage": build_diligence_triage(queue)})
+
+    export = evaluation._diligence_queue_export(queue, queue_path=None)
+
+    triage_export = export["triage"]
+    assert isinstance(triage_export, dict)
+    draft = triage_export["meridian_email_draft"]
+    assert isinstance(draft, dict)
+    assert draft["subject"] == "Follow-up diligence questions for SyntheticCo"
+    assert draft["question_ids"] == ["dq_meridian_round_size"]
+    assert "body" not in draft
 
 
 def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(
