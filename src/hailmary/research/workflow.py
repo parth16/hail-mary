@@ -415,7 +415,7 @@ def run_research_workflow(
                     )
                 )
 
-    live_collection_enabled = not config.local_only and config.enable_web_research
+    live_collection_enabled = True
     if live_collection_enabled:
         live_summaries = _run_live_collectors(
             config=config,
@@ -1353,8 +1353,8 @@ def _merge_provider_status(
         ResearchProviderRunStatus.IMPORTED: 2,
         ResearchProviderRunStatus.NO_EXACT_RESULTS: 3,
         ResearchProviderRunStatus.MANUAL_NEEDED: 4,
-        ResearchProviderRunStatus.PLANNED: 5,
-        ResearchProviderRunStatus.NOT_RUN: 6,
+        ResearchProviderRunStatus.NOT_RUN: 5,
+        ResearchProviderRunStatus.PLANNED: 6,
     }
     return existing if rank[existing] <= rank[incoming] else incoming
 

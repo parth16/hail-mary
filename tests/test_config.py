@@ -1129,7 +1129,7 @@ def test_web_research_ignores_legacy_env_gates(
 
     config = load_config()
 
-    assert config.local_only is False
+    assert config.local_only is True
     assert config.enable_web_research is True
 
 
@@ -1143,7 +1143,7 @@ def test_enable_ocr_env_is_local_and_independent_of_web_research(
 
     config = load_config()
 
-    assert config.local_only is False
+    assert config.local_only is True
     assert config.enable_ocr is True
     assert config.enable_web_research is True
 
@@ -1175,7 +1175,7 @@ def test_web_research_ignores_legacy_saved_config_gates(
 
     config = load_config()
 
-    assert config.local_only is False
+    assert config.local_only is True
     assert config.enable_web_research is True
 
 

@@ -412,6 +412,31 @@ def test_paid_provider_collection_respects_local_only_gate(
     assert client.calls == []
 
 
+def test_paid_provider_collection_respects_web_research_opt_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRUNCHBASE_API_KEY", "synthetic-test-key")
+    client = _FakePaidProviderClient(
+        provider_id="crunchbase",
+        facts=[_paid_fact(company_name="Acme AI")],
+    )
+
+    with pytest.raises(ResearchCollectionError, match="web research is disabled"):
+        collect_paid_research_results(
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                local_only=False,
+                enable_web_research=False,
+                enabled_paid_providers=("crunchbase",),
+            ),
+            company_names=["Acme AI"],
+            clients={"crunchbase": client},
+            collected_at=BUILT_AT,
+        )
+    assert client.calls == []
+
+
 def test_paid_provider_collection_writes_importable_mock_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1037,6 +1062,44 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
     )
     assert public_web_status.status == ResearchProviderRunStatus.MANUAL_NEEDED
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
+
+
+def test_run_research_workflow_counts_skipped_live_api_collectors_as_not_run(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    web_client = _FakeWebResearchClient(
+        {
+            "https://example.com/acme": WebFetchResponse(
+                final_url="https://example.com/acme",
+                content_type="text/plain",
+                text="Acme AI has public traction.",
+            )
+        }
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com/acme",
+        created_at=BUILT_AT,
+        web_client=web_client,
+    )
+
+    assert result.live_collection_enabled is True
+    assert web_client.calls == ["https://example.com/acme"]
+    live_api_statuses = {
+        status.provider_id: status.status
+        for status in result.summary.provider_statuses
+        if status.provider_id in {"sec_form_d", "usaspending", "sbir", "github"}
+    }
+    assert live_api_statuses == {
+        "sec_form_d": ResearchProviderRunStatus.NOT_RUN,
+        "usaspending": ResearchProviderRunStatus.NOT_RUN,
+        "sbir": ResearchProviderRunStatus.NOT_RUN,
+        "github": ResearchProviderRunStatus.NOT_RUN,
+    }
+    assert result.summary.not_run_provider_count == 4
 
 
 def test_run_research_workflow_treats_corrupt_import_state_as_blocking(

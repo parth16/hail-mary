@@ -220,7 +220,11 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
     else:
         raw_data_dir = Path(saved_values.get("data_dir", "./data"))
     resolved_data_dir = _expand_project_path(raw_data_dir)
-    local_only = False
+    local_only = (
+        _env_bool("HAILMARY_LOCAL_ONLY", False)
+        if "HAILMARY_LOCAL_ONLY" in os.environ
+        else _config_bool(saved_values, "local_only", False)
+    )
     enable_web_research = True
     enable_ocr = (
         _env_bool("HAILMARY_ENABLE_OCR", False)
@@ -567,7 +571,6 @@ def _expand_config_paths(config: AppConfig) -> AppConfig:
         update={
             "data_dir": _expand_project_path(config.data_dir),
             "meridian_profile_dir": _expand_project_path(meridian_profile_dir),
-            "enable_web_research": True,
         }
     )
 
