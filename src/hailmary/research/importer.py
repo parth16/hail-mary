@@ -1178,10 +1178,11 @@ def _evaluate_deal_rerun_command(
 ) -> str | None:
     if len(summary.deals) != 1:
         return None
+    absolute_data_dir = _absolute_path(data_dir).resolve(strict=False)
     return (
         "hailmary evaluate-deal "
         f"{shlex.quote(str(summary.root_path))} "
-        f"--data-dir {shlex.quote(str(data_dir))}"
+        f"--data-dir {shlex.quote(str(absolute_data_dir))}"
     )
 
 
