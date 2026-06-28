@@ -9,8 +9,12 @@ from pydantic import BaseModel
 
 class CompanyMatchKind(StrEnum):
     EXACT = "exact"
+    LEGAL_ENTITY = "legal_entity"
     LIKELY = "likely"
+    PRODUCT_NAME = "product_name"
+    FOUNDER_RELATED = "founder_related"
     RELATED = "related"
+    AMBIGUOUS = "ambiguous"
     REJECTED = "rejected"
 
 
@@ -24,7 +28,7 @@ class CompanyMatch(BaseModel):
 
     @property
     def import_ready(self) -> bool:
-        return self.kind == CompanyMatchKind.EXACT
+        return self.kind in {CompanyMatchKind.EXACT, CompanyMatchKind.LEGAL_ENTITY}
 
 
 LEGAL_SUFFIXES = {
@@ -41,6 +45,23 @@ LEGAL_SUFFIXES = {
     "lp",
     "llp",
     "plc",
+}
+PRODUCT_MARKERS = {
+    "app",
+    "api",
+    "platform",
+    "product",
+    "service",
+    "software",
+    "suite",
+    "tool",
+}
+FOUNDER_MARKERS = {
+    "ceo",
+    "cofounder",
+    "founder",
+    "founding",
+    "president",
 }
 
 
@@ -90,10 +111,10 @@ def classify_company_match(
             return CompanyMatch(
                 requested_name=requested_name,
                 candidate_name=candidate_name,
-                kind=CompanyMatchKind.RELATED,
+                kind=CompanyMatchKind.AMBIGUOUS,
                 reason=(
                     "The base company name matches, but the legal-entity suffix differs. "
-                    "Treat this as a related-name match until an operator validates the entity."
+                    "Treat this as an ambiguous entity match until an operator validates it."
                 ),
                 normalized_requested=requested,
                 normalized_candidate=candidate,
@@ -101,8 +122,10 @@ def classify_company_match(
         return CompanyMatch(
             requested_name=requested_name,
             candidate_name=candidate_name,
-            kind=CompanyMatchKind.EXACT,
-            reason="The base company name matches and the legal suffix does not conflict.",
+            kind=CompanyMatchKind.LEGAL_ENTITY,
+            reason=(
+                "The base company name matches and the legal-entity suffix does not conflict."
+            ),
             normalized_requested=requested,
             normalized_candidate=candidate,
         )
@@ -129,7 +152,7 @@ def classify_company_match(
             return CompanyMatch(
                 requested_name=requested_name,
                 candidate_name=candidate_name,
-                kind=CompanyMatchKind.RELATED,
+                kind=CompanyMatchKind.AMBIGUOUS,
                 reason=(
                     "The base company name matches after removing word breaks, but the "
                     "legal-entity suffix differs. Operator validation is required before import."
@@ -155,6 +178,31 @@ def classify_company_match(
         requested_tokens,
         candidate_tokens,
     ):
+        if _looks_founder_related(requested_tokens, candidate_tokens):
+            return CompanyMatch(
+                requested_name=requested_name,
+                candidate_name=candidate_name,
+                kind=CompanyMatchKind.FOUNDER_RELATED,
+                reason=(
+                    "One normalized name includes the company plus founder or executive "
+                    "wording. Treat this as founder-related context until the company "
+                    "identity is validated."
+                ),
+                normalized_requested=requested,
+                normalized_candidate=candidate,
+            )
+        if _looks_product_name(requested_tokens, candidate_tokens):
+            return CompanyMatch(
+                requested_name=requested_name,
+                candidate_name=candidate_name,
+                kind=CompanyMatchKind.PRODUCT_NAME,
+                reason=(
+                    "One normalized name includes the other plus product wording. Treat "
+                    "this as a product-name match until an operator validates the entity."
+                ),
+                normalized_requested=requested,
+                normalized_candidate=candidate,
+            )
         return CompanyMatch(
             requested_name=requested_name,
             candidate_name=candidate_name,
@@ -173,10 +221,10 @@ def classify_company_match(
         return CompanyMatch(
             requested_name=requested_name,
             candidate_name=candidate_name,
-            kind=CompanyMatchKind.RELATED,
+            kind=CompanyMatchKind.AMBIGUOUS,
             reason=(
-                "The names share most normalized words. Treat this as a related-name "
-                "match until an operator validates the entity."
+                "The names share most normalized words, but do not match exactly. "
+                "Treat this as ambiguous until an operator validates the entity."
             ),
             normalized_requested=requested,
             normalized_candidate=candidate,
@@ -186,7 +234,7 @@ def classify_company_match(
         requested_name=requested_name,
         candidate_name=candidate_name,
         kind=CompanyMatchKind.REJECTED,
-        reason="The normalized company names do not match closely enough.",
+        reason="The normalized company names appear unrelated.",
         normalized_requested=requested,
         normalized_candidate=candidate,
     )
@@ -217,9 +265,13 @@ def _contains_token_phrase(tokens: list[str], phrase: list[str]) -> bool:
 def _match_rank(kind: CompanyMatchKind) -> int:
     return {
         CompanyMatchKind.EXACT: 0,
-        CompanyMatchKind.LIKELY: 1,
-        CompanyMatchKind.RELATED: 2,
-        CompanyMatchKind.REJECTED: 3,
+        CompanyMatchKind.LEGAL_ENTITY: 1,
+        CompanyMatchKind.LIKELY: 2,
+        CompanyMatchKind.PRODUCT_NAME: 3,
+        CompanyMatchKind.FOUNDER_RELATED: 4,
+        CompanyMatchKind.RELATED: 5,
+        CompanyMatchKind.AMBIGUOUS: 6,
+        CompanyMatchKind.REJECTED: 7,
     }[kind]
 
 
@@ -229,3 +281,44 @@ def _split_legal_suffix(value: str) -> tuple[str, str]:
     while tokens and tokens[-1].rstrip(".") in LEGAL_SUFFIXES:
         suffix_tokens.insert(0, tokens.pop().rstrip("."))
     return " ".join(tokens), " ".join(suffix_tokens)
+
+
+def _looks_product_name(requested_tokens: list[str], candidate_tokens: list[str]) -> bool:
+    extra_tokens = _extra_phrase_tokens(requested_tokens, candidate_tokens)
+    return any(token in PRODUCT_MARKERS for token in extra_tokens)
+
+
+def _looks_founder_related(
+    requested_tokens: list[str],
+    candidate_tokens: list[str],
+) -> bool:
+    extra_tokens = _extra_phrase_tokens(requested_tokens, candidate_tokens)
+    if any(token in FOUNDER_MARKERS for token in extra_tokens):
+        return True
+    if not _contains_token_phrase(candidate_tokens, requested_tokens):
+        return False
+    first_index = _phrase_index(candidate_tokens, requested_tokens)
+    return first_index is not None and 0 < first_index <= 4
+
+
+def _extra_phrase_tokens(tokens_one: list[str], tokens_two: list[str]) -> list[str]:
+    if _contains_token_phrase(tokens_one, tokens_two):
+        index = _phrase_index(tokens_one, tokens_two)
+        if index is None:
+            return []
+        return [*tokens_one[:index], *tokens_one[index + len(tokens_two) :]]
+    if _contains_token_phrase(tokens_two, tokens_one):
+        index = _phrase_index(tokens_two, tokens_one)
+        if index is None:
+            return []
+        return [*tokens_two[:index], *tokens_two[index + len(tokens_one) :]]
+    return []
+
+
+def _phrase_index(tokens: list[str], phrase: list[str]) -> int | None:
+    if not tokens or not phrase or len(phrase) > len(tokens):
+        return None
+    for index in range(0, len(tokens) - len(phrase) + 1):
+        if tokens[index : index + len(phrase)] == phrase:
+            return index
+    return None

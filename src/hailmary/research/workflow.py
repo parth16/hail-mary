@@ -68,6 +68,7 @@ PRIVACY_NOTES = [
     "Every imported external fact still needs provider, retrieval time, exact URL or API source, "
     "confidence, and licensing notes.",
 ]
+MAX_IDENTITY_WARNING_DETAILS = 5
 
 
 class ResearchWorkflowIssue(BaseModel):
@@ -825,7 +826,11 @@ def _collection_summary_from_result(
     output_path = getattr(result, "output_path", None)
     result_count = int(getattr(result, "result_count", 0))
     deals = list(getattr(result, "deals", []))
-    warnings = list(getattr(result, "warnings", []))
+    match_details = list(getattr(result, "match_details", []))
+    warnings = [
+        *list(getattr(result, "warnings", [])),
+        *_identity_match_warnings(match_details),
+    ]
     no_result_companies = [
         deal.company_name for deal in deals if getattr(deal, "result_count", 0) == 0
     ]
@@ -853,7 +858,7 @@ def _collection_summary_from_result(
         deal_count=len(deals),
         no_result_companies=no_result_companies,
         skipped_non_exact_company_names=skipped_non_exact_company_names or [],
-        match_details=list(getattr(result, "match_details", [])),
+        match_details=match_details,
         provider_ids=provider_ids,
         provider_result_counts=provider_result_counts,
         provider_company_result_counts=provider_company_result_counts,
@@ -869,6 +874,36 @@ def _collection_summary_from_result(
         incomplete_search=incomplete_search,
         warnings=warnings,
     )
+
+
+def _identity_match_warnings(match_details: list[CompanyMatch]) -> list[str]:
+    warnings: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    skipped_count = 0
+    for match in match_details:
+        if match.import_ready:
+            continue
+        skipped_count += 1
+        key = (match.requested_name, match.candidate_name, match.kind.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(warnings) >= MAX_IDENTITY_WARNING_DETAILS:
+            continue
+        kind = match.kind.value.replace("_", " ")
+        warnings.append(
+            "Skipped external research result for "
+            f"{match.requested_name}: {match.candidate_name} was classified as "
+            f"{kind}. {match.reason}"
+        )
+    remaining = skipped_count - len(warnings)
+    if remaining > 0:
+        warning_word = "result" if remaining == 1 else "results"
+        warnings.append(
+            f"Skipped {remaining} additional external research {warning_word} because "
+            "the company identity was not an import-ready match."
+        )
+    return warnings
 
 
 def _preview_imports(

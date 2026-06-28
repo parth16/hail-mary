@@ -15,6 +15,9 @@ from pydantic import (
 )
 
 from hailmary.schemas.documents import DocumentType, SourceKind
+from hailmary.schemas.evidence import SourceReliability
+
+from .matching import CompanyMatchKind
 
 BUILTIN_RESEARCH_PROVIDER_SOURCE_KINDS: dict[str, SourceKind] = {
     "company_website": SourceKind.WEB,
@@ -143,6 +146,9 @@ class ResearchResultInput(BaseModel):
     licensing_notes: str
     source_kind: SourceKind = SourceKind.WEB
     document_type: DocumentType = DocumentType.WEB_PAGE
+    source_reliability: SourceReliability | None = None
+    identity_match_kind: CompanyMatchKind | None = None
+    identity_match_reason: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -189,6 +195,9 @@ class ResearchResultInput(BaseModel):
         "provider_name",
         "source_url",
         "source_api",
+        "source_reliability",
+        "identity_match_kind",
+        "identity_match_reason",
         mode="before",
     )
     @classmethod
@@ -206,6 +215,7 @@ class ResearchResultInput(BaseModel):
         "source_api",
         "confidence",
         "licensing_notes",
+        "identity_match_reason",
     )
     @classmethod
     def strip_text(cls, value: str | None) -> str | None:

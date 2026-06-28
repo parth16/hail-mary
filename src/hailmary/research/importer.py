@@ -29,6 +29,7 @@ from hailmary.schemas.evidence import (
 )
 from hailmary.utils.slug import slugify
 
+from .matching import CompanyMatch, CompanyMatchKind, classify_company_match
 from .meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
@@ -41,7 +42,11 @@ from .meridian import (
     clean_meridian_url,
 )
 from .providers import builtin_research_providers
-from .quality import STALE_SOURCE_DAYS, evidence_duplicate_keys
+from .quality import (
+    evidence_duplicate_keys,
+    source_freshness_for_retrieved_at,
+    source_reliability_for_result,
+)
 from .schemas import (
     ResearchImportDealSummary,
     ResearchImportRunSummary,
@@ -80,6 +85,14 @@ RESEARCH_RESULT_FIELDS = {
     "licensing_notes",
     "source_kind",
     "document_type",
+    "source_reliability",
+    "identity_match_kind",
+    "identity_match_reason",
+}
+LEGACY_RESEARCH_RESULT_FIELDS = RESEARCH_RESULT_FIELDS - {
+    "source_reliability",
+    "identity_match_kind",
+    "identity_match_reason",
 }
 TEMPLATE_REQUIRED_FACT_FIELDS = {
     "title",
@@ -329,7 +342,8 @@ def _validate_results_file_payload(raw_payload: dict[str, object]) -> ResearchRe
 def _is_blank_template_result(result: object) -> bool:
     if not isinstance(result, dict):
         return False
-    if set(result) != RESEARCH_RESULT_FIELDS:
+    result_fields = set(result)
+    if result_fields != RESEARCH_RESULT_FIELDS and result_fields != LEGACY_RESEARCH_RESULT_FIELDS:
         return False
     if _is_untouched_meridian_placeholder_result(result):
         return True
@@ -581,6 +595,7 @@ def _validate_results(results: list[ResearchResultInput], *, imported_at: dateti
         _validate_licensing_notes(result, index=display_index)
         _validate_known_provider_source_kind(result, index=display_index)
         _validate_known_provider_source_locations(result, index=display_index)
+        _validate_explicit_identity_match(result, index=display_index)
         retrieved_at = _as_utc(result.retrieved_at)
         if retrieved_at > imported_at:
             raise ResearchImportError(
@@ -774,6 +789,41 @@ def _validate_provider_reference_host(
         ) from exc
 
 
+def _validate_explicit_identity_match(
+    result: ResearchResultInput,
+    *,
+    index: int,
+) -> None:
+    if result.identity_match_kind is None or result.identity_match_kind in {
+        CompanyMatchKind.EXACT,
+        CompanyMatchKind.LEGAL_ENTITY,
+    }:
+        return
+    if _confidence_explicitly_validates_identity(result.confidence):
+        return
+    kind = result.identity_match_kind.value.replace("_", " ")
+    raise ResearchImportError(
+        f"Research result {index} identity_match_kind {kind} is not import-ready. "
+        "Use exact or legal_entity, or make the confidence note explicitly say an "
+        "operator verified the exact same company or legal entity."
+    )
+
+
+def _confidence_explicitly_validates_identity(confidence: str) -> bool:
+    normalized = re.sub(r"[\W_]+", " ", confidence).casefold()
+    return any(
+        phrase in normalized
+        for phrase in [
+            "operator verified exact identity",
+            "operator validated exact identity",
+            "operator verified same legal entity",
+            "operator validated same legal entity",
+            "manually verified exact identity",
+            "manually verified same legal entity",
+        ]
+    )
+
+
 def _match_results_to_deals(
     results: list[ResearchResultInput],
     deals: list[IngestedDeal],
@@ -946,6 +996,7 @@ def _evidence_record_for_result(
     document_type = result.document_type
     if result.source_kind == SourceKind.MERIDIAN and document_type == DocumentType.WEB_PAGE:
         document_type = DocumentType.PLATFORM_DEAL_PAGE
+    identity_match = _identity_match_for_result(result, deal=deal)
 
     return EvidenceRecord(
         id=_external_evidence_id(result.provider_id, digest),
@@ -961,7 +1012,10 @@ def _evidence_record_for_result(
         text=text,
         source_span_start=0,
         source_span_end=len(text),
-        source_freshness=_source_freshness(result.retrieved_at, now=imported_at),
+        source_freshness=source_freshness_for_retrieved_at(
+            result.retrieved_at,
+            now=imported_at,
+        ),
         provider_id=result.provider_id,
         provider_name=provider_name,
         source_url=result.source_url,
@@ -969,6 +1023,38 @@ def _evidence_record_for_result(
         retrieved_at=_as_utc(result.retrieved_at),
         external_confidence=result.confidence,
         licensing_notes=_saved_licensing_notes(result.licensing_notes),
+        source_reliability=source_reliability_for_result(result),
+        identity_match_kind=identity_match.kind.value,
+        identity_match_reason=identity_match.reason,
+    )
+
+
+def _identity_match_for_result(
+    result: ResearchResultInput,
+    *,
+    deal: IngestedDeal,
+) -> CompanyMatch:
+    if result.identity_match_kind is not None:
+        return CompanyMatch(
+            requested_name=deal.company_name,
+            candidate_name=result.company_name or deal.company_name,
+            kind=result.identity_match_kind,
+            reason=(
+                result.identity_match_reason
+                or "The research result supplied an explicit identity match kind."
+            ),
+            normalized_requested=deal.company_name.casefold(),
+            normalized_candidate=(result.company_name or deal.company_name).casefold(),
+        )
+    if result.company_name is not None:
+        return classify_company_match(deal.company_name, result.company_name)
+    return CompanyMatch(
+        requested_name=deal.company_name,
+        candidate_name=deal.company_name,
+        kind=CompanyMatchKind.EXACT,
+        reason="The research result was linked to this deal by exact deal_id.",
+        normalized_requested=deal.company_name.casefold(),
+        normalized_candidate=deal.company_name.casefold(),
     )
 
 
@@ -1135,11 +1221,7 @@ def _known_providers() -> dict[str, ResearchProvider]:
 
 
 def _source_freshness(retrieved_at: datetime, *, now: datetime) -> SourceFreshness:
-    retrieved_at = _as_utc(retrieved_at)
-    age_days = (_as_utc(now) - retrieved_at).days
-    if age_days > STALE_SOURCE_DAYS:
-        return SourceFreshness.STALE
-    return SourceFreshness.CURRENT
+    return source_freshness_for_retrieved_at(retrieved_at, now=now)
 
 
 def _summary_with_updated_counts(

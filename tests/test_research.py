@@ -68,7 +68,10 @@ from hailmary.research import (
     prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
+    research_quality_status,
     run_research_workflow,
+    source_freshness_for_retrieved_at,
+    source_reliability_for_provider,
 )
 from hailmary.research.meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
@@ -87,7 +90,7 @@ from hailmary.research.web import (
 )
 from hailmary.schemas.agents import AgentRole
 from hailmary.schemas.documents import DocumentType, IngestedDeal, SourceKind
-from hailmary.schemas.evidence import EvidenceStore, SourceFreshness
+from hailmary.schemas.evidence import EvidenceStore, SourceFreshness, SourceReliability
 from hailmary.scoring.memo import render_markdown_memo
 from hailmary.scoring.scorer import score_evidence_store
 
@@ -142,8 +145,10 @@ def test_research_result_source_kind_defaults_match_builtin_registry() -> None:
 
 
 def test_company_match_classifies_exact_related_likely_and_rejected() -> None:
-    exact = classify_company_match("Acme AI", "Acme AI, Inc.")
+    exact = classify_company_match("Acme AI", "Acme AI")
+    legal_entity = classify_company_match("Acme AI", "Acme AI, Inc.")
     likely = classify_company_match("Acme AI", "AcmeAI")
+    product = classify_company_match("Acme AI", "Acme AI Platform")
     related = classify_company_match("Acme AI", "Acme AI Federal")
     suffix_variant = classify_company_match("Acme LLC", "Acme LP")
     founder = classify_company_match("Acme AI", "Jane Founder, Acme AI")
@@ -152,12 +157,17 @@ def test_company_match_classifies_exact_related_likely_and_rejected() -> None:
 
     assert exact.kind == CompanyMatchKind.EXACT
     assert exact.import_ready is True
+    assert legal_entity.kind == CompanyMatchKind.LEGAL_ENTITY
+    assert legal_entity.import_ready is True
     assert likely.kind == CompanyMatchKind.LIKELY
     assert likely.import_ready is False
+    assert product.kind == CompanyMatchKind.PRODUCT_NAME
+    assert product.import_ready is False
     assert related.kind == CompanyMatchKind.RELATED
     assert related.import_ready is False
-    assert suffix_variant.kind == CompanyMatchKind.RELATED
+    assert suffix_variant.kind == CompanyMatchKind.AMBIGUOUS
     assert suffix_variant.import_ready is False
+    assert founder.kind == CompanyMatchKind.FOUNDER_RELATED
     assert founder.import_ready is False
     assert investor.import_ready is False
     assert rejected.kind == CompanyMatchKind.REJECTED
@@ -168,6 +178,55 @@ def test_collection_company_cleaning_preserves_suffix_distinct_requests() -> Non
     assert collection_module._clean_company_names(
         ["Acme", " Acme ", "Acme Inc.", "acme inc."]
     ) == ["Acme", "Acme Inc."]
+
+
+def test_source_reliability_and_freshness_classification() -> None:
+    assert (
+        source_reliability_for_provider(
+            "company_website",
+            source_kind=SourceKind.WEB,
+            document_type=DocumentType.WEB_PAGE,
+        )
+        == SourceReliability.OFFICIAL_COMPANY
+    )
+    assert (
+        source_reliability_for_provider(
+            "sec_form_d",
+            source_kind=SourceKind.WEB,
+            document_type=DocumentType.WEB_PAGE,
+        )
+        == SourceReliability.GOVERNMENT_FILING
+    )
+    assert (
+        source_reliability_for_provider(
+            "github",
+            source_kind=SourceKind.WEB,
+            document_type=DocumentType.WEB_PAGE,
+        )
+        == SourceReliability.REPOSITORY_METADATA
+    )
+    assert (
+        source_reliability_for_provider(
+            "custom_public_source",
+            source_kind=SourceKind.WEB,
+            document_type=DocumentType.WEB_PAGE,
+        )
+        == SourceReliability.UNKNOWN
+    )
+    assert (
+        source_freshness_for_retrieved_at(
+            datetime(2026, 1, 1, tzinfo=UTC),
+            now=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        == SourceFreshness.CURRENT
+    )
+    assert (
+        source_freshness_for_retrieved_at(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            now=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        == SourceFreshness.STALE
+    )
 
 
 def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> None:
@@ -4644,6 +4703,9 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "licensing_notes",
         "source_kind",
         "document_type",
+        "source_reliability",
+        "identity_match_kind",
+        "identity_match_reason",
     }
     assert row["company_name"] == "Acme AI"
     assert row["provider_id"] == "meridian"
@@ -4655,6 +4717,9 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert row["confidence"].startswith("Replace with confidence")
     assert row["source_kind"] == "meridian"
     assert row["document_type"] == "platform_deal_page"
+    assert row["source_reliability"] == ""
+    assert row["identity_match_kind"] == ""
+    assert row["identity_match_reason"] == ""
     assert "Do not bypass" in row["licensing_notes"]
     assert "Generated by Hail Mary prepare-meridian-workflow" in row["licensing_notes"]
     assert "Generated Meridian placeholder" in row["licensing_notes"]
@@ -4965,6 +5030,9 @@ def test_prepare_research_results_template_writes_private_fillable_file(
         ),
         "source_kind": "web",
         "document_type": "web_page",
+        "source_reliability": "",
+        "identity_match_kind": "",
+        "identity_match_reason": "",
     }
 
 
@@ -5398,6 +5466,52 @@ def test_prepare_public_research_results_preserves_suffix_distinct_requested_com
     assert result.output_path is not None
     saved = json.loads(result.output_path.read_text(encoding="utf-8"))
     assert [item["company_name"] for item in saved["results"]] == ["Acme LLC"]
+
+
+def test_research_workflow_warns_with_reasons_for_skipped_identity_matches(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    sec_results_path = tmp_path / "sec-form-d-results.json"
+    _write_sec_form_d_results(
+        sec_results_path,
+        [
+            {
+                "company_name": "Acme AI",
+                "title": "Acme AI Form D",
+                "text": "Acme AI filed a synthetic Form D.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/exact",
+            },
+            {
+                "company_name": "Acme AI Platform",
+                "title": "Acme AI Platform result",
+                "text": "A similarly named product result exists.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/acme/platform",
+            },
+            {
+                "company_name": "Unrelated Robotics",
+                "title": "Unrelated result",
+                "text": "An unrelated synthetic result exists.",
+                "retrieved_at": "2025-12-31T12:00:00Z",
+                "source_url": "https://www.sec.gov/Archives/edgar/data/unrelated/result",
+            },
+        ],
+    )
+
+    workflow = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        sec_form_d_results_path=sec_results_path,
+        created_at=BUILT_AT,
+    )
+
+    assert workflow.collections
+    warnings = workflow.collections[0].warnings
+    assert any("Acme AI Platform" in warning and "product name" in warning for warning in warnings)
+    assert any("Unrelated Robotics" in warning and "rejected" in warning for warning in warnings)
+    assert workflow.summary.warning_count >= 2
 
 
 def test_prepare_public_research_results_combines_free_public_source_files(
@@ -7411,6 +7525,62 @@ def test_import_research_results_imports_stale_sources_as_stale(
     assert "older public source" in stale_records[0].text
 
 
+def test_import_research_results_saves_reliability_and_identity_tags(
+    tmp_path: Path,
+) -> None:
+    config, deal, results_path = _ingest_deal_and_write_results(tmp_path)
+
+    import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert deal.evidence_store_path is not None
+    saved_store = EvidenceStore.model_validate_json(
+        deal.evidence_store_path.read_text(encoding="utf-8")
+    )
+    external_evidence = next(
+        evidence for evidence in saved_store.evidence if evidence.provider_id == "sec_form_d"
+    )
+    assert external_evidence.source_reliability == SourceReliability.GOVERNMENT_FILING
+    assert external_evidence.identity_match_kind == CompanyMatchKind.EXACT.value
+    assert external_evidence.identity_match_reason
+
+    quality = research_quality_status(saved_store)
+
+    assert quality.status == "usable"
+    assert quality.imported_record_count == 1
+    assert quality.source_reliability[0].label == SourceReliability.GOVERNMENT_FILING.value
+    assert quality.identity_matches[0].label == CompanyMatchKind.EXACT.value
+
+
+def test_import_research_results_rejects_non_exact_identity_without_safe_confidence(
+    tmp_path: Path,
+) -> None:
+    config, deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-related-identity.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                deal_id=deal.id,
+                company_name=None,
+                identity_match_kind="product_name",
+                identity_match_reason="The source was for a similarly named platform.",
+                confidence="medium: related product name",
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match="identity_match_kind product name"):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
 def test_import_research_results_requires_plain_english_licensing_notes(
     tmp_path: Path,
 ) -> None:
@@ -7636,6 +7806,33 @@ def test_import_research_results_rejects_wrong_provider_source_url_host(
         ResearchImportError,
         match=r"provider_id sam_gov.*source_url must use a SAM\.gov website host",
     ):
+        import_research_results(
+            config=config,
+            results_path=bad_results_path,
+            imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_import_research_results_rejects_unsafe_source_url_with_quality_fields(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    bad_results_path = tmp_path / "research-results-tokenized-quality-url.json"
+    _write_results(
+        bad_results_path,
+        [
+            _research_result(
+                provider_id="custom_public_source",
+                provider_name="Custom public source",
+                source_url="https://example.com/acme-ai?token=secret",
+                source_reliability="unknown",
+                identity_match_kind="exact",
+                identity_match_reason="Synthetic exact company identity fixture.",
+            )
+        ],
+    )
+
+    with pytest.raises(ResearchImportError, match="token, signature, credential"):
         import_research_results(
             config=config,
             results_path=bad_results_path,

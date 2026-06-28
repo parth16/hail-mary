@@ -63,6 +63,7 @@ from hailmary.schemas.evidence import (
     EvidenceRecord,
     EvidenceStore,
     SourceFreshness,
+    SourceReliability,
     VerificationStatus,
 )
 from hailmary.schemas.scoring import (
@@ -646,6 +647,8 @@ def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
 
     assert result.research_run is not None
     assert result.research_imported_count == 1
+    assert result.research_run.quality_status is not None
+    assert result.research_run.quality_status.status == "usable"
     assert result.evidence_count == 2
     assert result.deterministic_score.score_factors
     serialized_payloads = "\n".join(client.request_payloads)
@@ -653,8 +656,74 @@ def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "## External Research" in memo_text
     assert "Imported 1 external research evidence record before scoring." in memo_text
+    assert "Research quality: usable; 1 current, 0 stale, 0 unknown freshness." in memo_text
+    assert "Source reliability tags: official company 1." in memo_text
+    assert "Imported identity matches: exact 1." in memo_text
     assert "Company website: imported (1 imported record)." in memo_text
     assert "Company website: planned (1 ready-to-import result)." not in memo_text
+    exported = json.loads(result.final_json_path.read_text(encoding="utf-8"))
+    assert exported["research"]["quality"]["status"] == "usable"
+    assert exported["research"]["quality"]["source_reliability"] == [
+        {"label": SourceReliability.OFFICIAL_COMPANY.value, "count": 1}
+    ]
+    assert exported["research"]["quality"]["identity_matches"] == [
+        {"label": "exact", "count": 1}
+    ]
+    assert "ResearchCo public site reports" not in result.final_json_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_evaluate_deal_surfaces_stale_only_research_quality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="StaleResearchCo",
+        body="Valuation cap $8M. Round size $1M. Lead investor committed.",
+    )
+    research_path = tmp_path / "stale-research-results.json"
+    research_path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "StaleResearchCo",
+                        "provider_id": "company_website",
+                        "provider_name": "Company website",
+                        "title": "StaleResearchCo traction page",
+                        "text": "StaleResearchCo reported paid customers in an old public page.",
+                        "retrieved_at": "2024-01-01T12:00:00Z",
+                        "source_url": "https://example.com/staleresearchco/traction",
+                        "confidence": "high: exact synthetic company match",
+                        "licensing_notes": "Synthetic public page fixture.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=True),
+        max_concurrency=1,
+        research_results_files=[research_path],
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert result.research_run is not None
+    assert result.research_run.quality_status is not None
+    assert result.research_run.quality_status.stale_only is True
+    assert any("All imported external research was stale" in warning for warning in result.warnings)
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Research quality: limited; 0 current, 1 stale, 0 unknown freshness." in memo_text
+    assert "All imported external research records were stale" in memo_text
+    exported = json.loads(result.final_json_path.read_text(encoding="utf-8"))
+    assert exported["research"]["quality"]["stale_only"] is True
+    assert exported["research"]["quality"]["stale_record_count"] == 1
 
 
 def test_evaluate_deal_excludes_actioned_evidence_before_scoring_and_packets(

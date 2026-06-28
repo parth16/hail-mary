@@ -346,6 +346,9 @@ def _template_result_for_fact(
         ),
         "source_kind": SourceKind.MERIDIAN.value,
         "document_type": DocumentType.PLATFORM_DEAL_PAGE.value,
+        "source_reliability": "",
+        "identity_match_kind": "",
+        "identity_match_reason": "",
     }
 
 
@@ -404,6 +407,9 @@ def _required_result_fields() -> dict[str, str]:
         ),
         "source_kind": "Keep meridian.",
         "document_type": "Keep platform_deal_page.",
+        "source_reliability": "Optional. Leave blank unless you have a reviewed reliability tag.",
+        "identity_match_kind": "Optional. Leave blank unless identity was manually reviewed.",
+        "identity_match_reason": "Optional. Plain-English identity review note.",
     }
 
 

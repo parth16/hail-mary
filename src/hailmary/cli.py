@@ -2382,6 +2382,10 @@ def evaluate_deal(
         _plain(str(result.research_imported_count)),
     )
     summary.add_row(
+        _plain("External research quality"),
+        _plain(_evaluate_deal_research_quality_text(result)),
+    )
+    summary.add_row(
         _plain("Rule-based recommendation"),
         _plain(str(result.deterministic_score.recommendation)),
     )
@@ -2449,6 +2453,9 @@ def evaluate_deal(
                 "Research summary: "
                 f"{_research_summary_counts_text(research_workflow)}."
             )
+        )
+        renderables.append(
+            _plain(f"Research quality: {_evaluate_deal_research_quality_text(result)}.")
         )
         if research_workflow.manual_task_queue_path is not None:
             renderables.append(
@@ -3101,6 +3108,19 @@ def _research_summary_counts_text(result: ResearchWorkflowRunSummary) -> str:
     return (
         f"{failed_provider_count}, {incomplete_search_count}, {no_exact_count}, "
         f"{manual_count}, {not_run_count}, {stale_count}, {warning_count}"
+    )
+
+
+def _evaluate_deal_research_quality_text(result: DealEvaluationResult) -> str:
+    if result.research_run is None:
+        return "skipped"
+    quality_status = result.research_run.quality_status
+    if quality_status is None:
+        return "not available"
+    return (
+        f"{quality_status.status}; {quality_status.current_record_count} current, "
+        f"{quality_status.stale_record_count} stale, "
+        f"{quality_status.unknown_freshness_record_count} unknown freshness"
     )
 
 

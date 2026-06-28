@@ -19,6 +19,7 @@ from urllib.parse import quote, urlencode, urlparse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from hailmary.config import AppConfig, ConfigError, validate_local_state
+from hailmary.schemas.documents import DocumentType
 
 from .matching import (
     CompanyMatch,
@@ -29,7 +30,7 @@ from .matching import (
     normalize_company_slug,
 )
 from .providers import builtin_research_providers
-from .quality import ranked_public_research_results
+from .quality import ranked_public_research_results, source_reliability_for_provider
 from .schemas import ResearchProvider, ResearchResultInput, ResearchResultsFile
 from .source_urls import (
     source_reference_looks_like_url,
@@ -118,6 +119,7 @@ class GitHubApiError(RuntimeError):
 GITHUB_REPOSITORY_SEARCH_ENDPOINT = "https://api.github.com/search/repositories"
 GITHUB_MAX_PAGES = 5
 GITHUB_SEARCH_REQUEST_INTERVAL_SECONDS = 6.1
+MAX_IDENTITY_WARNING_DETAILS = 5
 
 
 @dataclass(frozen=True)
@@ -823,7 +825,8 @@ class PublicSourceFileAdapter:
         adapter_config = _public_source_adapter_config(self.provider_id)
         results: list[ResearchResultInput] = []
         for search_result in self.client.search(deal.company_name):
-            if not _exact_company_name_match(deal.company_name, search_result.company_name):
+            match = classify_company_match(deal.company_name, search_result.company_name)
+            if not match.import_ready:
                 continue
             if search_result.source_url is not None:
                 validate_provider_source_url(provider.id, search_result.source_url)
@@ -849,6 +852,13 @@ class PublicSourceFileAdapter:
                     confidence=adapter_config.confidence(provider),
                     licensing_notes=provider.licensing_notes,
                     source_kind=provider.source_kind,
+                    source_reliability=source_reliability_for_provider(
+                        provider.id,
+                        source_kind=provider.source_kind,
+                        document_type=DocumentType.WEB_PAGE,
+                    ),
+                    identity_match_kind=match.kind,
+                    identity_match_reason=match.reason,
                 )
             except ValidationError as exc:
                 detail = _first_validation_detail(exc)
@@ -1564,6 +1574,7 @@ def collect_usaspending_awards(
                             award,
                             provider=provider,
                             collected_at=collected_at,
+                            identity_match=match,
                         )
                     )
                     if len(deal_results) >= limit:
@@ -1724,6 +1735,7 @@ def collect_sbir_awards(
                             provider=provider,
                             collected_at=collected_at,
                             source_api=source_api,
+                            identity_match=match,
                         )
                     )
                     if len(deal_results) >= limit:
@@ -1881,6 +1893,7 @@ def collect_sec_form_d_filings(
                             filing,
                             provider=provider,
                             collected_at=collected_at,
+                            identity_match=match,
                         )
                     )
                     if len(deal_results) >= limit:
@@ -2040,6 +2053,7 @@ def collect_github_repositories(
                             repository,
                             provider=provider,
                             collected_at=collected_at,
+                            identity_match=match,
                         )
                     )
                     if len(deal_results) >= limit:
@@ -2738,6 +2752,7 @@ def _research_result_from_usaspending_award(
     *,
     provider: ResearchProvider,
     collected_at: datetime,
+    identity_match: CompanyMatch,
 ) -> ResearchResultInput:
     award_id = award.award_id
     generated_internal_id = award.generated_internal_id
@@ -2773,6 +2788,13 @@ def _research_result_from_usaspending_award(
                 "USAspending API. Confirm recipient identity before relying on it."
             ),
             source_kind=provider.source_kind,
+            source_reliability=source_reliability_for_provider(
+                provider.id,
+                source_kind=provider.source_kind,
+                document_type=DocumentType.WEB_PAGE,
+            ),
+            identity_match_kind=identity_match.kind,
+            identity_match_reason=identity_match.reason,
         )
     except ValidationError as exc:
         detail = _first_validation_detail(exc)
@@ -2788,6 +2810,7 @@ def _research_result_from_sbir_award(
     provider: ResearchProvider,
     collected_at: datetime,
     source_api: str,
+    identity_match: CompanyMatch,
 ) -> ResearchResultInput:
     validate_provider_source_url(provider.id, source_api, field_name="source_api")
     if award.award_link is not None:
@@ -2811,6 +2834,13 @@ def _research_result_from_sbir_award(
                 "SBIR/STTR API. Confirm firm identity before relying on it."
             ),
             source_kind=provider.source_kind,
+            source_reliability=source_reliability_for_provider(
+                provider.id,
+                source_kind=provider.source_kind,
+                document_type=DocumentType.WEB_PAGE,
+            ),
+            identity_match_kind=identity_match.kind,
+            identity_match_reason=identity_match.reason,
         )
     except ValidationError as exc:
         detail = _first_validation_detail(exc)
@@ -2825,6 +2855,7 @@ def _research_result_from_sec_form_d_filing(
     *,
     provider: ResearchProvider,
     collected_at: datetime,
+    identity_match: CompanyMatch,
 ) -> ResearchResultInput:
     try:
         return ResearchResultInput(
@@ -2846,6 +2877,13 @@ def _research_result_from_sec_form_d_filing(
                 "filings or contact details."
             ),
             source_kind=provider.source_kind,
+            source_reliability=source_reliability_for_provider(
+                provider.id,
+                source_kind=provider.source_kind,
+                document_type=DocumentType.WEB_PAGE,
+            ),
+            identity_match_kind=identity_match.kind,
+            identity_match_reason=identity_match.reason,
         )
     except ValidationError as exc:
         detail = _first_validation_detail(exc)
@@ -2860,6 +2898,7 @@ def _research_result_from_github_repository(
     *,
     provider: ResearchProvider,
     collected_at: datetime,
+    identity_match: CompanyMatch,
 ) -> ResearchResultInput:
     try:
         return ResearchResultInput(
@@ -2881,6 +2920,13 @@ def _research_result_from_github_repository(
                 "fetch README files, or save repository contents."
             ),
             source_kind=provider.source_kind,
+            source_reliability=source_reliability_for_provider(
+                provider.id,
+                source_kind=provider.source_kind,
+                document_type=DocumentType.WEB_PAGE,
+            ),
+            identity_match_kind=identity_match.kind,
+            identity_match_reason=identity_match.reason,
         )
     except ValidationError as exc:
         detail = _first_validation_detail(exc)
