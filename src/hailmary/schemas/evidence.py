@@ -73,6 +73,7 @@ class EvidenceRecord(BaseModel):
     source_freshness: SourceFreshness = SourceFreshness.UNKNOWN
     provider_id: str | None = None
     provider_name: str | None = None
+    research_topic: str = "company"
     source_url: str | None = None
     source_api: str | None = None
     retrieved_at: datetime | None = None

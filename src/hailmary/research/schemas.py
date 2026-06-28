@@ -38,6 +38,36 @@ BUILTIN_RESEARCH_PROVIDER_SOURCE_KINDS: dict[str, SourceKind] = {
     "cb_insights": SourceKind.WEB,
 }
 
+BUILTIN_RESEARCH_PROVIDER_TOPICS: dict[str, tuple[str, ...]] = {
+    "public_web": ("market", "competition", "industry"),
+    "sec_form_d": ("funding",),
+    "usaspending": ("funding",),
+    "sbir": ("funding",),
+    "sam_gov": ("funding",),
+    "uspto": ("legal",),
+    "github": ("traction",),
+}
+
+
+def research_topics_for_provider(provider_id: str) -> tuple[str, ...]:
+    return BUILTIN_RESEARCH_PROVIDER_TOPICS.get(provider_id.strip(), ("company",))
+
+
+def default_research_topic_for_provider(provider_id: str) -> str:
+    return research_topics_for_provider(provider_id)[0]
+
+
+def resolved_research_result_topics(provider_id: str, research_topic: str) -> set[str]:
+    topic = research_topic.strip().casefold() or "company"
+    if provider_id.strip() == "public_web" and topic == "company":
+        return set(research_topics_for_provider("public_web"))
+    if topic != "company":
+        return {topic}
+    default_topic = default_research_topic_for_provider(provider_id)
+    if default_topic != "company":
+        return {topic, default_topic}
+    return {topic}
+
 
 class ResearchProviderCategory(StrEnum):
     FREE_PUBLIC = "free_public"
@@ -84,6 +114,7 @@ class ResearchTask(BaseModel):
     company_name: str
     provider_id: str
     provider_name: str
+    research_topic: str = "company"
     provider_category: ResearchProviderCategory
     source_kind: SourceKind
     status: ResearchTaskStatus
@@ -137,6 +168,7 @@ class ResearchResultInput(BaseModel):
     company_name: str | None = None
     provider_id: str
     provider_name: str | None = None
+    research_topic: str = "company"
     title: str
     text: str
     retrieved_at: datetime
@@ -193,6 +225,7 @@ class ResearchResultInput(BaseModel):
         "deal_id",
         "company_name",
         "provider_name",
+        "research_topic",
         "source_url",
         "source_api",
         "source_reliability",
@@ -209,6 +242,7 @@ class ResearchResultInput(BaseModel):
     @field_validator(
         "provider_id",
         "provider_name",
+        "research_topic",
         "title",
         "text",
         "source_url",
@@ -221,7 +255,14 @@ class ResearchResultInput(BaseModel):
     def strip_text(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
 
-    @field_validator("provider_id", "title", "text", "confidence", "licensing_notes")
+    @field_validator(
+        "provider_id",
+        "research_topic",
+        "title",
+        "text",
+        "confidence",
+        "licensing_notes",
+    )
     @classmethod
     def require_nonblank_text(cls, value: str) -> str:
         if not value:
@@ -234,6 +275,19 @@ class ResearchResultInput(BaseModel):
             raise ValueError("Each research result needs a deal_id or company_name.")
         if self.source_url is None and self.source_api is None:
             raise ValueError("Each research result needs a source_url or source_api.")
+        provider_id = self.provider_id.strip()
+        topic = self.research_topic.strip().casefold()
+        allowed_topics = set(research_topics_for_provider(provider_id))
+        if provider_id in BUILTIN_RESEARCH_PROVIDER_SOURCE_KINDS:
+            legacy_allowed_topics = allowed_topics | {"company"}
+            if topic not in legacy_allowed_topics:
+                allowed_text = ", ".join(sorted(legacy_allowed_topics))
+                raise ValueError(
+                    f"provider_id {provider_id} research_topic must be one of: "
+                    f"{allowed_text}."
+                )
+        self.provider_id = provider_id
+        self.research_topic = topic
         return self
 
 
@@ -304,6 +358,10 @@ class ResearchImportRunSummary(BaseModel):
     evaluate_deal_command: str | None = None
     provider_imported_counts: dict[str, int] = Field(default_factory=dict)
     provider_stale_counts: dict[str, int] = Field(default_factory=dict)
+    provider_topic_imported_counts: dict[str, dict[str, int]] = Field(
+        default_factory=dict
+    )
+    provider_topic_stale_counts: dict[str, dict[str, int]] = Field(default_factory=dict)
     provider_names: dict[str, str] = Field(default_factory=dict)
     deals: list[ResearchImportDealSummary] = Field(default_factory=list)
 

@@ -2510,13 +2510,17 @@ def run_borderline_score_fixture() -> None:
     )
     _expect_equal(
         scored.recommendation,
-        Recommendation.PASS,
-        "Expected scores from 65 to 74 to stay PASS.",
+        Recommendation.INVEST,
+        "Expected scores from 65 to 74 to become a calculated-risk INVEST.",
     )
     _expect_equal(
         scored.check_size,
-        0,
-        "Expected PASS to use a $0 check.",
+        1_000,
+        "Expected borderline calculated-risk INVEST to use a $1K check.",
+    )
+    _expect(
+        scored.calculated_risk,
+        "Expected borderline INVEST to be marked as calculated risk.",
     )
 
 
@@ -2539,13 +2543,13 @@ def run_missing_terms_score_fixture() -> None:
 
     _expect_equal(
         scored.recommendation,
-        Recommendation.PASS,
-        "Expected missing valuation or valuation-cap evidence to produce PASS.",
+        Recommendation.INVEST,
+        "Expected missing valuation or valuation-cap evidence to allow calculated-risk INVEST.",
     )
-    _expect_equal(scored.check_size, 0, "Expected missing terms PASS to use $0.")
+    _expect_equal(scored.check_size, 1_000, "Expected missing terms INVEST to use $1K.")
     _expect(
-        any(gate.name == "Missing key investment terms" for gate in scored.triggered_kill_gates),
-        "Expected missing terms to trigger the key investment terms gate.",
+        any(gate.name == "Missing key investment terms" for gate in scored.triggered_risk_gaps),
+        "Expected missing terms to remain a calculated-risk gap.",
     )
 
 
@@ -2618,8 +2622,13 @@ def run_stale_conflicting_score_fixture() -> None:
     )
     _expect_equal(
         stale_score.recommendation,
-        Recommendation.PASS,
-        "Expected stale-only support to produce PASS.",
+        Recommendation.INVEST,
+        "Expected stale-only support to allow a capped calculated-risk INVEST.",
+    )
+    _expect_equal(
+        stale_score.check_size,
+        1_000,
+        "Expected stale-only calculated-risk support to cap at $1K.",
     )
     _expect_equal(
         stale_score.fundability_risk,
@@ -2763,15 +2772,15 @@ def run_score_calibration_guards_fixture() -> None:
     )
     _expect_equal(
         missing_terms_score.recommendation,
-        Recommendation.PASS,
-        "Expected missing valuation or valuation-cap terms to force PASS.",
+        Recommendation.INVEST,
+        "Expected missing valuation or valuation-cap terms to allow calculated-risk INVEST.",
     )
     _expect(
         any(
             gate.name == "Missing key investment terms"
-            for gate in missing_terms_score.triggered_kill_gates
+            for gate in missing_terms_score.triggered_risk_gaps
         ),
-        "Expected missing key terms to trigger the investment-term kill gate.",
+        "Expected missing key terms to remain a calculated-risk gap.",
     )
 
     negated_traction_evidence = [
@@ -2941,10 +2950,18 @@ def run_high_traction_overvalued_score_fixture() -> None:
     )
     _expect_equal(
         scored.recommendation,
-        Recommendation.PASS,
-        "Expected high traction not to override the valuation kill gate.",
+        Recommendation.INVEST,
+        "Expected high traction with valuation risk to allow a capped calculated-risk INVEST.",
     )
-    _expect_equal(scored.check_size, 0, "Expected overvalued PASS to use $0.")
+    _expect_equal(
+        scored.check_size,
+        1_000,
+        "Expected overvalued calculated-risk INVEST to use $1K.",
+    )
+    _expect(
+        scored.calculated_risk,
+        "Expected overvalued INVEST to be marked as calculated risk.",
+    )
     _expect(
         {"ev_terms", "ev_stage", "ev_traction"} <= set(valuation_gate.evidence_ids),
         "Expected the valuation gate to cite pricing, stage, and traction evidence.",
@@ -2979,10 +2996,10 @@ def run_missing_deal_terms_v3_score_fixture() -> None:
     )
     _expect_equal(
         scored.recommendation,
-        Recommendation.PASS,
-        "Expected missing pricing terms to force PASS.",
+        Recommendation.INVEST,
+        "Expected missing pricing terms to allow calculated-risk INVEST.",
     )
-    _expect_equal(scored.check_size, 0, "Expected missing terms PASS to use $0.")
+    _expect_equal(scored.check_size, 1_000, "Expected missing terms INVEST to use $1K.")
     _triggered_gate(scored, "Missing key investment terms")
     _expect(
         "verified valuation or valuation cap"
@@ -3091,10 +3108,14 @@ def run_stale_public_validation_score_fixture() -> None:
     )
     _expect_equal(
         scored.recommendation,
-        Recommendation.PASS,
-        "Expected stale public validation to stay PASS until refreshed.",
+        Recommendation.INVEST,
+        "Expected stale public validation to allow a capped calculated-risk INVEST.",
     )
-    _expect_equal(scored.check_size, 0, "Expected stale public validation PASS to use $0.")
+    _expect_equal(
+        scored.check_size,
+        1_000,
+        "Expected stale public validation calculated-risk INVEST to use $1K.",
+    )
     _expect_equal(
         scored.fundability_risk,
         FundabilityRisk.HIGH,
@@ -3165,8 +3186,9 @@ def run_model_invest_guardrail_score_fixture() -> None:
         "Expected deterministic guardrails to force a $0 check.",
     )
     _expect(
-        guarded.warning is not None and "forced final PASS" in guarded.warning,
-        "Expected model override guardrail to produce a forced-PASS warning.",
+        guarded.warning is not None
+        and "kept final PASS/$0 because score" in guarded.warning,
+        "Expected model override guardrail to produce a deterministic PASS warning.",
     )
 
 
@@ -3899,8 +3921,7 @@ def run_evaluate_deal_audit_guardrails_fixture(work_dir: Path) -> None:
         company_name="Synthetic AuditInvestCo",
         body=(
             "Valuation cap $8M. Discount 20%. Round size $1M. "
-            "ARR revenue growth with paid customers and retention. "
-            "Lead investor committed and seed round is active."
+            "One paid customer."
         ),
     )
     pass_company = _write_evaluate_deal_fixture_company(
@@ -3937,28 +3958,29 @@ def run_evaluate_deal_audit_guardrails_fixture(work_dir: Path) -> None:
         Recommendation.INVEST,
         "Expected audit fixture scoring to otherwise allow INVEST.",
     )
+    _expect(
+        forced.deterministic_score.calculated_risk,
+        "Expected audit fixture to use calculated-risk scoring.",
+    )
     _expect_equal(
         forced.final_recommendation.recommendation,
-        Recommendation.PASS,
-        "Expected blocking evidence audit to force final PASS.",
+        Recommendation.INVEST,
+        "Expected missing price audit gap not to override calculated-risk INVEST.",
     )
     _expect_equal(
         forced.final_recommendation.check_size,
-        0,
-        "Expected blocking evidence audit to force a $0 check.",
+        forced.deterministic_score.check_size,
+        "Expected missing price audit gap to keep the deterministic check size.",
     )
     _expect(
         "Evidence completeness audit forced PASS/$0"
-        in forced.final_recommendation.reason,
-        "Expected forced audit PASS reason to name the evidence completeness guardrail.",
+        not in forced.final_recommendation.reason,
+        "Expected missing price audit gap not to claim it forced PASS.",
         actual_reason=forced.final_recommendation.reason,
     )
     _expect(
-        any(
-            "Evidence completeness audit forced PASS/$0" in warning
-            for warning in forced.warnings
-        ),
-        "Expected forced audit PASS warning to name the evidence completeness guardrail.",
+        any("Missing price or valuation" in warning for warning in forced.warnings),
+        "Expected audit warning to name the missing price or valuation gap.",
         warnings=" | ".join(forced.warnings),
     )
 
@@ -3970,8 +3992,8 @@ def run_evaluate_deal_audit_guardrails_fixture(work_dir: Path) -> None:
     )
     _expect_equal(
         _nested_value(forced_export, "final_decision", "recommendation"),
-        "PASS",
-        "Expected forced audit JSON export to show final PASS.",
+        "INVEST",
+        "Expected audit JSON export to preserve calculated-risk INVEST.",
     )
     _expect_equal(
         _nested_value(forced_export, "deterministic_score", "recommendation"),
@@ -4495,7 +4517,7 @@ def run_portfolio_batch_allocation_fixture(work_dir: Path) -> None:
     )
     expected_reasons = [
         "No allocatable capital remained for an allowed nonzero check.",
-        "Score below the 75/100 INVEST threshold.",
+        "Score below the 60/100 INVEST threshold.",
     ]
     missing_reasons = [reason for reason in expected_reasons if reason not in report]
     _expect(

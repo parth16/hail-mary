@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 import hailmary.cli as cli_module
@@ -147,6 +148,27 @@ def test_research_result_source_kind_defaults_match_builtin_registry() -> None:
         assert result.source_kind == provider.source_kind
 
 
+def test_research_result_rejects_unknown_builtin_topic() -> None:
+    payload = {
+        **_research_result(provider_id="sec_form_d"),
+        "research_topic": "fundng",
+    }
+
+    with pytest.raises(ValidationError, match="research_topic must be one of"):
+        ResearchResultInput.model_validate(payload)
+
+
+def test_research_result_accepts_legacy_company_topic_for_builtin() -> None:
+    payload = {
+        **_research_result(provider_id="github"),
+        "research_topic": "company",
+    }
+
+    result = ResearchResultInput.model_validate(payload)
+
+    assert result.research_topic == "company"
+
+
 def test_company_match_classifies_exact_related_likely_and_rejected() -> None:
     exact = classify_company_match("Acme AI", "Acme AI")
     legal_entity = classify_company_match("Acme AI", "Acme AI, Inc.")
@@ -240,7 +262,7 @@ def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> Non
     )
 
     assert result.deal_count == 1
-    assert result.task_count == 8
+    assert result.task_count == 10
     assert result.output_path.exists()
     assert result.output_path.parent == tmp_path / "data" / "research-plans"
     assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
@@ -256,6 +278,7 @@ def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> Non
     saved = json.loads(result.output_path.read_text(encoding="utf-8"))
     assert saved["deals"][0]["company_name"] == "Acme AI"
     assert saved["tasks"][0]["confidence"] == "not_collected"
+    assert saved["tasks"][0]["research_topic"]
     assert "provider, timestamp, exact URL" in saved["tasks"][0]["evidence_policy"]
     assert any(
         "source_url or source_api" in item
@@ -1400,6 +1423,89 @@ def test_run_research_workflow_counts_only_unresolved_manual_tasks(
     assert all(task["provider_id"] != "sam_gov" for task in queue_payload["tasks"])
 
 
+def test_run_research_workflow_keeps_public_web_topics_unresolved_individually(
+    tmp_path: Path,
+) -> None:
+    config, _deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    _write_results(
+        results_path,
+        [
+            _research_result(
+                provider_id="public_web",
+                provider_name="Public web and press search",
+                research_topic="market",
+                title="Acme AI market source",
+                text="Acme AI participates in a growing synthetic market.",
+                retrieved_at="2025-12-31T12:00:00Z",
+                source_url="https://example.com/acme-ai-market",
+                licensing_notes="Public web source.",
+            )
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        results_files=[results_path],
+        created_at=BUILT_AT,
+    )
+
+    public_web_statuses = {
+        status.research_topic: status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "public_web"
+    }
+    assert public_web_statuses["market"].status == ResearchProviderRunStatus.PLANNED
+    assert public_web_statuses["market"].collected_count == 1
+    assert public_web_statuses["competition"].status == (
+        ResearchProviderRunStatus.MANUAL_NEEDED
+    )
+    assert public_web_statuses["industry"].status == ResearchProviderRunStatus.MANUAL_NEEDED
+    assert result.summary.manual_needed_provider_count >= 2
+    assert result.unresolved_manual_task_count >= 2
+
+
+def test_run_research_workflow_maps_legacy_public_web_results_to_split_topics(
+    tmp_path: Path,
+) -> None:
+    config, _deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    _write_results(
+        results_path,
+        [
+            _research_result(
+                provider_id="public_web",
+                provider_name="Public web and press search",
+                title="Acme AI public web source",
+                text=(
+                    "Acme AI participates in a growing synthetic market with "
+                    "visible competitors."
+                ),
+                retrieved_at="2025-12-31T12:00:00Z",
+                source_url="https://example.com/acme-ai-public-web",
+                licensing_notes="Public web source.",
+            )
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        results_files=[results_path],
+        created_at=BUILT_AT,
+    )
+
+    public_web_statuses = {
+        status.research_topic: status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "public_web"
+    }
+    for research_topic in {"market", "competition", "industry"}:
+        assert public_web_statuses[research_topic].status == (
+            ResearchProviderRunStatus.PLANNED
+        )
+        assert public_web_statuses[research_topic].collected_count == 1
+
+
 def test_run_research_workflow_local_public_manual_provider_is_ready_to_import(
     tmp_path: Path,
 ) -> None:
@@ -1432,7 +1538,8 @@ def test_run_research_workflow_local_public_manual_provider_is_ready_to_import(
     )
     assert sam_status.status == ResearchProviderRunStatus.PLANNED
     assert sam_status.collected_count == 1
-    assert result.summary.manual_needed_provider_count == result.manual_task_count - 1
+    assert result.unresolved_manual_task_count == result.manual_task_count - 1
+    assert result.summary.manual_needed_provider_count < result.manual_task_count
 
 
 def test_prepare_research_plan_rejects_meridian_url_for_multiple_companies(
@@ -4850,6 +4957,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "company_name",
         "provider_id",
         "provider_name",
+        "research_topic",
         "title",
         "text",
         "retrieved_at",
@@ -4866,6 +4974,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert row["company_name"] == "Acme AI"
     assert row["provider_id"] == "meridian"
     assert row["provider_name"] == "Meridian deal page"
+    assert row["research_topic"] == "company"
     assert row["title"].startswith("Meridian: ")
     assert row["text"] == ""
     assert row["source_url"] == "https://portal.angellist.com/m/acme-ai/invest"
@@ -5174,6 +5283,7 @@ def test_prepare_research_results_template_writes_private_fillable_file(
         "company_name": "Acme AI",
         "provider_id": "company_website",
         "provider_name": "Company website",
+        "research_topic": "company",
         "title": "",
         "text": "",
         "retrieved_at": "",
@@ -6261,6 +6371,8 @@ def test_import_research_results_skips_untouched_template_rows(
         created_at=datetime(2026, 1, 2, tzinfo=UTC),
     )
     template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    for row in template_payload["results"]:
+        row.pop("research_topic", None)
     template_payload["results"][1].update(
         {
             "provider_id": "meridian",
@@ -7803,6 +7915,7 @@ def test_import_research_results_imports_stale_sources_as_stale(
         tmp_path,
         extra_results=[
             _research_result(
+                research_topic="funding",
                 title="Older public source",
                 text="Acme AI reported customer traction in an older public source.",
                 retrieved_at="2024-01-01T12:00:00Z",
@@ -7821,6 +7934,10 @@ def test_import_research_results_imports_stale_sources_as_stale(
     assert summary.stale_count == 1
     assert summary.provider_imported_counts == {"sec_form_d": 2}
     assert summary.provider_stale_counts == {"sec_form_d": 1}
+    assert summary.provider_topic_imported_counts == {
+        "sec_form_d": {"company": 1, "funding": 1}
+    }
+    assert summary.provider_topic_stale_counts == {"sec_form_d": {"funding": 1}}
     assert summary.provider_names == {"sec_form_d": "SEC EDGAR Form D search"}
     assert deal.evidence_store_path is not None
     saved_store = EvidenceStore.model_validate_json(
@@ -8447,7 +8564,7 @@ def test_import_research_results_command_reports_untouched_template_rows(
     )
 
     assert result.exit_code == 0, result.output
-    assert "Skipped 7 untouched template rows." in result.output
+    assert "Skipped 9 untouched template rows." in result.output
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 

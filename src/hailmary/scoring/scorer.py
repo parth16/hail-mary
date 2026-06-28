@@ -39,6 +39,7 @@ from hailmary.scoring.portfolio import (
     portfolio_exposure_cap,
     portfolio_exposure_checks,
 )
+from hailmary.utils.source_instructions import looks_like_embedded_source_instruction
 
 TRACTION_KEYWORDS = (
     "arr",
@@ -52,7 +53,17 @@ TRACTION_KEYWORDS = (
 )
 EARLY_PMF_KEYWORDS = ("pilot", "beta", "loi", "waitlist", "design partner")
 FUNDABILITY_KEYWORDS = ("lead investor", "institutional", "series a", "seed", "follow-on")
+CALCULATED_RISK_FUNDING_KEYWORDS = (
+    "lead investor",
+    "institutional",
+    "series a",
+    "seed round",
+    "seed funding",
+    "seed investor",
+    "follow-on",
+)
 INVEST_MINIMUM_SCORE = 75
+CALCULATED_RISK_MINIMUM_SCORE = 60
 HARD_MAX_CHECK = max(CHECK_SIZE_TIERS)
 SCORING_MONEY_PATTERN = (
     r"\$\s?\d+(?:,\d{3})*(?:\.\d+)?"
@@ -249,6 +260,12 @@ ABSENCE_TRACTION_PATTERNS = (
 BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_FUNDING_CONCERN_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
+CALCULATED_RISK_FUNDING_SIGNAL = (
+    r"(?:lead\s+investor|institutional(?:\s+investors?)?|"
+    r"series\s+a(?:\s+investors?)?|"
+    r"seed(?:\s+(?:round|funding|investors?))?|"
+    r"follow[-\s]?on(?:\s+financing)?)"
+)
 NEGATED_FUNDING_PATTERNS = (
     re.compile(
         r"\b(?:planned|projected|expected|future|upcoming|target|targeted)\s+"
@@ -321,6 +338,57 @@ NEGATED_FUNDING_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+CALCULATED_RISK_NON_CURRENT_FUNDING_PATTERNS = (
+    re.compile(
+        rf"\b(?:planned|projected|expected|future|upcoming|target|targeted)\s+"
+        rf"{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:plans?|planned|planning|targets?|targeting|intends?|expects?)\s+"
+        rf"(?:to\s+)?(?:raise|pursue|seek|close|secure)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:will|would|could|may)\s+(?:raise|pursue|seek|close|secure)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bnot\s+(?:yet\s+)?ready\s+for\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+)
+CALCULATED_RISK_FUNDING_NEGATED_PATTERNS = (
+    *NEGATED_FUNDING_PATTERNS,
+    *CALCULATED_RISK_NON_CURRENT_FUNDING_PATTERNS,
+)
+CALCULATED_RISK_CURRENT_FUNDING_PATTERNS = (
+    re.compile(
+        rf"\b{CALCULATED_RISK_FUNDING_SIGNAL}\b"
+        r"(?:\s+\S+){0,4}\s+"
+        r"(?:active|backed|closed|committed|confirmed|joined|named|"
+        r"participating|secured|signed)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:active|backed|closed|committed|confirmed|named|"
+        r"participating|secured|signed)\s+"
+        rf"(?:\S+\s+){{0,4}}{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bled\s+(?:a\s+|an\s+|the\s+)?{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:is|are|was|were)\s+(?:a\s+|an\s+|the\s+)?"
+        r"(?:lead\s+investor|institutional(?:\s+investors?)?)\b",
+        re.IGNORECASE,
+    ),
+)
 PRICING_TERM_LABELS = {
     "post-money valuation",
     "pre-money valuation",
@@ -368,6 +436,9 @@ def score_evidence_store(
             pmf_level,
         ),
     )
+    research_gap = _research_gap_gate(research_context)
+    if research_gap is not None:
+        kill_gates.append(research_gap)
     score_factors = _score_factors(
         store,
         verified_claims,
@@ -379,11 +450,56 @@ def score_evidence_store(
         net_return,
     )
     total_score = sum(factor.score for factor in score_factors)
-    has_kill_gate = any(gate.triggered for gate in kill_gates)
-    recommendation = (
-        Recommendation.PASS
-        if has_kill_gate or total_score < INVEST_MINIMUM_SCORE
-        else Recommendation.INVEST
+    has_pricing_term = _has_readable_pricing_term(verified_claims)
+    strict_would_pass = (
+        any(gate.triggered for gate in kill_gates)
+        or total_score < INVEST_MINIMUM_SCORE
+    )
+    has_hard_blocker = any(
+        gate.triggered and gate.force_pass for gate in kill_gates
+    )
+    calculated_risk_reason: str | None = None
+    if has_hard_blocker:
+        recommendation = Recommendation.PASS
+    elif not config.calculated_risk_mode:
+        recommendation = (
+            Recommendation.PASS
+            if strict_would_pass
+            else Recommendation.INVEST
+        )
+    elif total_score >= INVEST_MINIMUM_SCORE:
+        recommendation = Recommendation.INVEST
+        if strict_would_pass:
+            calculated_risk_reason = _calculated_risk_reason(
+                total_score,
+                kill_gates=kill_gates,
+            )
+    elif (
+        total_score >= CALCULATED_RISK_MINIMUM_SCORE
+        and _has_calculated_risk_positive_signal(store, pmf_level)
+    ):
+        recommendation = Recommendation.INVEST
+        calculated_risk_reason = _calculated_risk_reason(
+            total_score,
+            kill_gates=kill_gates,
+        )
+    else:
+        recommendation = Recommendation.PASS
+    calculated_risk = (
+        config.calculated_risk_mode
+        and recommendation == Recommendation.INVEST
+        and strict_would_pass
+    )
+    calculated_risk_cap = (
+        _calculated_risk_check_cap(
+            total_score,
+            confidence=confidence,
+            valuation_risk=valuation_risk,
+            has_pricing_term=has_pricing_term,
+            research_context=research_context,
+        )
+        if calculated_risk
+        else None
     )
     check_sizing = _check_sizing_decision(
         store,
@@ -397,6 +513,7 @@ def score_evidence_store(
         net_return=net_return,
         company_stage=company_stage,
         exposure_state=exposure_state,
+        calculated_risk_target=calculated_risk_cap,
     )
     check_size = (
         0
@@ -415,6 +532,8 @@ def score_evidence_store(
         )
     if recommendation == Recommendation.INVEST and check_size == 0:
         recommendation = Recommendation.PASS
+        calculated_risk = False
+        calculated_risk_reason = None
         kill_gates.append(
             KillGate(
                 name="No available check size",
@@ -450,11 +569,17 @@ def score_evidence_store(
             total_score=total_score,
             confidence=confidence,
             kill_gates=kill_gates,
+            calculated_risk_mode=config.calculated_risk_mode,
+            calculated_risk=calculated_risk,
+            calculated_risk_reason=calculated_risk_reason,
         ),
         pmf_level=pmf_level,
         fundability_risk=fundability_risk,
         company_stage=company_stage,
         valuation_risk=valuation_risk,
+        calculated_risk_mode=config.calculated_risk_mode,
+        calculated_risk=calculated_risk,
+        calculated_risk_reason=calculated_risk_reason,
         net_return=net_return,
         kill_gates=kill_gates,
         score_factors=score_factors,
@@ -637,6 +762,7 @@ def _kill_gates(
                 if has_verified_claims
                 else ScoreSupportStatus.NEEDS_DILIGENCE
             ),
+            force_pass=False,
         ),
         KillGate(
             name="Missing key investment terms",
@@ -656,6 +782,7 @@ def _kill_gates(
                 if has_pricing_term
                 else ScoreSupportStatus.NEEDS_DILIGENCE
             ),
+            force_pass=False,
         ),
         KillGate(
             name="Valuation far ahead of evidence",
@@ -671,6 +798,7 @@ def _kill_gates(
                 if valuation_too_high
                 else ScoreSupportStatus.INFERRED
             ),
+            force_pass=False,
         ),
         KillGate(
             name="Verified return below capital back",
@@ -722,6 +850,74 @@ def _kill_gates(
             ),
         ),
     ]
+
+
+def _research_gap_gate(
+    research_context: DiligenceResearchContext | None,
+) -> KillGate | None:
+    if research_context is None or research_context.planned_task_count == 0:
+        return None
+
+    gaps: list[str] = []
+    if research_context.imported_record_count == 0:
+        gaps.append("no external research evidence was imported")
+    if research_context.failed_provider_count:
+        gaps.append(f"{research_context.failed_provider_count} provider failed")
+    if research_context.incomplete_search_count:
+        gaps.append(f"{research_context.incomplete_search_count} search was incomplete")
+    if research_context.no_exact_result_provider_count:
+        gaps.append(
+            f"{research_context.no_exact_result_provider_count} provider had no exact result"
+        )
+    if research_context.manual_needed_provider_count:
+        gaps.append(
+            f"{research_context.manual_needed_provider_count} provider needs manual follow-up"
+        )
+    if research_context.not_run_provider_count:
+        gaps.append(f"{research_context.not_run_provider_count} provider was not run")
+    if research_context.stale_only_research:
+        gaps.append("all imported external research was stale")
+    if research_context.unknown_reliability_record_count:
+        gaps.append(
+            f"{research_context.unknown_reliability_record_count} imported record "
+            "has unknown reliability"
+        )
+    if research_context.ambiguous_or_related_match_count:
+        gaps.append(
+            f"{research_context.ambiguous_or_related_match_count} result had "
+            "an ambiguous identity match"
+        )
+    if research_context.identity_mismatch_count:
+        gaps.append(
+            f"{research_context.identity_mismatch_count} result had an identity mismatch"
+        )
+    if research_context.warning_count:
+        gaps.append(f"{research_context.warning_count} research warning remains")
+    if research_context.no_prepared_result_companies:
+        gaps.append(
+            "no prepared research results for "
+            f"{', '.join(research_context.no_prepared_result_companies)}"
+        )
+
+    triggered = bool(gaps)
+    return KillGate(
+        name="External research incomplete",
+        triggered=triggered,
+        reason=(
+            "External research remains incomplete: " + "; ".join(gaps) + "."
+            if triggered
+            else (
+                "External research imported current, exact-match records without "
+                "unresolved provider gaps."
+            )
+        ),
+        support_status=(
+            ScoreSupportStatus.NEEDS_DILIGENCE
+            if triggered
+            else ScoreSupportStatus.INFERRED
+        ),
+        force_pass=False,
+    )
 
 
 def _score_factors(
@@ -2131,6 +2327,71 @@ def _triggered_gate_questions(kill_gates: list[KillGate]) -> list[DiligenceQuest
     return questions
 
 
+def _has_calculated_risk_positive_signal(
+    store: EvidenceStore,
+    pmf_level: PMFLevel,
+) -> bool:
+    safe_evidence = [
+        evidence
+        for evidence in store.evidence
+        if not looks_like_embedded_source_instruction(evidence.text)
+    ]
+    if not safe_evidence:
+        return False
+    return bool(
+        _positive_traction_evidence(safe_evidence)
+        or _positive_early_pmf_evidence(safe_evidence)
+        or _positive_calculated_risk_funding_evidence(safe_evidence)
+        or _pmf_evidence(safe_evidence, pmf_level)
+    )
+
+
+def _calculated_risk_reason(
+    total_score: int,
+    *,
+    kill_gates: list[KillGate],
+) -> str:
+    risk_gap_names = [
+        gate.name
+        for gate in kill_gates
+        if gate.triggered and not gate.force_pass
+    ]
+    if risk_gap_names:
+        return (
+            "Calculated-risk mode allowed a small check because no hard blocker "
+            f"triggered, the score was {total_score}/100, and unresolved gaps remain: "
+            f"{', '.join(risk_gap_names)}."
+        )
+    return (
+        "Calculated-risk mode allowed a small check because no hard blocker "
+        f"triggered and the score was {total_score}/100."
+    )
+
+
+def _calculated_risk_check_cap(
+    total_score: int,
+    *,
+    confidence: ConfidenceLevel,
+    valuation_risk: ValuationRisk,
+    has_pricing_term: bool,
+    research_context: DiligenceResearchContext | None,
+) -> int:
+    has_current_external_research = (
+        research_context is not None
+        and research_context.imported_record_count > 0
+        and not research_context.stale_only_research
+    )
+    if (
+        total_score < 70
+        or confidence == ConfidenceLevel.LOW
+        or valuation_risk == ValuationRisk.HIGH
+        or not has_pricing_term
+        or not has_current_external_research
+    ):
+        return 1_000
+    return 2_500
+
+
 def _check_sizing_decision(
     store: EvidenceStore,
     total_score: int,
@@ -2144,8 +2405,10 @@ def _check_sizing_decision(
     net_return: NetReturnEstimate,
     company_stage: CompanyStage,
     exposure_state: PortfolioExposureState | None,
+    calculated_risk_target: int | None = None,
 ) -> CheckSizingDecision:
-    target = _target_check_size(total_score, confidence=confidence)
+    score_target = _target_check_size(total_score, confidence=confidence)
+    target = calculated_risk_target or score_target
     risk_cap = _check_size_cap(
         target,
         confidence=confidence,
@@ -2154,7 +2417,12 @@ def _check_sizing_decision(
         net_return=net_return,
     )
     reason_codes = ["score_target"]
+    if calculated_risk_target is not None:
+        reason_codes.append("calculated_risk_target")
     effective_cap = risk_cap
+    if calculated_risk_target is not None:
+        effective_cap = _min_optional_cap(effective_cap, calculated_risk_target)
+        reason_codes.append("calculated_risk_cap_applied")
     if risk_cap is not None:
         target = min(target, risk_cap)
         reason_codes.append("risk_cap_applied")
@@ -2191,10 +2459,11 @@ def _check_sizing_decision(
                 capital_remaining=capital_remaining,
                 risk_cap=risk_cap,
                 exposure_cap=exposure_cap,
+                calculated_risk_cap=calculated_risk_target,
             )
         )
         return CheckSizingDecision(
-            score_target=_target_check_size(total_score, confidence=confidence),
+            score_target=calculated_risk_target or score_target,
             risk_cap=risk_cap,
             platform_minimum_check=platform_minimum_check,
             exposure_cap=exposure_cap,
@@ -2210,7 +2479,7 @@ def _check_sizing_decision(
         selected_tier = max(allowed_tiers)
         reason_codes.append("selected_lower_allowed_tier")
     return CheckSizingDecision(
-        score_target=_target_check_size(total_score, confidence=confidence),
+        score_target=calculated_risk_target or score_target,
         risk_cap=risk_cap,
         platform_minimum_check=platform_minimum_check,
         exposure_cap=exposure_cap,
@@ -2254,6 +2523,16 @@ def _no_available_check_size_reason(
     check_sizing: CheckSizingDecision,
 ) -> str:
     reason_codes = set(check_sizing.reason_codes)
+    if "calculated_risk_cap_below_minimum" in reason_codes:
+        return (
+            "Calculated-risk mode capped the maximum check below the configured or "
+            "platform minimum check."
+        )
+    if "calculated_risk_cap_no_tier" in reason_codes:
+        return (
+            "No configured check size fits the calculated-risk cap, platform minimum, "
+            "and remaining capital."
+        )
     if "risk_cap_below_minimum" in reason_codes:
         return (
             "Risk caps lowered the maximum check below the configured or "
@@ -2312,6 +2591,7 @@ def _no_tier_reason_codes(
     capital_remaining: int,
     risk_cap: int | None,
     exposure_cap: int | None,
+    calculated_risk_cap: int | None = None,
 ) -> list[str]:
     reason_codes = ["no_allowed_tier"]
     minimum_check = config.min_check
@@ -2336,6 +2616,19 @@ def _no_tier_reason_codes(
                 "risk_cap_below_minimum"
                 if risk_cap < minimum_check
                 else "risk_cap_no_tier"
+            )
+    if calculated_risk_cap is not None:
+        calculated_risk_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+            check_size_cap=calculated_risk_cap,
+        )
+        if base_tiers and not calculated_risk_tiers:
+            reason_codes.append(
+                "calculated_risk_cap_below_minimum"
+                if calculated_risk_cap < minimum_check
+                else "calculated_risk_cap_no_tier"
             )
     if exposure_cap is not None:
         cap_before_exposure = risk_cap
@@ -2561,15 +2854,45 @@ def _one_line_reason(
     total_score: int,
     confidence: ConfidenceLevel,
     kill_gates: list[KillGate],
+    calculated_risk_mode: bool = True,
+    calculated_risk: bool = False,
+    calculated_risk_reason: str | None = None,
 ) -> str:
-    triggered_gates = [gate for gate in kill_gates if gate.triggered]
-    if triggered_gates:
-        return f"Passed because {triggered_gates[0].reason}"
+    hard_blockers = [
+        gate for gate in kill_gates if gate.triggered and gate.force_pass
+    ]
+    risk_gaps = [
+        gate for gate in kill_gates if gate.triggered and not gate.force_pass
+    ]
+    if recommendation == Recommendation.PASS and hard_blockers:
+        return f"Passed because {hard_blockers[0].reason}"
+    score_floor = (
+        CALCULATED_RISK_MINIMUM_SCORE
+        if calculated_risk_mode
+        else INVEST_MINIMUM_SCORE
+    )
+    if recommendation == Recommendation.PASS and total_score < score_floor:
+        return f"Passed because the score was {total_score}/100, below the investment bar."
+    if (
+        recommendation == Recommendation.PASS
+        and calculated_risk_mode
+        and total_score < INVEST_MINIMUM_SCORE
+    ):
+        return (
+            "Passed because calculated-risk mode needs source-linked traction, "
+            "customer, usage, pilot, or funding support for a 60-74 score."
+        )
+    if recommendation == Recommendation.PASS and risk_gaps:
+        return f"Passed because {risk_gaps[0].reason}"
     if recommendation == Recommendation.PASS:
         return f"Passed because the score was {total_score}/100, below the investment bar."
+    if calculated_risk:
+        return calculated_risk_reason or (
+            "Recommended as a calculated risk because no hard blocker triggered."
+        )
     return (
         f"Recommended because the score was {total_score}/100, confidence was "
-        f"{confidence}, and no kill gate triggered."
+        f"{confidence}, and no hard blocker triggered."
     )
 
 
@@ -2607,6 +2930,28 @@ def _positive_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceR
             negated_patterns=NEGATED_FUNDING_PATTERNS,
         )
     ]
+
+
+def _positive_calculated_risk_funding_evidence(
+    evidence: list[EvidenceRecord],
+) -> list[EvidenceRecord]:
+    return [
+        record
+        for record in evidence
+        if _has_current_calculated_risk_funding_support(record.text)
+        if _text_contains_positive_keyword(
+            record.text,
+            CALCULATED_RISK_FUNDING_KEYWORDS,
+            negated_patterns=CALCULATED_RISK_FUNDING_NEGATED_PATTERNS,
+        )
+    ]
+
+
+def _has_current_calculated_risk_funding_support(text: str) -> bool:
+    return any(
+        pattern.search(text) is not None
+        for pattern in CALCULATED_RISK_CURRENT_FUNDING_PATTERNS
+    )
 
 
 def _negative_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:

@@ -15,7 +15,7 @@ from hailmary.portfolio.scenario import (
 )
 from hailmary.schemas.documents import IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
-from hailmary.schemas.scoring import MemoRunSummary, ScoredDeal
+from hailmary.schemas.scoring import KillGate, MemoRunSummary, ScoredDeal
 from hailmary.scoring.portfolio import (
     allowed_check_tiers,
     portfolio_exposure_state_after_score,
@@ -178,14 +178,11 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         "",
         "## Kill Gates",
     ]
-    for gate in scored_deal.kill_gates:
-        status = "TRIGGERED" if gate.triggered else "Clear"
-        lines.append(
-            f"- {status}: {_memo_metadata_value(gate.name)}. "
-            f"{_memo_metadata_value(gate.reason)}"
-            f"{_support_text(gate.support_status)}"
-            f"{_evidence_reference_text(gate.evidence_ids)}"
-        )
+    lines.extend(_memo_gate_lines([gate for gate in scored_deal.kill_gates if gate.force_pass]))
+    risk_gaps = [gate for gate in scored_deal.kill_gates if not gate.force_pass]
+    if risk_gaps:
+        lines.extend(["", f"## {_risk_gap_plural_label(scored_deal)}"])
+        lines.extend(_memo_gate_lines(risk_gaps))
 
     lines.extend(["", "## Score Factors"])
     for factor in scored_deal.score_factors:
@@ -238,6 +235,29 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
     return "\n".join(lines)
 
 
+def _memo_gate_lines(gates: list[KillGate]) -> list[str]:
+    if not gates:
+        return ["- None."]
+    lines: list[str] = []
+    for gate in gates:
+        status = "TRIGGERED" if gate.triggered else "Clear"
+        lines.append(
+            f"- {status}: {_memo_metadata_value(gate.name)}. "
+            f"{_memo_metadata_value(gate.reason)}"
+            f"{_support_text(gate.support_status)}"
+            f"{_evidence_reference_text(gate.evidence_ids)}"
+        )
+    return lines
+
+
+def _risk_gap_plural_label(scored_deal: ScoredDeal) -> str:
+    return (
+        "Calculated-Risk Gaps"
+        if scored_deal.calculated_risk_mode
+        else "Strict-Risk Gaps"
+    )
+
+
 def render_portfolio_report(
     scored_deals: list[ScoredDeal],
     *,
@@ -282,8 +302,8 @@ def render_portfolio_report(
         lines.extend(
             [
                 "| Rank | Company | Recommendation | Check size | Score | Confidence | "
-                "Triggered kill gates | Diligence questions | Budget before | Budget after |",
-                "| ---: | --- | --- | ---: | ---: | --- | --- | ---: | ---: | ---: |",
+                "Hard blockers | Risk gaps | Diligence questions | Budget before | Budget after |",
+                "| ---: | --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: |",
             ]
         )
         for rank, deal in enumerate(ranked_deals, start=1):
@@ -295,7 +315,8 @@ def render_portfolio_report(
                 f"{_format_check_size(deal.check_size)} | "
                 f"{deal.total_score}/{deal.max_score} | "
                 f"{_memo_metadata_value(str(deal.confidence))} | "
-                f"{_triggered_gate_summary(deal)} | "
+                f"{_hard_blocker_summary(deal)} | "
+                f"{_risk_gap_summary(deal)} | "
                 f"{len(deal.diligence_questions)} | "
                 f"{_optional_check_size(deal.capital_remaining_before)} | "
                 f"{_optional_check_size(deal.capital_remaining_after)} |"
@@ -353,8 +374,20 @@ def render_portfolio_report(
         for risk in _portfolio_key_risk_lines(deal):
             lines.append(f"  - {risk}")
 
-        lines.append("- Kill gates:")
-        for gate in deal.kill_gates:
+        lines.append("- Hard blockers:")
+        for gate in (candidate for candidate in deal.kill_gates if candidate.force_pass):
+            status = "TRIGGERED" if gate.triggered else "Clear"
+            lineage_label = "NEEDS_DILIGENCE" if gate.triggered else "INFERRED"
+            lines.append(
+                "  - "
+                f"{status} ({lineage_label}): {_memo_metadata_value(gate.name)}. "
+                f"{_memo_metadata_value(gate.reason)}"
+            )
+
+        lines.append(f"- {_risk_gap_plural_label(deal)}:")
+        for gate in (
+            candidate for candidate in deal.kill_gates if not candidate.force_pass
+        ):
             status = "TRIGGERED" if gate.triggered else "Clear"
             lineage_label = "NEEDS_DILIGENCE" if gate.triggered else "INFERRED"
             lines.append(
@@ -451,17 +484,32 @@ def _optional_check_size(check_size: int | None) -> str:
     return _format_check_size(check_size)
 
 
-def _triggered_gate_summary(deal: ScoredDeal) -> str:
-    if not deal.triggered_kill_gates:
+def _hard_blocker_summary(deal: ScoredDeal) -> str:
+    if not deal.triggered_hard_blockers:
         return "None"
-    return "; ".join(_memo_metadata_value(gate.name) for gate in deal.triggered_kill_gates)
+    return "; ".join(
+        _memo_metadata_value(gate.name) for gate in deal.triggered_hard_blockers
+    )
+
+
+def _risk_gap_summary(deal: ScoredDeal) -> str:
+    if not deal.triggered_risk_gaps:
+        return "None"
+    return "; ".join(_memo_metadata_value(gate.name) for gate in deal.triggered_risk_gaps)
 
 
 def _portfolio_key_risk_lines(deal: ScoredDeal) -> list[str]:
     risks: list[str] = []
-    for gate in deal.triggered_kill_gates:
+    for gate in deal.triggered_hard_blockers:
         risks.append(
             "NEEDS_DILIGENCE: "
+            f"{_memo_metadata_value(gate.name)}. {_memo_metadata_value(gate.reason)}"
+            f"{_portfolio_evidence_text(gate.evidence_ids)}"
+        )
+    gap_label = _risk_gap_plural_label(deal)
+    for gate in deal.triggered_risk_gaps:
+        risks.append(
+            f"{gap_label}: "
             f"{_memo_metadata_value(gate.name)}. {_memo_metadata_value(gate.reason)}"
             f"{_portfolio_evidence_text(gate.evidence_ids)}"
         )

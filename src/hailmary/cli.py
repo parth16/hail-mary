@@ -310,10 +310,16 @@ def _config_with_ocr_override(
     config: AppConfig,
     *,
     enable_ocr: bool | None,
+    calculated_risk_mode: bool | None = None,
 ) -> AppConfig:
-    if enable_ocr is None:
+    updates: dict[str, object] = {}
+    if enable_ocr is not None:
+        updates["enable_ocr"] = enable_ocr
+    if calculated_risk_mode is not None:
+        updates["calculated_risk_mode"] = calculated_risk_mode
+    if not updates:
         return config
-    return config.model_copy(update={"enable_ocr": enable_ocr})
+    return config.model_copy(update=updates)
 
 
 def _config_with_portfolio_overrides(
@@ -2328,6 +2334,17 @@ def evaluate_deal(
             show_default=False,
         ),
     ] = None,
+    calculated_risk: Annotated[
+        bool | None,
+        typer.Option(
+            "--calculated-risk/--strict-risk",
+            help=(
+                "Allow small calculated-risk checks when only diligence gaps are "
+                "missing. Strict risk keeps missing key inputs as PASS/$0 blockers."
+            ),
+            show_default=False,
+        ),
+    ] = None,
     skip_research: Annotated[
         bool,
         typer.Option(
@@ -2423,6 +2440,7 @@ def evaluate_deal(
     config = _config_with_ocr_override(
         _config_from_options(data_dir),
         enable_ocr=enable_ocr,
+        calculated_risk_mode=calculated_risk,
     )
 
     try:
@@ -2452,6 +2470,14 @@ def evaluate_deal(
     summary = _two_column_table("Result", "Value")
     summary.add_row(_plain("Company"), _plain(result.company_name))
     summary.add_row(_plain("Mode"), _plain(result.evaluation_mode))
+    summary.add_row(
+        _plain("Risk mode"),
+        _plain(
+            "calculated risk"
+            if result.deterministic_score.calculated_risk_mode
+            else "strict risk"
+        ),
+    )
     summary.add_row(_plain("Documents ingested"), _plain(str(result.document_count)))
     summary.add_row(_plain("Evidence records"), _plain(str(result.evidence_count)))
     summary.add_row(_plain("Claims found"), _plain(str(result.claim_count)))
@@ -2567,12 +2593,15 @@ def evaluate_deal(
                 )
             )
         if research_workflow.live_collection_enabled:
-            renderables.append(_plain("Live public research ran because web research is enabled."))
+            renderables.append(
+                _plain(
+                    "Live public research ran for exact public URLs and configured public clients."
+                )
+            )
         else:
             renderables.append(
                 _plain(
-                    "Live public research did not run. Set HAILMARY_LOCAL_ONLY=false "
-                    "and HAILMARY_ENABLE_WEB_RESEARCH=true to enable it."
+                    "Live public research did not run for this workflow."
                 )
             )
     else:

@@ -46,6 +46,7 @@ class AppConfig(BaseModel):
     meridian_profile_dir: Path = Field(default=Path("./data/browser-profiles/meridian"))
     enable_ocr: bool = False
     enable_web_research: bool = False
+    calculated_risk_mode: bool = True
     enabled_paid_providers: tuple[str, ...] = Field(default_factory=tuple)
     mock_llm: bool = True
     llm_specialist_token_budget: int | None = None
@@ -235,6 +236,11 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         if "HAILMARY_ENABLE_OCR" in os.environ
         else _config_bool(saved_values, "enable_ocr", False)
     )
+    calculated_risk_mode = (
+        _env_bool("HAILMARY_CALCULATED_RISK_MODE", True)
+        if "HAILMARY_CALCULATED_RISK_MODE" in os.environ
+        else _config_bool(saved_values, "calculated_risk_mode", True)
+    )
     if local_only:
         enable_web_research = False
     mock_llm = (
@@ -354,6 +360,7 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         ),
         enable_ocr=enable_ocr,
         enable_web_research=enable_web_research,
+        calculated_risk_mode=calculated_risk_mode,
         enabled_paid_providers=_setting_csv(
             env_name="HAILMARY_ENABLED_PAID_PROVIDERS",
             config_values=saved_values,
@@ -1189,6 +1196,7 @@ def _default_config_text(config: AppConfig) -> str:
     local_only = "true" if config.local_only else "false"
     enable_ocr = "true" if config.enable_ocr else "false"
     web_research = "true" if config.enable_web_research else "false"
+    calculated_risk = "true" if config.calculated_risk_mode else "false"
     mock_llm = "true" if config.mock_llm else "false"
     llm_input_cost_rate = _optional_int_text(
         config.llm_input_cost_per_million_tokens_cents
@@ -1224,6 +1232,7 @@ max_high_confidence_exposure_percent: {high_confidence_exposure}
 meridian_profile_dir: {_yaml_string(config.meridian_profile_dir.as_posix())}
 enable_ocr: {enable_ocr}
 enable_web_research: {web_research}
+calculated_risk_mode: {calculated_risk}
 enabled_paid_providers: ""
 mock_llm: {mock_llm}
 llm_specialist_token_budget: {_optional_int_text(config.llm_specialist_token_budget)}

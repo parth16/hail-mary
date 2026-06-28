@@ -27,6 +27,7 @@ CONFIDENCE_RANK = {
     "low": 1,
 }
 INVEST_MINIMUM_SCORE = 75
+CALCULATED_RISK_MINIMUM_SCORE = 60
 CATEGORY_LABEL_PATTERN = re.compile(
     r"\b(?:sector|category|industry)\s*(?:is|:|-)\s*"
     r"(?P<value>[A-Za-z0-9][A-Za-z0-9 &/+.-]{0,60})",
@@ -411,15 +412,28 @@ def skipped_deals(scored_deals: list[ScoredDeal]) -> list[SkippedDeal]:
 
 
 def skip_reason(deal: ScoredDeal) -> str:
-    triggered_gate_names = [gate.name for gate in deal.triggered_kill_gates]
-    if "No usable source-linked evidence" in triggered_gate_names:
+    triggered_hard_blocker_names = [gate.name for gate in deal.triggered_hard_blockers]
+    triggered_risk_gap_names = [gate.name for gate in deal.triggered_risk_gaps]
+    if "No usable source-linked evidence" in triggered_hard_blocker_names:
         return "No usable source-linked evidence was available."
-    if "Platform minimum above maximum check" in triggered_gate_names:
+    if "Platform minimum above maximum check" in triggered_hard_blocker_names:
         return "The platform minimum check is above the configured maximum check size."
-    if deal.total_score < INVEST_MINIMUM_SCORE:
-        return f"Score below the {INVEST_MINIMUM_SCORE}/100 INVEST threshold."
-    if "No available check size" in triggered_gate_names:
+    score_floor = (
+        CALCULATED_RISK_MINIMUM_SCORE
+        if deal.calculated_risk_mode
+        else INVEST_MINIMUM_SCORE
+    )
+    if deal.total_score < score_floor:
+        return f"Score below the {score_floor}/100 INVEST threshold."
+    if "No available check size" in triggered_hard_blocker_names:
         reason_codes = set(deal.check_sizing.reason_codes)
+        if "calculated_risk_cap_below_minimum" in reason_codes:
+            return (
+                "Calculated-risk sizing capped the check below the configured or "
+                "platform minimum."
+            )
+        if "calculated_risk_cap_no_tier" in reason_codes:
+            return "No configured check size fits the calculated-risk cap."
         if "exposure_cap_below_minimum" in reason_codes:
             return "Exposure limits left no room for an allowed nonzero check."
         if "exposure_limit_no_tier" in reason_codes:
@@ -427,9 +441,21 @@ def skip_reason(deal: ScoredDeal) -> str:
         if (deal.capital_remaining_before or 0) <= 0:
             return "No allocatable capital remained for an allowed nonzero check."
         return "No configured check size fits the platform minimum and remaining budget."
-    if triggered_gate_names:
-        gate_text = "; ".join(triggered_gate_names)
+    if (
+        deal.calculated_risk_mode
+        and deal.total_score < INVEST_MINIMUM_SCORE
+    ):
+        return (
+            "Calculated-risk score range needs source-linked traction, customer, "
+            "usage, pilot, or funding support."
+        )
+    if triggered_hard_blocker_names:
+        gate_text = "; ".join(triggered_hard_blocker_names)
         return f"Triggered kill gate: {gate_text}."
+    if triggered_risk_gap_names:
+        gate_text = "; ".join(triggered_risk_gap_names)
+        gap_label = "calculated-risk gap" if deal.calculated_risk_mode else "strict-risk gap"
+        return f"Triggered {gap_label}: {gate_text}."
     return "Deterministic guardrails require PASS."
 
 

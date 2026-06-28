@@ -83,6 +83,7 @@ RESEARCH_RESULT_FIELDS = {
     "company_name",
     "provider_id",
     "provider_name",
+    "research_topic",
     "title",
     "text",
     "retrieved_at",
@@ -97,10 +98,12 @@ RESEARCH_RESULT_FIELDS = {
     "identity_match_reason",
 }
 LEGACY_RESEARCH_RESULT_FIELDS = RESEARCH_RESULT_FIELDS - {
+    "research_topic",
     "source_reliability",
     "identity_match_kind",
     "identity_match_reason",
 }
+PRE_TOPIC_RESEARCH_RESULT_FIELDS = RESEARCH_RESULT_FIELDS - {"research_topic"}
 TEMPLATE_REQUIRED_FACT_FIELDS = {
     "title",
     "text",
@@ -192,6 +195,8 @@ def import_research_results(
     stale_counts: dict[str, int] = {}
     provider_imported_counts: dict[str, int] = {}
     provider_stale_counts: dict[str, int] = {}
+    provider_topic_imported_counts: dict[str, dict[str, int]] = {}
+    provider_topic_stale_counts: dict[str, dict[str, int]] = {}
     provider_names: dict[str, str] = {}
 
     for match in matches:
@@ -216,11 +221,27 @@ def import_research_results(
         provider_imported_counts[provider_id] = (
             provider_imported_counts.get(provider_id, 0) + 1
         )
+        provider_topic_imported_counts.setdefault(provider_id, {})
+        provider_topic_imported_counts[provider_id][match.result.research_topic] = (
+            provider_topic_imported_counts[provider_id].get(
+                match.result.research_topic,
+                0,
+            )
+            + 1
+        )
         provider_names[provider_id] = _provider_name(match.result)
         if evidence.source_freshness == SourceFreshness.STALE:
             stale_counts[deal_id] = stale_counts.get(deal_id, 0) + 1
             provider_stale_counts[provider_id] = (
                 provider_stale_counts.get(provider_id, 0) + 1
+            )
+            provider_topic_stale_counts.setdefault(provider_id, {})
+            provider_topic_stale_counts[provider_id][match.result.research_topic] = (
+                provider_topic_stale_counts[provider_id].get(
+                    match.result.research_topic,
+                    0,
+                )
+                + 1
             )
 
     if not dry_run:
@@ -269,6 +290,8 @@ def import_research_results(
         ),
         provider_imported_counts=provider_imported_counts,
         provider_stale_counts=provider_stale_counts,
+        provider_topic_imported_counts=provider_topic_imported_counts,
+        provider_topic_stale_counts=provider_topic_stale_counts,
         provider_names=provider_names,
         deals=_import_deal_summaries(
             matches,
@@ -551,7 +574,11 @@ def _is_blank_template_result(result: object) -> bool:
     if not isinstance(result, dict):
         return False
     result_fields = set(result)
-    if result_fields != RESEARCH_RESULT_FIELDS and result_fields != LEGACY_RESEARCH_RESULT_FIELDS:
+    if result_fields not in (
+        RESEARCH_RESULT_FIELDS,
+        PRE_TOPIC_RESEARCH_RESULT_FIELDS,
+        LEGACY_RESEARCH_RESULT_FIELDS,
+    ):
         return False
     if _is_untouched_meridian_placeholder_result(result):
         return True
@@ -1241,6 +1268,7 @@ def _evidence_record_for_result(
         ),
         provider_id=result.provider_id,
         provider_name=provider_name,
+        research_topic=result.research_topic,
         source_url=result.source_url,
         source_api=result.source_api,
         retrieved_at=_as_utc(result.retrieved_at),

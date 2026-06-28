@@ -23,8 +23,10 @@ from hailmary.evidence import (
     DiligenceQuestionCandidate,
     DiligenceQuestionQueue,
     DiligenceQuestionSource,
+    EvidenceAuditFindingKind,
     EvidenceAuditReadiness,
     EvidenceAuditSeverity,
+    EvidenceAuditTerm,
     EvidenceCompletenessAudit,
     ReviewIssueSeverity,
     build_deal_evidence_review,
@@ -60,6 +62,7 @@ from hailmary.research import (
     ResearchQualityMetric,
     ResearchQualityStatus,
     ResearchWorkflowError,
+    ResearchWorkflowIssue,
     ResearchWorkflowRunSummary,
     SbirAwardsClient,
     SecFormDFilingsClient,
@@ -68,6 +71,7 @@ from hailmary.research import (
     research_quality_status,
     run_research_workflow,
 )
+from hailmary.research.schemas import resolved_research_result_topics
 from hailmary.research.web import WebResearchClient
 from hailmary.schemas.agents import (
     AgentCommitteeContext,
@@ -95,6 +99,7 @@ from hailmary.schemas.evidence import (
 from hailmary.schemas.scoring import (
     ConfidenceLevel,
     DiligenceResearchContext,
+    KillGate,
     Recommendation,
     ScoredDeal,
     ScoreFactor,
@@ -102,11 +107,14 @@ from hailmary.schemas.scoring import (
 )
 from hailmary.scoring.portfolio import portfolio_exposure_state_from_ledger
 from hailmary.scoring.scorer import (
+    CALCULATED_RISK_MINIMUM_SCORE,
+    INVEST_MINIMUM_SCORE,
     score_evidence_store,
     validated_conflicts,
     validated_verified_claims,
 )
 from hailmary.utils.slug import slugify
+from hailmary.utils.source_instructions import looks_like_embedded_source_instruction
 
 DEFAULT_EVALUATION_MAX_CONCURRENCY = 3
 MAX_COMMITTEE_CONTEXT_TEXT_CHARS = 500
@@ -116,6 +124,7 @@ MAX_CLI_COMMENTARY_CHARS = 220
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3
 DEFAULT_RESPONSE_TOKEN_ESTIMATE = 2_000
 MIN_PRIVACY_SOURCE_FRAGMENT_CHARS = 40
+MERIDIAN_MANUAL_WORKFLOW_WARNING_PREFIX = "Meridian is a manual authenticated workflow."
 SPECIALIST_AGENT_ROLES: tuple[AgentRole, ...] = tuple(
     role for role in DEFAULT_AGENT_ROLES if role != AgentRole.FINAL_DECISION
 )
@@ -244,9 +253,14 @@ def _diligence_research_context(
     workflow = research_run.workflow
     summary = workflow.summary
     quality = research_run.quality_status
+    imported_record_count = (
+        quality.imported_record_count
+        if quality is not None
+        else research_run.imported_count + research_run.skipped_duplicate_count
+    )
     return DiligenceResearchContext(
         planned_task_count=workflow.plan.task_count,
-        imported_record_count=research_run.imported_count,
+        imported_record_count=imported_record_count,
         failed_provider_count=summary.failed_provider_count,
         incomplete_search_count=summary.incomplete_search_count,
         no_exact_result_provider_count=summary.no_exact_result_provider_count,
@@ -263,8 +277,31 @@ def _diligence_research_context(
         identity_mismatch_count=quality.identity_mismatch_count
         if quality is not None
         else 0,
-        warning_count=summary.warning_count,
+        warning_count=_actionable_research_warning_count(workflow),
         no_prepared_result_companies=workflow.no_prepared_result_companies,
+    )
+
+
+def _actionable_research_warning_count(workflow: ResearchWorkflowRunSummary) -> int:
+    return sum(
+        1
+        for issue in workflow.issues
+        if issue.severity == "warning" and not _is_advisory_research_warning(issue)
+    ) + sum(len(collection.warnings) for collection in workflow.collections)
+
+
+def _is_advisory_research_warning(issue: ResearchWorkflowIssue) -> bool:
+    return (
+        issue.source == "meridian"
+        and issue.message.startswith(MERIDIAN_MANUAL_WORKFLOW_WARNING_PREFIX)
+    )
+
+
+def _skipped_research_context() -> DiligenceResearchContext:
+    return DiligenceResearchContext(
+        planned_task_count=1,
+        imported_record_count=0,
+        not_run_provider_count=1,
     )
 
 
@@ -403,11 +440,24 @@ def _cli_risk_points(result: DealEvaluationResult) -> list[str]:
             points,
             "No usable source-linked evidence was available, so the deal needs more diligence.",
         )
-    for gate in result.deterministic_score.triggered_kill_gates:
+    for gate in result.deterministic_score.triggered_hard_blockers:
         _add_cli_point(
             points,
             (
                 "A rule-based guardrail, meaning a fixed safety rule, triggered: "
+                f"{_operator_factor_name(gate.name)}."
+            ),
+        )
+    risk_gap_label = (
+        "calculated-risk gap"
+        if result.deterministic_score.calculated_risk_mode
+        else "strict-risk gap"
+    )
+    for gate in result.deterministic_score.triggered_risk_gaps:
+        _add_cli_point(
+            points,
+            (
+                f"A {risk_gap_label} remains: "
                 f"{_operator_factor_name(gate.name)}."
             ),
         )
@@ -519,6 +569,18 @@ def _cli_decisive_factor(result: DealEvaluationResult) -> str:
             max_chars=360,
         )
     if final_recommendation == Recommendation.INVEST:
+        if deterministic.calculated_risk:
+            return _clean_cli_commentary_text(
+                (
+                    f"{uncertainty_prefix}The recommendation is INVEST as a "
+                    "calculated risk because no hard blocker forced a pass, the "
+                    f"score was {deterministic.total_score}/{deterministic.max_score}, "
+                    "and the final check was capped at "
+                    f"{_format_check_size(result.final_recommendation.check_size)}. "
+                    f"{reason}."
+                ),
+                max_chars=360,
+            )
         return _clean_cli_commentary_text(
             (
                 f"{uncertainty_prefix}The recommendation is INVEST because rule-based "
@@ -613,7 +675,6 @@ def _clean_cli_commentary_text(
 def _reason_fragment(reason: str) -> str:
     cleaned = _clean_cli_commentary_text(reason, max_chars=260)
     for prefix in (
-        "Rule-based scoring forced PASS:",
         "Passed because",
         "Recommended because",
     ):
@@ -882,11 +943,14 @@ def evaluate_deal_folder(
         raise EvaluationError(
             f"Could not read the private portfolio ledger: {exc}"
         ) from exc
+    research_context = _diligence_research_context(research_run)
+    if research_context is None and not run_research:
+        research_context = _skipped_research_context()
     scored_deal = score_evidence_store(
         store,
         config=config,
         capital_remaining=status.available_capital,
-        research_context=_diligence_research_context(research_run),
+        research_context=research_context,
         exposure_state=portfolio_exposure_state_from_ledger(
             status.ledger,
             config=config,
@@ -1444,7 +1508,10 @@ def _rule_based_final_decision(
     final_confidence = scored_deal.confidence
     unsupported = not references
     audit_guardrail_reason = (
-        _evidence_audit_guardrail_reason(evidence_audit)
+        _evidence_audit_guardrail_reason(
+            evidence_audit,
+            calculated_risk=scored_deal.calculated_risk,
+        )
         if scored_deal.recommendation == Recommendation.INVEST
         else None
     )
@@ -1560,6 +1627,11 @@ def render_final_evaluation_memo(
         f"**Suggested check:** {_format_check_size(final_recommendation.check_size)}",
         f"**Score:** {scored_deal.total_score}/{scored_deal.max_score}",
         f"**Confidence:** {scored_deal.confidence}",
+        f"**Mode:** {_decision_mode_summary(scored_deal)}",
+        f"**Hard blockers:** {_gate_name_summary(scored_deal.triggered_hard_blockers)}",
+        f"**{_risk_gap_plural_label(scored_deal)}:** "
+        f"{_gate_name_summary(scored_deal.triggered_risk_gaps)}",
+        f"**Research coverage:** {_research_coverage_summary(research_run)}",
         f"**One-line reason:** {_memo_text(final_recommendation.reason)}",
         "**Deadline:** unknown",
         f"**Round / Instrument:** {_round_summary(verified_claims)} / unknown",
@@ -1573,7 +1645,7 @@ def render_final_evaluation_memo(
         "## Rule-Based Decision And Guardrails",
         "",
         "- Rule-based scoring means fixed checks over source-linked evidence. "
-        "This is the deterministic score.",
+        "Calculated-risk mode can size a small check when only diligence gaps remain.",
         "- Unsupported or model-only findings may be shown as diligence notes, "
         "but they do not change the deterministic score or check size.",
         f"- Rule-based recommendation: {scored_deal.recommendation}.",
@@ -1582,8 +1654,10 @@ def render_final_evaluation_memo(
     ]
     for gate in scored_deal.kill_gates:
         status = "TRIGGERED" if gate.triggered else "Clear"
+        gate_kind = "hard blocker" if gate.force_pass else _risk_gap_label(scored_deal)
         lines.append(
-            f"- {status}: {_memo_text(gate.name)}. {_memo_text(gate.reason)}"
+            f"- {status} {_memo_text(gate_kind)}: {_memo_text(gate.name)}. "
+            f"{_memo_text(gate.reason)}"
             f"{_support_text(gate.support_status)}"
             f"{_evidence_reference_text(gate.evidence_ids)}"
         )
@@ -1705,12 +1779,14 @@ def render_final_evaluation_memo(
         lines.append("- No source-linked evidence was cited.")
 
     lines.extend(["", "## Limitations"])
-    limitation_lines = _limitation_lines(
-        specialist_results,
+    limitation_lines = _grouped_limitation_lines(
+        scored_deal,
+        research_run=research_run,
+        specialist_results=specialist_results,
         final_output=final_output,
         warnings=warnings,
     )
-    lines.extend(limitation_lines or ["- No model-validation limitations were recorded."])
+    lines.extend(limitation_lines)
 
     lines.extend(["", "## Diligence Questions"])
     lines.extend(
@@ -1824,6 +1900,9 @@ def _score_export(scored_deal: ScoredDeal) -> dict[str, object]:
         "max_score": scored_deal.max_score,
         "confidence": scored_deal.confidence.value,
         "one_line_reason": scored_deal.one_line_reason,
+        "calculated_risk_mode": scored_deal.calculated_risk_mode,
+        "calculated_risk": scored_deal.calculated_risk,
+        "calculated_risk_reason": scored_deal.calculated_risk_reason,
         "pmf_level": scored_deal.pmf_level.value,
         "fundability_risk": scored_deal.fundability_risk.value,
         "company_stage": scored_deal.company_stage.value,
@@ -1849,6 +1928,24 @@ def _score_export(scored_deal: ScoredDeal) -> dict[str, object]:
                 "evidence_ids": list(gate.evidence_ids),
             }
             for gate in scored_deal.triggered_kill_gates
+        ],
+        "hard_blockers": [
+            {
+                "name": gate.name,
+                "reason": gate.reason,
+                "support_status": gate.support_status.value,
+                "evidence_ids": list(gate.evidence_ids),
+            }
+            for gate in scored_deal.triggered_hard_blockers
+        ],
+        "risk_gaps": [
+            {
+                "name": gate.name,
+                "reason": gate.reason,
+                "support_status": gate.support_status.value,
+                "evidence_ids": list(gate.evidence_ids),
+            }
+            for gate in scored_deal.triggered_risk_gaps
         ],
         "net_return": {
             "entry_valuation": scored_deal.net_return.entry_valuation,
@@ -1876,6 +1973,7 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
             "ran": False,
             "imported_count": 0,
             "stale_count": 0,
+            "planned_topics": {},
             "quality": {"status": "not_run"},
             "provider_statuses": [],
             "blocking_issue_count": 0,
@@ -1887,6 +1985,9 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
     return {
         "ran": True,
         "planned_task_count": workflow.plan.task_count,
+        "planned_topics": _research_topic_counts(
+            task.research_topic for task in workflow.plan.tasks
+        ),
         "imported_count": research_run.imported_count,
         "stale_count": research_run.stale_count,
         "skipped_duplicate_count": research_run.skipped_duplicate_count,
@@ -1906,6 +2007,7 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
             {
                 "provider_id": status.provider_id,
                 "provider_name": status.provider_name,
+                "research_topic": status.research_topic,
                 "status": status.status.value,
                 "planned_count": status.planned_count,
                 "collected_count": status.collected_count,
@@ -1918,6 +2020,13 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
             for status in _evaluation_research_provider_statuses(research_run)
         ],
     }
+
+
+def _research_topic_counts(topics: Sequence[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for topic in topics:
+        counts[topic] = counts.get(topic, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _research_quality_export(
@@ -2811,7 +2920,10 @@ def _guard_final_decision(
             "Hail Mary did not write a final memo."
         )
 
-    audit_guardrail_reason = _evidence_audit_guardrail_reason(evidence_audit)
+    audit_guardrail_reason = _evidence_audit_guardrail_reason(
+        evidence_audit,
+        calculated_risk=scored_deal.calculated_risk,
+    )
     if audit_guardrail_reason and scored_deal.recommendation == Recommendation.INVEST:
         warning = (
             "Evidence completeness guardrail forced final PASS/$0 because blocking "
@@ -2834,15 +2946,15 @@ def _guard_final_decision(
             scored_deal,
             quote_only_evidence_ids=quote_only_evidence_ids,
         )
+        deterministic_pass_explanation = _deterministic_pass_explanation(scored_deal)
         forced_pass_warning = (
             "The final model recommended "
-            f"{_recommendation_summary(model_recommendation)}, but rule-based scoring "
-            "forced final PASS/$0 because the model cannot override Hail Mary kill "
-            "gates or score gates into INVEST. Rule-based scoring means fixed checks "
-            "over source-linked evidence."
+            f"{_recommendation_summary(model_recommendation)}, but Hail Mary's "
+            "deterministic guardrails kept final PASS/$0 because "
+            f"{deterministic_pass_explanation}."
         )
         warnings = [forced_pass_warning]
-        forced_pass_reason = f"Rule-based scoring forced PASS: {scored_deal.one_line_reason}"
+        forced_pass_reason = f"Final PASS/$0 because {deterministic_pass_explanation}."
         if evidence_selection.filtered_reference_count and not evidence_selection.references:
             citation_limitation = (
                 "Hail Mary removed all rule-based recommendation citations because they "
@@ -2853,7 +2965,7 @@ def _guard_final_decision(
             warnings.append(citation_limitation)
             forced_pass_reason = (
                 f"NEEDS_DILIGENCE: {citation_limitation} "
-                f"Rule-based scoring forced PASS: {scored_deal.one_line_reason}"
+                f"Final PASS/$0 because {deterministic_pass_explanation}."
             )
         elif evidence_selection.filtered_reference_count:
             warnings.append(
@@ -2893,20 +3005,63 @@ def _recommendation_summary(recommendation: AgentRecommendationRationale) -> str
     return f"{recommendation.recommendation}/{_format_check_size(recommendation.check_size)}"
 
 
+def _risk_gap_label(scored_deal: ScoredDeal) -> str:
+    return (
+        "calculated-risk gap"
+        if scored_deal.calculated_risk_mode
+        else "strict-risk gap"
+    )
+
+
+def _risk_gap_plural_label(scored_deal: ScoredDeal) -> str:
+    return (
+        "Calculated-risk gaps"
+        if scored_deal.calculated_risk_mode
+        else "Strict-risk gaps"
+    )
+
+
+def _deterministic_pass_explanation(scored_deal: ScoredDeal) -> str:
+    if scored_deal.triggered_hard_blockers:
+        gate = scored_deal.triggered_hard_blockers[0]
+        reason = _clean_cli_commentary_text(gate.reason, max_chars=260).rstrip(".")
+        return f"hard blocker '{gate.name}' triggered: {reason}"
+    score_floor = (
+        CALCULATED_RISK_MINIMUM_SCORE
+        if scored_deal.calculated_risk_mode
+        else INVEST_MINIMUM_SCORE
+    )
+    if scored_deal.total_score < score_floor:
+        return f"score {scored_deal.total_score}/100 was below the {score_floor}/100 investment bar"
+    if (
+        scored_deal.calculated_risk_mode
+        and scored_deal.total_score < INVEST_MINIMUM_SCORE
+    ):
+        return (
+            "calculated-risk mode needs source-linked traction, customer, usage, "
+            "pilot, or funding support for a 60-74 score"
+        )
+    if scored_deal.triggered_risk_gaps:
+        gate = scored_deal.triggered_risk_gaps[0]
+        gap_kind = _risk_gap_label(scored_deal)
+        reason = _clean_cli_commentary_text(gate.reason, max_chars=260).rstrip(".")
+        return f"{gap_kind} '{gate.name}' remained unresolved: {reason}"
+    return _reason_fragment(scored_deal.one_line_reason)
+
+
 def _no_evidence_final_decision(
     scored_deal: ScoredDeal,
 ) -> tuple[AgentReviewOutput, GuardedFinalDecision]:
     limitation = (
         "No usable source-linked evidence was available, so Hail Mary skipped model "
-        "committee review and wrote a rule-based PASS/$0 memo. Rule-based scoring means "
-        "fixed checks over source-linked evidence."
+        "committee review and wrote a deterministic PASS/$0 memo."
     )
     recommendation = AgentRecommendationRationale(
         recommendation=Recommendation.PASS,
         check_size=0,
         reason=(
             "NEEDS_DILIGENCE: No usable source-linked evidence was available; "
-            f"rule-based scoring forced PASS. {scored_deal.one_line_reason}"
+            f"final PASS/$0 because {_deterministic_pass_explanation(scored_deal)}."
         ),
         evidence=[],
     )
@@ -3070,21 +3225,70 @@ def _deterministic_support_evidence_ids(
         if evidence_id not in evidence_ids:
             evidence_ids.append(evidence_id)
 
-    for evidence_id in _conflict_evidence_ids(store):
-        add_id(evidence_id)
-    for factor in scored_deal.score_factors:
-        for evidence_id in factor.evidence_ids:
+    primary_gates = (
+        scored_deal.triggered_hard_blockers
+        or scored_deal.triggered_risk_gaps
+    )
+    for gate in primary_gates:
+        for evidence_id in gate.evidence_ids:
             add_id(evidence_id)
-    for question in scored_deal.diligence_questions:
-        for evidence_id in question.evidence_ids:
+    if scored_deal.recommendation == Recommendation.INVEST:
+        for evidence_id in _positive_decision_evidence_ids(store, scored_deal):
             add_id(evidence_id)
-    for claim in validated_verified_claims(store):
-        for citation in claim.citations:
-            add_id(citation.evidence_id)
+    elif not evidence_ids:
+        for factor in scored_deal.score_factors:
+            if factor.support_status == ScoreSupportStatus.VERIFIED:
+                for evidence_id in factor.evidence_ids:
+                    add_id(evidence_id)
     if not evidence_ids:
-        for evidence in store.evidence[:5]:
+        for evidence in _safe_evidence_records(store)[:3]:
             add_id(evidence.id)
     return evidence_ids
+
+
+def _positive_decision_evidence_ids(
+    store: EvidenceStore,
+    scored_deal: ScoredDeal,
+) -> list[str]:
+    evidence_ids: list[str] = []
+
+    def add_id(evidence_id: str) -> None:
+        if evidence_id not in evidence_ids:
+            evidence_ids.append(evidence_id)
+
+    for factor in sorted(
+        scored_deal.score_factors,
+        key=lambda factor: (factor.score / factor.max_score if factor.max_score else 0),
+        reverse=True,
+    ):
+        if factor.support_status not in {
+            ScoreSupportStatus.VERIFIED,
+            ScoreSupportStatus.INFERRED,
+        }:
+            continue
+        if factor.score / factor.max_score < 0.65:
+            continue
+        for evidence_id in factor.evidence_ids:
+            add_id(evidence_id)
+    if evidence_ids:
+        return evidence_ids
+    for evidence in store.evidence:
+        if evidence.id in evidence_ids:
+            continue
+        if any(
+            keyword in evidence.text.casefold()
+            for keyword in ("customer", "revenue", "retention", "growth", "lead investor")
+        ):
+            add_id(evidence.id)
+    return evidence_ids
+
+
+def _safe_evidence_records(store: EvidenceStore) -> list[EvidenceRecord]:
+    return [
+        evidence
+        for evidence in store.evidence
+        if not looks_like_embedded_source_instruction(evidence.text)
+    ]
 
 
 def _conflict_evidence_ids(store: EvidenceStore) -> list[str]:
@@ -3152,11 +3356,10 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
     lines = [
         f"- Planned {workflow.plan.task_count} external source tasks.",
         (
-            "- Live public collection ran because web research was enabled."
+            "- Live public collection ran for exact public URLs and configured public clients."
             if workflow.live_collection_enabled
             else (
-                "- Live public collection did not run because local-only mode is on "
-                "or web research is disabled."
+                "- Live public collection did not run for this workflow."
             )
         ),
         (
@@ -3269,7 +3472,11 @@ def _research_provider_status_memo_lines(
 ) -> list[str]:
     statuses = sorted(
         _evaluation_research_provider_statuses(research_run),
-        key=lambda status: (status.provider_name.casefold(), status.provider_id),
+        key=lambda status: (
+            status.provider_name.casefold(),
+            status.provider_id,
+            status.research_topic,
+        ),
     )
     if not statuses:
         return []
@@ -3292,8 +3499,11 @@ def _research_provider_status_memo_lines(
         if status.failure:
             details.append(f"failure: {_memo_text(status.failure)}")
         detail_text = f" ({'; '.join(details)})" if details else ""
+        provider_label = _memo_text(status.provider_name)
+        if status.research_topic != "company":
+            provider_label = f"{provider_label} / {_memo_text(status.research_topic)}"
         lines.append(
-            f"  - {_memo_text(status.provider_name)}: "
+            f"  - {provider_label}: "
             f"{status.status.value.replace('_', ' ')}{detail_text}."
         )
     return lines
@@ -3303,38 +3513,91 @@ def _evaluation_research_provider_statuses(
     research_run: EvaluationResearchRun,
 ) -> list[ResearchProviderStatusSummary]:
     statuses = {
-        status.provider_id: status
+        _research_provider_topic_key(status.provider_id, status.research_topic): status
         for status in research_run.workflow.summary.provider_statuses
     }
     for import_summary in research_run.imports:
-        for provider_id, imported_count in import_summary.provider_imported_counts.items():
-            if imported_count <= 0:
-                continue
-            existing = statuses.get(provider_id)
-            provider_name = (
-                import_summary.provider_names.get(provider_id)
-                or (existing.provider_name if existing is not None else provider_id)
-            )
-            statuses[provider_id] = ResearchProviderStatusSummary(
+        topic_import_counts = _provider_topic_import_counts(import_summary)
+        for (provider_id, research_topic), imported_count in topic_import_counts.items():
+            _merge_imported_research_status(
+                statuses,
+                import_summary=import_summary,
                 provider_id=provider_id,
-                provider_name=provider_name,
-                status=_provider_status_after_import(existing),
-                planned_count=existing.planned_count if existing is not None else 0,
-                collected_count=0,
-                imported_count=(
-                    (existing.imported_count if existing is not None else 0)
-                    + imported_count
-                ),
-                warning_count=existing.warning_count if existing is not None else 0,
-                no_exact_result_companies=(
-                    existing.no_exact_result_companies if existing is not None else []
-                ),
-                incomplete_search=(
-                    existing.incomplete_search if existing is not None else False
-                ),
-                failure=existing.failure if existing is not None else None,
+                research_topic=research_topic,
+                imported_count=imported_count,
             )
     return list(statuses.values())
+
+
+def _provider_topic_import_counts(
+    import_summary: ResearchImportRunSummary,
+) -> dict[tuple[str, str], int]:
+    topic_counts: dict[tuple[str, str], int] = {}
+    providers_with_topic_counts: set[str] = set()
+    for provider_id, topic_counts_by_topic in (
+        import_summary.provider_topic_imported_counts.items()
+    ):
+        for research_topic, imported_count in topic_counts_by_topic.items():
+            if imported_count > 0:
+                providers_with_topic_counts.add(provider_id.strip())
+                for resolved_topic in _evaluation_import_topics(
+                    provider_id,
+                    research_topic,
+                ):
+                    topic_counts[
+                        _research_provider_topic_key(provider_id, resolved_topic)
+                    ] = imported_count
+    for provider_id, imported_count in import_summary.provider_imported_counts.items():
+        if imported_count <= 0 or provider_id.strip() in providers_with_topic_counts:
+            continue
+        for resolved_topic in _evaluation_import_topics(provider_id, "company"):
+            topic_counts[
+                _research_provider_topic_key(provider_id, resolved_topic)
+            ] = imported_count
+    return topic_counts
+
+
+def _evaluation_import_topics(provider_id: str, research_topic: str) -> set[str]:
+    return resolved_research_result_topics(provider_id, research_topic)
+
+
+def _merge_imported_research_status(
+    statuses: dict[tuple[str, str], ResearchProviderStatusSummary],
+    *,
+    import_summary: ResearchImportRunSummary,
+    provider_id: str,
+    research_topic: str,
+    imported_count: int,
+) -> None:
+    existing = statuses.get((provider_id, research_topic))
+    provider_name = (
+        import_summary.provider_names.get(provider_id)
+        or (existing.provider_name if existing is not None else provider_id)
+    )
+    statuses[(provider_id, research_topic)] = ResearchProviderStatusSummary(
+        provider_id=provider_id,
+        provider_name=provider_name,
+        research_topic=research_topic,
+        status=_provider_status_after_import(existing),
+        planned_count=existing.planned_count if existing is not None else 0,
+        collected_count=0,
+        imported_count=(
+            (existing.imported_count if existing is not None else 0) + imported_count
+        ),
+        warning_count=existing.warning_count if existing is not None else 0,
+        no_exact_result_companies=(
+            existing.no_exact_result_companies if existing is not None else []
+        ),
+        incomplete_search=existing.incomplete_search if existing is not None else False,
+        failure=existing.failure if existing is not None else None,
+    )
+
+
+def _research_provider_topic_key(
+    provider_id: str,
+    research_topic: str,
+) -> tuple[str, str]:
+    return (provider_id.strip(), research_topic.strip().casefold() or "company")
 
 
 def _provider_status_after_import(
@@ -3362,9 +3625,8 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
     warnings: list[str] = []
     if not workflow.live_collection_enabled:
         warnings.append(
-            "Live public research did not run. Set HAILMARY_LOCAL_ONLY=false and "
-            "HAILMARY_ENABLE_WEB_RESEARCH=true to let evaluate-deal collect allowed "
-            "public web and API sources."
+            "Live public research did not run for this workflow. Use prepared "
+            "source-linked research results or rerun without --skip-research."
         )
     if workflow.no_prepared_result_companies:
         if research_summary.incomplete_search_count:
@@ -3627,6 +3889,8 @@ def _evidence_audit_limitations(
 
 def _evidence_audit_guardrail_reason(
     evidence_audit: EvidenceCompletenessAudit | None,
+    *,
+    calculated_risk: bool = False,
 ) -> str | None:
     if evidence_audit is None:
         return None
@@ -3635,12 +3899,32 @@ def _evidence_audit_guardrail_reason(
         for finding in evidence_audit.findings
         if finding.severity == EvidenceAuditSeverity.BLOCKING
     ]
+    if calculated_risk:
+        blocking_findings = [
+            finding
+            for finding in blocking_findings
+            if not _calculated_risk_soft_audit_finding(finding)
+        ]
     if not blocking_findings:
         return None
     return (
         "Evidence completeness audit forced PASS/$0 because blocking gaps were found: "
         f"{_evidence_audit_finding_names(blocking_findings)}. Add clean source-linked "
         "support or resolve the blocking issue before relying on an INVEST decision."
+    )
+
+
+def _calculated_risk_soft_audit_finding(finding: object) -> bool:
+    if getattr(finding, "kind", None) != EvidenceAuditFindingKind.MISSING_TERM:
+        return False
+    if getattr(finding, "term", None) == EvidenceAuditTerm.PRICE_VALUATION:
+        return True
+    title = str(getattr(finding, "title", "")).casefold()
+    explanation = str(getattr(finding, "explanation", "")).casefold()
+    combined = f"{title} {explanation}"
+    return (
+        "valuation" in combined
+        and any(marker in combined for marker in ("price", "valuation cap", "entry valuation"))
     )
 
 
@@ -4666,6 +4950,34 @@ def _evidence_reference_text(evidence_ids: Sequence[str]) -> str:
     return f" Evidence: {', '.join(_memo_text(evidence_id) for evidence_id in evidence_ids)}."
 
 
+def _decision_mode_summary(scored_deal: ScoredDeal) -> str:
+    if not scored_deal.calculated_risk_mode:
+        return "strict risk"
+    if scored_deal.calculated_risk:
+        return "calculated risk"
+    return "calculated risk enabled"
+
+
+def _gate_name_summary(gates: Sequence[KillGate]) -> str:
+    if not gates:
+        return "none"
+    return _memo_text(", ".join(gate.name for gate in gates))
+
+
+def _research_coverage_summary(research_run: EvaluationResearchRun | None) -> str:
+    if research_run is None:
+        return "research skipped"
+    imported = research_run.imported_count
+    planned = research_run.workflow.plan.task_count
+    manual = research_run.workflow.unresolved_manual_task_count
+    return (
+        f"{imported} imported external record"
+        f"{'' if imported == 1 else 's'}; {planned} planned task"
+        f"{'' if planned == 1 else 's'}; {manual} manual follow-up task"
+        f"{'' if manual == 1 else 's'}"
+    )
+
+
 def _support_text(status: object) -> str:
     return f" Support: {str(status).upper()}."
 
@@ -4847,6 +5159,8 @@ def _evidence_line(
     ]
     if evidence.provider_name:
         source_parts.append(f"provider: {_memo_text(evidence.provider_name)}")
+    if evidence.provider_id:
+        source_parts.append(f"research topic: {_memo_text(evidence.research_topic)}")
     if evidence.source_url:
         source_parts.append(f"source page: {_memo_text(evidence.source_url)}")
     if evidence.source_api:
@@ -4928,6 +5242,78 @@ def _limitation_lines(
     for limitation in final_output.limitations:
         add_line(f"Final Decision: {limitation}")
     return lines
+
+
+def _grouped_limitation_lines(
+    scored_deal: ScoredDeal,
+    *,
+    research_run: EvaluationResearchRun | None,
+    specialist_results: Sequence[RoleReviewResult],
+    final_output: AgentReviewOutput,
+    warnings: Sequence[str],
+) -> list[str]:
+    lines: list[str] = []
+    lines.append("### Hard Blockers")
+    if scored_deal.triggered_hard_blockers:
+        lines.extend(_gate_limitation_lines(scored_deal.triggered_hard_blockers))
+    else:
+        lines.append("- None triggered.")
+
+    lines.append("")
+    lines.append("### Calculated-Risk Gaps")
+    if scored_deal.triggered_risk_gaps:
+        lines.extend(_gate_limitation_lines(scored_deal.triggered_risk_gaps))
+    else:
+        lines.append("- None triggered.")
+
+    lines.append("")
+    lines.append("### Research Coverage")
+    lines.append(f"- {_memo_text(_research_coverage_summary(research_run))}.")
+    if research_run is None:
+        lines.append("- External research workflow was skipped for this run.")
+    elif research_run.imported_count == 0:
+        lines.append("- No external research evidence was imported before scoring.")
+    elif research_run.workflow.unresolved_manual_task_count:
+        lines.append(
+            "- Manual research follow-up remains for "
+            f"{research_run.workflow.unresolved_manual_task_count} source task"
+            f"{'' if research_run.workflow.unresolved_manual_task_count == 1 else 's'}."
+        )
+
+    lines.append("")
+    lines.append("### Next Diligence")
+    next_lines = _limitation_lines(
+        specialist_results,
+        final_output=final_output,
+        warnings=warnings,
+    )
+    if scored_deal.diligence_questions:
+        for question in sorted(
+            scored_deal.diligence_questions,
+            key=lambda item: (item.priority, item.question.casefold()),
+        )[:5]:
+            next_lines.append(
+                f"- {_memo_text(question.question)} "
+                f"Reason: {_memo_text(question.reason)}"
+            )
+    lines.extend(_unique_lines(next_lines) or ["- No immediate limitations were recorded."])
+    return lines
+
+
+def _gate_limitation_lines(gates: Sequence[KillGate]) -> list[str]:
+    return [
+        f"- {_memo_text(gate.name)}: {_memo_text(gate.reason)}"
+        f"{_evidence_reference_text(gate.evidence_ids)}"
+        for gate in gates
+    ]
+
+
+def _unique_lines(lines: Sequence[str]) -> list[str]:
+    unique: list[str] = []
+    for line in lines:
+        if line not in unique:
+            unique.append(line)
+    return unique
 
 
 def _memo_text(value: object) -> str:

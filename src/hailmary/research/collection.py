@@ -844,6 +844,7 @@ class PublicSourceFileAdapter:
                     company_name=deal.company_name,
                     provider_id=provider.id,
                     provider_name=provider.name,
+                    research_topic=_research_topic_for_provider(provider.id),
                     title=search_result.title,
                     text=search_result.text,
                     retrieved_at=_as_utc(search_result.retrieved_at),
@@ -2766,6 +2767,7 @@ def _research_result_from_usaspending_award(
             company_name=deal.company_name,
             provider_id=provider.id,
             provider_name=provider.name,
+            research_topic=_research_topic_for_provider(provider.id),
             title=f"USAspending award {award_id} for {award.recipient_name}",
             text=_usaspending_award_text(award),
             retrieved_at=collected_at,
@@ -2811,6 +2813,7 @@ def _research_result_from_sbir_award(
             company_name=deal.company_name,
             provider_id=provider.id,
             provider_name=provider.name,
+            research_topic=_research_topic_for_provider(provider.id),
             title=f"SBIR/STTR award {award.award_title} for {award.firm}",
             text=_sbir_award_text(award),
             retrieved_at=collected_at,
@@ -2853,6 +2856,7 @@ def _research_result_from_sec_form_d_filing(
             company_name=deal.company_name,
             provider_id=provider.id,
             provider_name=provider.name,
+            research_topic=_research_topic_for_provider(provider.id),
             title=f"SEC Form {filing.filing_type} filing for {filing.issuer_name}",
             text=_sec_form_d_filing_text(filing),
             retrieved_at=collected_at,
@@ -2896,6 +2900,7 @@ def _research_result_from_github_repository(
             company_name=deal.company_name,
             provider_id=provider.id,
             provider_name=provider.name,
+            research_topic=_research_topic_for_provider(provider.id),
             title=f"GitHub repository {repository.full_name}",
             text=_github_repository_text(repository),
             retrieved_at=collected_at,
@@ -3568,6 +3573,16 @@ def _provider_by_id(provider_id: str) -> ResearchProvider:
             f"Built-in research provider {provider_id} is not configured."
         )
     return provider
+
+
+def _research_topic_for_provider(provider_id: str) -> str:
+    if provider_id in {"sec_form_d", "usaspending", "sbir", "sam_gov"}:
+        return "funding"
+    if provider_id == "uspto":
+        return "legal"
+    if provider_id == "github":
+        return "traction"
+    return "company"
 
 
 def _public_source_adapter_config(provider_id: str) -> PublicSourceAdapterConfig:

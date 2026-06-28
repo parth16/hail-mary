@@ -127,6 +127,7 @@ class KillGate(BaseModel):
     reason: str
     evidence_ids: list[str] = Field(default_factory=list)
     support_status: ScoreSupportStatus = ScoreSupportStatus.NEEDS_DILIGENCE
+    force_pass: bool = True
 
 
 class ScoreFactor(BaseModel):
@@ -186,6 +187,9 @@ class ScoredDeal(BaseModel):
     fundability_risk: FundabilityRisk = FundabilityRisk.UNKNOWN
     company_stage: CompanyStage = CompanyStage.UNKNOWN
     valuation_risk: ValuationRisk = ValuationRisk.UNKNOWN
+    calculated_risk_mode: bool = True
+    calculated_risk: bool = False
+    calculated_risk_reason: str | None = None
     net_return: NetReturnEstimate = Field(default_factory=NetReturnEstimate)
     kill_gates: list[KillGate] = Field(default_factory=list)
     score_factors: list[ScoreFactor] = Field(default_factory=list)
@@ -214,6 +218,22 @@ class ScoredDeal(BaseModel):
     @property
     def triggered_kill_gates(self) -> list[KillGate]:
         return [gate for gate in self.kill_gates if gate.triggered]
+
+    @property
+    def triggered_hard_blockers(self) -> list[KillGate]:
+        return [
+            gate
+            for gate in self.kill_gates
+            if gate.triggered and gate.force_pass
+        ]
+
+    @property
+    def triggered_risk_gaps(self) -> list[KillGate]:
+        return [
+            gate
+            for gate in self.kill_gates
+            if gate.triggered and not gate.force_pass
+        ]
 
 
 class MemoRunSummary(BaseModel):
