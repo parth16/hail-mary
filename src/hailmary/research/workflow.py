@@ -26,13 +26,19 @@ from .collection import (
     collect_usaspending_awards,
     prepare_public_research_results,
 )
-from .importer import ResearchImportError, import_research_results
+from .importer import (
+    ResearchImportError,
+    import_research_results,
+    preview_meridian_results_file,
+)
 from .matching import CompanyMatch
 from .meridian import clean_meridian_url, prepare_meridian_workflow
 from .paid import PaidProviderClient, collect_paid_research_results
 from .planner import prepare_research_plan
 from .providers import builtin_research_providers
 from .schemas import (
+    MeridianImportPreview,
+    MeridianUnresolvedField,
     ResearchImportDealSummary,
     ResearchImportRunSummary,
     ResearchPlan,
@@ -152,6 +158,7 @@ class ResearchWorkflowImportPreview(BaseModel):
     skipped_duplicate_count: int = 0
     skipped_blank_template_row_count: int = 0
     stale_count: int = 0
+    meridian_preview: MeridianImportPreview | None = None
     deals: list[ResearchImportDealSummary] = Field(default_factory=list)
     error: str | None = None
 
@@ -217,6 +224,26 @@ class ResearchWorkflowRunSummary(BaseModel):
             company_name
             for company_name, result_count in prepared_counts.items()
             if result_count == 0
+        ]
+
+    @property
+    def meridian_unresolved_fields(self) -> list[MeridianUnresolvedField]:
+        unresolved_by_id: dict[str, MeridianUnresolvedField] = {}
+        resolved_field_ids: set[str] = set()
+        for preview in self.import_previews:
+            if preview.meridian_preview is None:
+                continue
+            if preview.meridian_preview.source_url is not None:
+                resolved_field_ids.add("deal_url")
+            for row in preview.meridian_preview.rows:
+                if row.status == "import_ready" and row.field_id is not None:
+                    resolved_field_ids.add(row.field_id)
+            for field in preview.meridian_preview.unresolved_required_fields:
+                unresolved_by_id.setdefault(field.field_id, field)
+        return [
+            field
+            for field in unresolved_by_id.values()
+            if field.field_id not in resolved_field_ids
         ]
 
     @property
@@ -320,6 +347,7 @@ def run_research_workflow(
             )
             meridian_workflow_path = meridian_result.output_path
             meridian_result_template_path = meridian_result.result_template_path
+            result_paths.append(meridian_result.result_template_path)
             issues.append(
                 ResearchWorkflowIssue(
                     severity="warning",
@@ -925,7 +953,16 @@ def _preview_imports(
             )
         except ResearchImportError as exc:
             message = str(exc)
-            previews.append(ResearchWorkflowImportPreview(input_path=path, error=message))
+            previews.append(
+                ResearchWorkflowImportPreview(
+                    input_path=path,
+                    meridian_preview=_safe_meridian_preview(
+                        path,
+                        imported_at=imported_at,
+                    ),
+                    error=message,
+                )
+            )
             severity: IssueSeverity = (
                 "error" if path in supplied_result_paths else _import_issue_severity(message)
             )
@@ -950,8 +987,23 @@ def _import_preview_from_result(
         skipped_duplicate_count=result.skipped_duplicate_count,
         skipped_blank_template_row_count=result.skipped_blank_template_row_count,
         stale_count=result.stale_count,
+        meridian_preview=result.meridian_preview,
         deals=result.deals,
     )
+
+
+def _safe_meridian_preview(
+    path: Path,
+    *,
+    imported_at: datetime,
+) -> MeridianImportPreview | None:
+    try:
+        return preview_meridian_results_file(
+            results_path=path,
+            imported_at=imported_at,
+        )
+    except ResearchImportError:
+        return None
 
 
 def _import_issue_severity(message: str) -> IssueSeverity:

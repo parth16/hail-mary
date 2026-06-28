@@ -83,6 +83,8 @@ from hailmary.portfolio import (
 )
 from hailmary.research import (
     CompanyMatch,
+    MeridianImportPreview,
+    MeridianUnresolvedField,
     MeridianWorkflowError,
     ResearchCollectionError,
     ResearchImportError,
@@ -107,6 +109,7 @@ from hailmary.research import (
     prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
+    preview_meridian_results_file,
     run_research_workflow,
 )
 from hailmary.schemas.documents import SourceKind
@@ -2465,6 +2468,13 @@ def evaluate_deal(
                     f"{research_workflow.manual_task_queue_path}."
                 )
             )
+        if research_workflow.meridian_unresolved_fields:
+            renderables.append(
+                _plain(
+                    "Meridian unresolved fields: "
+                    f"{_meridian_unresolved_field_text(research_workflow.meridian_unresolved_fields)}."
+                )
+            )
         if research_workflow.live_collection_enabled:
             renderables.append(_plain("Live public research ran because web research is enabled."))
         else:
@@ -3091,6 +3101,14 @@ def _research_workflow_lines(result: ResearchWorkflowRunSummary) -> list[Text]:
             )
         )
 
+    if result.meridian_unresolved_fields:
+        lines.append(
+            _plain(
+                "Meridian unresolved fields: "
+                f"{_meridian_unresolved_field_text(result.meridian_unresolved_fields)}."
+            )
+        )
+
     needs_diligence = [
         issue for issue in result.issues if issue.severity in {"warning", "error"}
     ]
@@ -3394,7 +3412,10 @@ def _research_workflow_import_lines(preview: ResearchWorkflowImportPreview) -> l
     input_path = preview.input_path
     error = preview.error
     if error is not None:
-        return [_plain(f"- {input_path}: dry run blocked: {error}")]
+        lines = [_plain(f"- {input_path}: dry run blocked: {error}")]
+        if preview.meridian_preview is not None:
+            lines.extend(_meridian_import_preview_lines(preview.meridian_preview))
+        return lines
     imported_count = preview.imported_count
     record_word = "record" if imported_count == 1 else "records"
     lines = [_plain(f"- {input_path}: would import {imported_count} {record_word}.")]
@@ -3431,7 +3452,45 @@ def _research_workflow_import_lines(preview: ResearchWorkflowImportPreview) -> l
                         f"{stale_word}."
                     )
                 )
+    if preview.meridian_preview is not None:
+        lines.extend(_meridian_import_preview_lines(preview.meridian_preview))
     return lines
+
+
+def _meridian_import_preview_lines(preview: MeridianImportPreview) -> list[Text]:
+    row_word = "row" if len(preview.rows) == 1 else "rows"
+    lines = [
+        _plain(
+            "  Meridian preview: "
+            f"{preview.import_ready_count} import-ready, "
+            f"{preview.placeholder_count} placeholder, "
+            f"{preview.unsafe_or_incomplete_count} unsafe or incomplete "
+            f"out of {len(preview.rows)} {row_word}."
+        )
+    ]
+    if preview.unresolved_required_fields:
+        lines.append(
+            _plain(
+                "  Unresolved Meridian fields: "
+                f"{_meridian_unresolved_field_text(preview.unresolved_required_fields)}."
+            )
+    )
+    for row in preview.rows:
+        label = row.label or "Meridian row"
+        details = ""
+        if row.missing_fields:
+            details = f" Missing fields: {', '.join(row.missing_fields)}."
+        lines.append(
+            _plain(
+                f"  Row {row.row_number}: {label} - "
+                f"{_research_status_label(row.status)}.{details}"
+            )
+        )
+    return lines
+
+
+def _meridian_unresolved_field_text(fields: Sequence[MeridianUnresolvedField]) -> str:
+    return ", ".join(field.label for field in fields)
 
 
 @app.command("prepare-research-plan", hidden=True)
@@ -4442,6 +4501,25 @@ def import_research_results_command(
             dry_run=dry_run,
         )
     except ResearchImportError as exc:
+        meridian_preview = None
+        if dry_run:
+            try:
+                meridian_preview = preview_meridian_results_file(
+                    results_path=results_file,
+                )
+            except ResearchImportError:
+                meridian_preview = None
+        if meridian_preview is not None:
+            _print_panel(
+                "Research import preview blocked",
+                [
+                    _plain(str(exc)),
+                    *_meridian_import_preview_lines(meridian_preview),
+                    _plain("No evidence stores were changed."),
+                ],
+                border_style="red",
+            )
+            raise typer.Exit(1) from None
         _print_error(str(exc))
         raise typer.Exit(1) from None
 
@@ -4504,6 +4582,8 @@ def import_research_results_command(
                     )
         result_lines.append(_plain("No evidence stores were changed."))
         result_lines.append(_plain("No websites or APIs were contacted."))
+        if result.meridian_preview is not None:
+            result_lines.extend(_meridian_import_preview_lines(result.meridian_preview))
         _print_panel("Research import preview", result_lines, border_style=border_style)
         return
     if result.updated_store_paths:
@@ -4529,6 +4609,13 @@ def import_research_results_command(
                     )
     else:
         result_lines.append(_plain("No new evidence records were added."))
+    if result.evaluate_deal_command is not None:
+        result_lines.append(
+            _plain(
+                "Next, rerun evaluate-deal with "
+                f"`{result.evaluate_deal_command}`."
+            )
+        )
     result_lines.append(_plain("No websites or APIs were contacted."))
     _print_panel("Research results imported", result_lines, border_style=border_style)
 

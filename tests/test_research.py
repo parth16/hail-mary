@@ -68,6 +68,7 @@ from hailmary.research import (
     prepare_public_research_results,
     prepare_research_plan,
     prepare_research_results_template,
+    preview_meridian_results_file,
     research_quality_status,
     run_research_workflow,
     source_freshness_for_retrieved_at,
@@ -77,6 +78,7 @@ from hailmary.research.meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
     MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+    MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX,
     MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
     clean_meridian_url,
 )
@@ -801,7 +803,10 @@ def test_research_workflow_command_creates_artifacts_and_reports_status(
     assert "need manual or local-file work" in result.output
     assert "Provider statuses" in result.output
     assert "Live public collection did not run" in result.output
-    assert "Ready to import: no completed result files were found yet" in result.output
+    assert "Import dry-run previews" in result.output
+    assert "Meridian preview:" in result.output
+    assert "Unresolved Meridian fields:" in result.output
+    assert "Company name" in result.output
     assert "No screenshots, cookies, browser profiles" in result.output
     assert len(list((data_dir / "research-plans").glob("research-plan-*.json"))) == 1
     assert len(list((data_dir / "research-manual-tasks").glob("*.json"))) == 1
@@ -4652,6 +4657,8 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert "allocation" in workflow["term_definitions"]
     assert "target raise" in workflow["term_definitions"]
     assert "closing date" in workflow["term_definitions"]
+    assert "carry" in workflow["term_definitions"]
+    assert "dilution" in workflow["term_definitions"]
     assert workflow["required_result_fields"]["source_url"].startswith("Keep the generated")
     assert "text" in workflow["required_result_fields"]
     assert "retrieved_at" in workflow["required_result_fields"]
@@ -4659,6 +4666,23 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert "licensing_notes" in workflow["required_result_fields"]
     assert "Do not enter INVEST, PASS" in workflow["recommendation_policy"]
     assert any("Do not write INVEST, PASS" in step for step in workflow["manual_steps"])
+    checklist_labels = [item["label"] for item in workflow["guided_checklist"]]
+    assert checklist_labels == [
+        "Company name",
+        "Deal URL or base portal URL",
+        "Round or security type",
+        "Valuation or valuation cap",
+        "Round size",
+        "Minimum check",
+        "Fees or carry",
+        "Closing date or deadline",
+        "Lead investor",
+        "Traction, revenue, or customer proof",
+        "Key risks or platform warnings",
+    ]
+    assert all(item["required"] for item in workflow["guided_checklist"])
+    assert any("Carry means" in item["explanation"] for item in workflow["guided_checklist"])
+    assert any("valuation cap" in item["explanation"] for item in workflow["guided_checklist"])
     assert set(workflow["required_when_visible_sections"]) == {
         "deal_terms",
         "traction_customer_evidence",
@@ -4673,21 +4697,25 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "use_of_funds",
     }
     assert any("short allowed fact" in item for item in workflow["before_import_checklist"])
+    assert any(
+        "required v3 checklist field" in item
+        for item in workflow["before_import_checklist"]
+    )
     assert any("No screenshots" in item for item in workflow["before_import_checklist"])
     assert any("source_url" in item for item in workflow["before_import_checklist"])
     assert any("dry-run command" in item for item in workflow["before_import_checklist"])
-    assert "Minimum investment" in workflow["recommended_facts"]
-    assert "Revenue claims" in workflow["recommended_facts"]
-    assert "Product facts, if visible" in workflow["recommended_facts"]
-    assert "Use of funds, if visible" in workflow["recommended_facts"]
+    assert "Minimum check" in workflow["recommended_facts"]
+    assert "Fees or carry" in workflow["recommended_facts"]
+    assert "Traction, revenue, or customer proof" in workflow["recommended_facts"]
+    assert "Key risks or platform warnings" in workflow["recommended_facts"]
 
     template = json.loads(result.result_template_path.read_text(encoding="utf-8"))
     assert list(template) == ["results"]
     assert len(template["results"]) == len(workflow["recommended_facts"])
     titles = [row["title"] for row in template["results"]]
     assert "Meridian: Company name" in titles
-    assert "Meridian: Valuation cap or pre-money valuation" in titles
-    assert "Meridian: Closing date or allocation deadline, if visible" in titles
+    assert "Meridian: Valuation or valuation cap" in titles
+    assert "Meridian: Closing date or deadline" in titles
     row = template["results"][0]
     assert set(row) == {
         "deal_id",
@@ -6244,6 +6272,107 @@ def test_import_research_results_imports_edited_meridian_placeholder_in_dry_run(
     assert result.skipped_duplicate_count == 0
     assert result.skipped_blank_template_row_count == len(template_payload["results"]) - 1
     assert result.deal_count == 1
+    assert result.meridian_preview is not None
+    assert result.meridian_preview.import_ready_count == 1
+    assert result.meridian_preview.placeholder_count == len(template_payload["results"]) - 1
+    assert result.meridian_preview.unsafe_or_incomplete_count == 0
+    unresolved_labels = [
+        field.label for field in result.meridian_preview.unresolved_required_fields
+    ]
+    assert "Company name" not in unresolved_labels
+    assert "Deal URL or base portal URL" not in unresolved_labels
+    assert "Minimum check" in unresolved_labels
+    assert "Fees or carry" in unresolved_labels
+
+
+def test_preview_meridian_results_file_reports_placeholders_and_unresolved_fields(
+    tmp_path: Path,
+) -> None:
+    workflow = prepare_meridian_workflow(
+        config=AppConfig(data_dir=tmp_path / "data"),
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+
+    preview = preview_meridian_results_file(
+        results_path=workflow.result_template_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+
+    assert preview is not None
+    assert preview.source_url == "https://portal.angellist.com/m/example/invest"
+    assert preview.import_ready_count == 0
+    assert preview.placeholder_count == len(workflow.workflow.recommended_facts)
+    assert preview.unsafe_or_incomplete_count == 0
+    assert [row.status for row in preview.rows] == ["placeholder"] * len(preview.rows)
+    unresolved_labels = [field.label for field in preview.unresolved_required_fields]
+    assert "Deal URL or base portal URL" not in unresolved_labels
+    assert "Company name" in unresolved_labels
+    assert "Valuation or valuation cap" in unresolved_labels
+
+
+def test_import_research_results_rejects_empty_meridian_import_without_dry_run(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+
+    with pytest.raises(ResearchImportError, match="no import-ready rows"):
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=False,
+        )
+
+
+def test_run_research_workflow_clears_meridian_fields_resolved_by_supplied_results(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    meridian_results_path = tmp_path / "meridian-results.json"
+    _write_results(
+        meridian_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian: Company name",
+                text="Acme AI is the company name shown on the Meridian deal page.",
+                retrieved_at="2025-12-31T12:00:00Z",
+                source_url="https://portal.angellist.com/m/example/invest",
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                confidence="high: exact short page excerpt",
+                licensing_notes=(
+                    "Authenticated portal permits saving this short fact. "
+                    f"{MERIDIAN_WORKFLOW_TEMPLATE_MARKER} "
+                    f"{MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER} "
+                    f"{MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX}"
+                    "https://portal.angellist.com/m/example/invest"
+                ),
+            )
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        results_files=[meridian_results_path],
+        created_at=BUILT_AT,
+    )
+
+    unresolved_labels = [field.label for field in result.meridian_unresolved_fields]
+    assert "Company name" not in unresolved_labels
+    assert "Deal URL or base portal URL" not in unresolved_labels
+    assert "Valuation or valuation cap" in unresolved_labels
 
 
 def test_import_research_results_skips_legacy_meridian_placeholder_confidence(
@@ -6267,6 +6396,7 @@ def test_import_research_results_skips_legacy_meridian_placeholder_confidence(
         }
     )
     template_payload["results"][1]["confidence"] = MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE
+    template_payload["results"][1]["title"] = "Meridian: Valuation cap or pre-money valuation"
     template_payload["results"][1]["licensing_notes"] = template_payload["results"][1][
         "licensing_notes"
     ].replace(
@@ -6309,6 +6439,15 @@ def test_import_research_results_rejects_source_only_meridian_placeholder_edits(
         json.dumps(template_payload),
         encoding="utf-8",
     )
+
+    preview = preview_meridian_results_file(
+        results_path=workflow.result_template_path,
+        imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+    )
+    assert preview is not None
+    assert preview.unsafe_or_incomplete_count == 1
+    assert preview.rows[0].status == "unsafe_or_incomplete"
+    assert "text" in preview.rows[0].missing_fields
 
     with pytest.raises(ResearchImportError, match=r"row 1: .*text"):
         import_research_results(
@@ -7998,7 +8137,41 @@ def test_import_research_results_command_has_plain_english_success(
     assert result.exit_code == 0, result.output
     assert "Research results imported" in result.output
     assert "Imported 1 external research evidence record into 1 deal" in result.output
+    assert "Next, rerun evaluate-deal with" in result.output
+    assert "hailmary evaluate-deal" in result.output
     assert "No websites or APIs were contacted" in result.output
+
+
+def test_import_research_results_returns_quoted_evaluate_deal_handoff(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    data_dir = tmp_path / "Hail Mary Data"
+    config = AppConfig(data_dir=data_dir)
+    ingest_folder(root, config=config)
+    results_path = tmp_path / "research-results.json"
+    _write_results(results_path, [_research_result(company_name="Acme AI")])
+
+    result = import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+
+    assert result.evaluate_deal_command is not None
+    assert shlex.split(result.evaluate_deal_command) == [
+        "hailmary",
+        "evaluate-deal",
+        str(root),
+        "--data-dir",
+        str(data_dir),
+    ]
+    assert shlex.quote(str(root)) in result.evaluate_deal_command
+    assert shlex.quote(str(data_dir)) in result.evaluate_deal_command
 
 
 def test_import_research_results_command_dry_run_has_plain_english_preview(
@@ -8104,6 +8277,79 @@ def test_import_research_results_command_has_plain_english_error(
     assert result.exit_code != 0
     assert "source_url cannot contain spaces" in result.output
     assert "Traceback" not in result.output
+
+
+def test_import_research_results_command_dry_run_reports_blocked_meridian_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=AppConfig(data_dir=tmp_path / "data"),
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "import-research-results",
+            str(workflow.result_template_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Research import preview blocked" in result.output
+    assert "No ingested deals were found" in result.output
+    assert "Meridian preview:" in result.output
+    assert "Unresolved Meridian fields:" in result.output
+    assert "Row 1: Company name - placeholder." in result.output
+    assert "No evidence stores were changed." in result.output
+    assert "Traceback" not in result.output
+
+
+def test_import_research_results_command_dry_run_hides_custom_meridian_titles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=AppConfig(data_dir=tmp_path / "data"),
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0]["title"] = (
+        "Copied portal claim: revenue doubled last month"
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "import-research-results",
+            str(workflow.result_template_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Research import preview blocked" in result.output
+    assert "Row 1: Meridian row - unsafe or incomplete." in result.output
+    assert "Copied portal claim" not in result.output
+    assert "revenue doubled" not in result.output
 
 
 def _ingest_deal_and_write_results(

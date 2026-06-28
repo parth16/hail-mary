@@ -237,10 +237,44 @@ class ResearchResultInput(BaseModel):
         return self
 
 
+class MeridianChecklistItem(BaseModel):
+    field_id: str
+    label: str
+    explanation: str
+    required: bool = True
+    template_title: str
+
+
+class MeridianUnresolvedField(BaseModel):
+    field_id: str
+    label: str
+    explanation: str
+
+
+class MeridianImportPreviewRow(BaseModel):
+    row_number: int
+    title: str | None = None
+    field_id: str | None = None
+    label: str | None = None
+    status: str
+    missing_fields: list[str] = Field(default_factory=list)
+    message: str
+
+
+class MeridianImportPreview(BaseModel):
+    source_url: str | None = None
+    import_ready_count: int = 0
+    placeholder_count: int = 0
+    unsafe_or_incomplete_count: int = 0
+    unresolved_required_fields: list[MeridianUnresolvedField] = Field(default_factory=list)
+    rows: list[MeridianImportPreviewRow] = Field(default_factory=list)
+
+
 class ResearchResultsFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     _skipped_blank_template_row_count: int = PrivateAttr(default=0)
+    _meridian_preview: MeridianImportPreview | None = PrivateAttr(default=None)
 
     results: list[ResearchResultInput]
 
@@ -266,6 +300,8 @@ class ResearchImportRunSummary(BaseModel):
     imported_at: datetime
     dry_run: bool = False
     skipped_blank_template_row_count: int = 0
+    meridian_preview: MeridianImportPreview | None = None
+    evaluate_deal_command: str | None = None
     provider_imported_counts: dict[str, int] = Field(default_factory=dict)
     provider_stale_counts: dict[str, int] = Field(default_factory=dict)
     provider_names: dict[str, str] = Field(default_factory=dict)

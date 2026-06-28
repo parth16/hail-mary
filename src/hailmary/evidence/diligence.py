@@ -31,6 +31,7 @@ class DiligenceLoopError(RuntimeError):
 class DiligenceQuestionSource(StrEnum):
     EVIDENCE_AUDIT = "evidence_completeness_audit"
     RULE_BASED_SCORING = "rule_based_scoring"
+    MERIDIAN_WORKFLOW = "meridian_manual_workflow"
     FINAL_REVIEW = "final_review"
     SPECIALIST_REVIEW = "specialist_review"
 
@@ -210,6 +211,17 @@ class DiligenceQuestionQueueContext:
 
 
 @dataclass(frozen=True)
+class DiligenceQuestionCandidate:
+    source: DiligenceQuestionSource
+    priority: int
+    question: str
+    reason: str
+    category: str | None = None
+    evidence_ids: list[str] | None = None
+    missing_evidence: bool = False
+
+
+@dataclass(frozen=True)
 class DiligenceAnswerWriteResult:
     deal_id: str
     company_name: str
@@ -332,6 +344,7 @@ def build_diligence_question_queue(
     scored_deal: ScoredDeal,
     *,
     evidence_audit: EvidenceCompletenessAudit | None = None,
+    extra_questions: list[DiligenceQuestionCandidate] | None = None,
     final_output: AgentReviewOutput | None = None,
     specialist_outputs: list[AgentReviewOutput] | None = None,
     answer_log: DiligenceAnswerLog | None = None,
@@ -367,6 +380,19 @@ def build_diligence_question_queue(
                 category=scoring_question.category.value,
                 evidence_ids=scoring_question.evidence_ids,
                 missing_evidence=bool(scoring_question.missing_evidence),
+            )
+        )
+    for extra_question in extra_questions or []:
+        candidates.append(
+            _question_item(
+                deal_id=scored_deal.deal_id,
+                source=extra_question.source,
+                priority=extra_question.priority,
+                question=extra_question.question,
+                reason=extra_question.reason,
+                category=extra_question.category,
+                evidence_ids=extra_question.evidence_ids,
+                missing_evidence=extra_question.missing_evidence,
             )
         )
     if final_output is not None:
