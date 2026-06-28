@@ -2119,6 +2119,8 @@ def test_evaluate_deal_writes_diligence_question_queue_and_applies_answers(
     assert "1 resolved" in hidden_list.output
     assert "Diligence triage" in hidden_list.output
     assert "Use --show-all to print every raw question." in hidden_list.output
+    assert "Question IDs" not in hidden_list.output
+    assert "dq_" not in hidden_list.output
     assert first_question.question_id not in hidden_list.output
     assert "Synthetic operator checked" not in hidden_list.output
 

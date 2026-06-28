@@ -1339,7 +1339,9 @@ def diligence_questions_list_command(
             _plain("Operator answers are hidden by default. Use --show-answers to show them.")
         )
     answers_by_question_id = effective_diligence_answers(context.answer_log)
-    renderables.extend(_diligence_triage_renderables(context.queue))
+    renderables.extend(
+        _diligence_triage_renderables(context.queue, show_question_ids=show_all)
+    )
     if show_all:
         raw_question_ids = ", ".join(
             question.question_id for question in context.queue.questions
@@ -1438,7 +1440,11 @@ def _diligence_question_summary(queue: DiligenceQuestionQueue) -> str:
     )
 
 
-def _diligence_triage_renderables(queue: DiligenceQuestionQueue) -> list[RenderableType]:
+def _diligence_triage_renderables(
+    queue: DiligenceQuestionQueue,
+    *,
+    show_question_ids: bool = False,
+) -> list[RenderableType]:
     triage = queue.triage
     if triage is None:
         return [_plain("No diligence triage was saved. Rerun evaluate-deal to rebuild it.")]
@@ -1465,16 +1471,19 @@ def _diligence_triage_renderables(queue: DiligenceQuestionQueue) -> list[Rendera
     table.add_column("Resolution")
     table.add_column("Questions", justify="right")
     table.add_column("Next step", overflow="fold")
-    table.add_column("Question IDs", overflow="fold")
+    if show_question_ids:
+        table.add_column("Question IDs", overflow="fold")
     for item in triage.items[:12]:
-        table.add_row(
+        row = [
             _plain(item.status.value.replace("_", " ")),
             _plain(item.title),
             _plain(item.resolution_path.value.replace("_", " ")),
             _plain(str(item.unresolved_question_count)),
             _plain(item.next_step),
-            _plain(", ".join(item.question_ids) or "none"),
-        )
+        ]
+        if show_question_ids:
+            row.append(_plain(", ".join(item.question_ids) or "none"))
+        table.add_row(*row)
     renderables.append(table)
     if len(triage.items) > 12:
         renderables.append(

@@ -822,12 +822,19 @@ def _triage_theme_key(question: DiligenceQuestionItem) -> str:
     if _contains_any(
         text,
         (
+            "financing terms",
             "security type",
             "investment instrument",
             "minimum check",
             "minimum investment",
             "round size",
             "lead investor",
+            "investor signal",
+            "growth signal",
+            "fundability",
+            "next-round",
+            "next round",
+            "raise the next round",
             "closing",
             "subscribed",
             "deal terms",
@@ -1042,7 +1049,11 @@ def _resolution_path(
     theme_key: str,
     questions: list[DiligenceQuestionItem],
 ) -> DiligenceResolutionPath:
-    del questions
+    if any(
+        question.source == DiligenceQuestionSource.MERIDIAN_WORKFLOW
+        for question in questions
+    ):
+        return DiligenceResolutionPath.MERIDIAN_EMAIL
     if theme_key in {"return_math", "deal_terms", "team_and_runway"}:
         return DiligenceResolutionPath.MERIDIAN_EMAIL
     if theme_key in {"valuation", "traction_metrics"}:

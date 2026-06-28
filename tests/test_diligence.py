@@ -127,6 +127,56 @@ def test_diligence_triage_excludes_resolved_question_groups() -> None:
     assert updated_queue.triage.meridian_email_draft is None
 
 
+def test_diligence_triage_routes_meridian_workflow_fields_to_email() -> None:
+    queue = _queue(
+        [
+            _question(
+                "dq_meridian_valuation",
+                priority=21,
+                source=DiligenceQuestionSource.MERIDIAN_WORKFLOW,
+                question="Resolve the Meridian field: Valuation.",
+                reason=(
+                    "The Meridian manual workflow still needs this portal field "
+                    "before its coverage can be treated as complete."
+                ),
+                category="meridian:valuation",
+            ),
+        ]
+    )
+
+    triage = build_diligence_triage(queue)
+
+    assert len(triage.items) == 1
+    item = triage.items[0]
+    assert item.title == "Valuation support"
+    assert item.resolution_path == DiligenceResolutionPath.MERIDIAN_EMAIL
+    assert triage.meridian_email_draft is not None
+    assert "Valuation support" in triage.meridian_email_draft.body
+
+
+def test_diligence_triage_classifies_fundability_as_investment_terms() -> None:
+    queue = _queue(
+        [
+            _question(
+                "dq_fundability",
+                priority=5,
+                source=DiligenceQuestionSource.RULE_BASED_SCORING,
+                question="Check whether the company can raise the next round.",
+                reason="Limited investor or growth signals make fundability unclear.",
+                category="financing terms",
+            ),
+        ]
+    )
+
+    triage = build_diligence_triage(queue)
+
+    assert len(triage.items) == 1
+    item = triage.items[0]
+    assert item.title == "Investment terms"
+    assert item.resolution_path == DiligenceResolutionPath.MERIDIAN_EMAIL
+    assert item.status == DiligenceTriageStatus.DECISION_BLOCKER
+
+
 def _queue(questions: list[DiligenceQuestionItem]) -> DiligenceQuestionQueue:
     return DiligenceQuestionQueue(
         deal_id="synthetic-deal",
@@ -143,6 +193,7 @@ def _question(
     source: DiligenceQuestionSource,
     question: str,
     reason: str,
+    category: str | None = None,
     evidence_ids: list[str] | None = None,
 ) -> DiligenceQuestionItem:
     return DiligenceQuestionItem(
@@ -151,6 +202,7 @@ def _question(
         source=source,
         question=question,
         reason=reason,
+        category=category,
         evidence_ids=evidence_ids or [],
     )
 
