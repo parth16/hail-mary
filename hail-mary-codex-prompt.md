@@ -27,7 +27,7 @@ Capital plan:
 - Total deployable capital: `$100,000`
 - Deployment horizon: about 12 months
 - Check sizes: `$1,000` to `$10,000`
-- Bias: calculated risk; invest only where power-law upside, credible evidence, and deal terms justify the risk
+- Bias: calculated risk; invest where power-law upside, credible evidence, and deal terms justify the risk
 - Goal: maximize exposure to exceptional venture-scale outcomes while avoiding weak, overhyped, or unverifiable deals
 
 This is not an automated investing system. It must not place orders, sign documents, wire money, bypass access controls, or make irreversible actions. It is a diligence and recommendation engine for my final human decision.
