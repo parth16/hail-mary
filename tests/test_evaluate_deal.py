@@ -220,6 +220,8 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert export["evidence_completeness"]["ran"] is True
     assert export["evidence_health"]["ran"] is True
     assert export["diligence_questions"]["ran"] is True
+    assert export["diligence_questions"]["triage"]["ran"] is True
+    assert isinstance(export["diligence_questions"]["triage"]["items"], list)
     assert export["privacy"]["contains_raw_evidence_text"] is False
     assert export["privacy"]["contains_model_excerpts"] is False
     export_text = json.dumps(export, sort_keys=True)
@@ -2066,6 +2068,8 @@ def test_evaluate_deal_writes_diligence_question_queue_and_applies_answers(
     assert initial.diligence_question_queue_path.exists()
     assert initial.diligence_question_queue is not None
     assert initial.diligence_question_queue.questions
+    assert initial.diligence_question_queue.triage is not None
+    assert initial.diligence_question_queue.triage.items
     first_question = initial.diligence_question_queue.questions[0]
     store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
     store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
@@ -2113,7 +2117,17 @@ def test_evaluate_deal_writes_diligence_question_queue_and_applies_answers(
     )
     assert hidden_list.exit_code == 0, hidden_list.output
     assert "1 resolved" in hidden_list.output
+    assert "Diligence triage" in hidden_list.output
+    assert "Use --show-all to print every raw question." in hidden_list.output
+    assert first_question.question_id not in hidden_list.output
     assert "Synthetic operator checked" not in hidden_list.output
+
+    raw_list = runner.invoke(
+        app,
+        ["diligence", "list", "--data-dir", str(config.data_dir), "--show-all"],
+    )
+    assert raw_list.exit_code == 0, raw_list.output
+    assert first_question.question_id in raw_list.output
 
     shown_list = runner.invoke(
         app,
@@ -2139,12 +2153,14 @@ def test_evaluate_deal_writes_diligence_question_queue_and_applies_answers(
     assert answered_question.answer_evidence_ids == [evidence_id]
     memo_text = rerun.final_memo_path.read_text(encoding="utf-8")
     assert "## Operator Diligence Loop" in memo_text
+    assert "Triage:" in memo_text
     assert "1 resolved" in memo_text
     assert rerun.diligence_question_queue_path is not None
     queue = DiligenceQuestionQueue.model_validate_json(
         rerun.diligence_question_queue_path.read_text(encoding="utf-8")
     )
     assert queue.resolved_count == 1
+    assert queue.triage is not None
 
 
 def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(

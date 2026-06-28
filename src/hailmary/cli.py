@@ -1303,6 +1303,13 @@ def diligence_questions_list_command(
             help="Show local operator answers. Answers are hidden by default.",
         ),
     ] = False,
+    show_all: Annotated[
+        bool,
+        typer.Option(
+            "--show-all",
+            help="Show every raw diligence question after the triage summary.",
+        ),
+    ] = False,
 ) -> None:
     """List local diligence questions from the latest evaluate-deal run."""
 
@@ -1322,20 +1329,31 @@ def diligence_questions_list_command(
         _plain(f"Deal ID: {context.queue.deal_id}."),
         _plain(f"Diligence question file: {context.queue_path}."),
         _plain(_diligence_question_summary(context.queue)),
-        _plain("Diligence means checking unanswered facts before investing."),
+        _plain(
+            "Hail Mary triages unresolved questions into work it should do itself: "
+            "public web research, paid data checks, source review, or a Meridian email draft."
+        ),
     ]
     if not show_answers:
         renderables.append(
             _plain("Operator answers are hidden by default. Use --show-answers to show them.")
         )
     answers_by_question_id = effective_diligence_answers(context.answer_log)
-    renderables.append(
-        _diligence_question_table(
-            context.queue,
-            show_answers=show_answers,
-            answers_by_question_id=answers_by_question_id,
+    renderables.extend(_diligence_triage_renderables(context.queue))
+    if show_all:
+        raw_question_ids = ", ".join(
+            question.question_id for question in context.queue.questions
         )
-    )
+        renderables.append(_plain(f"Raw question IDs: {raw_question_ids or 'none'}."))
+        renderables.append(
+            _diligence_question_table(
+                context.queue,
+                show_answers=show_answers,
+                answers_by_question_id=answers_by_question_id,
+            )
+        )
+    else:
+        renderables.append(_plain("Use --show-all to print every raw question."))
     if show_answers:
         renderables.extend(_diligence_answer_lines(context.queue, answers_by_question_id))
     _print_panel("Diligence questions", renderables, border_style="green")
@@ -1418,6 +1436,59 @@ def _diligence_question_summary(queue: DiligenceQuestionQueue) -> str:
         f"Questions: {len(queue.questions)} total, {queue.resolved_count} resolved, "
         f"{queue.unresolved_count} unresolved."
     )
+
+
+def _diligence_triage_renderables(queue: DiligenceQuestionQueue) -> list[RenderableType]:
+    triage = queue.triage
+    if triage is None:
+        return [_plain("No diligence triage was saved. Rerun evaluate-deal to rebuild it.")]
+    renderables: list[RenderableType] = [
+        _plain(
+            "Triage: "
+            f"{triage.decision_blocker_count} decision blockers and "
+            f"{triage.follow_up_count} follow-up groups."
+        )
+    ]
+    if not triage.items:
+        renderables.append(_plain("No unresolved diligence gaps remain."))
+        return renderables
+
+    table = Table(
+        title="Diligence triage",
+        box=box.SIMPLE,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Theme", style="bold cyan")
+    table.add_column("Resolution")
+    table.add_column("Questions", justify="right")
+    table.add_column("Next step", overflow="fold")
+    table.add_column("Question IDs", overflow="fold")
+    for item in triage.items[:12]:
+        table.add_row(
+            _plain(item.status.value.replace("_", " ")),
+            _plain(item.title),
+            _plain(item.resolution_path.value.replace("_", " ")),
+            _plain(str(item.unresolved_question_count)),
+            _plain(item.next_step),
+            _plain(", ".join(item.question_ids) or "none"),
+        )
+    renderables.append(table)
+    if len(triage.items) > 12:
+        renderables.append(
+            _plain(f"{len(triage.items) - 12} more triage groups are saved in JSON.")
+        )
+    if triage.meridian_email_draft is not None:
+        renderables.extend(
+            [
+                _plain("Draft email to AngelList Meridian", style="bold"),
+                _plain(f"Subject: {triage.meridian_email_draft.subject}"),
+                _plain(triage.meridian_email_draft.body),
+            ]
+        )
+    return renderables
 
 
 def _diligence_question_table(
@@ -2513,6 +2584,16 @@ def evaluate_deal(
                 "Diligence means checking unanswered facts before investing."
             )
         )
+        if result.diligence_question_queue.triage is not None:
+            renderables.append(
+                _plain(
+                    "Diligence triage found "
+                    f"{result.diligence_question_queue.triage.decision_blocker_count} "
+                    "decision-blocking groups. Hail Mary should try public web research, "
+                    "paid data, source review, or the generated Meridian email draft "
+                    "before asking for manual answers."
+                )
+            )
     if result.warnings:
         warning_table = _two_column_table("Warning", "Detail")
         for index, warning in enumerate(result.warnings, start=1):
@@ -3319,9 +3400,15 @@ def _evaluate_deal_diligence_questions_text(
     if queue is None:
         return "not saved"
     question_word = "question" if len(queue.questions) == 1 else "questions"
+    triage_text = ""
+    if queue.triage is not None:
+        triage_text = (
+            f", {queue.triage.decision_blocker_count} decision-blocking groups"
+        )
     return (
         f"{len(queue.questions)} {question_word}, "
         f"{queue.resolved_count} resolved, {queue.unresolved_count} unresolved"
+        f"{triage_text}"
     )
 
 

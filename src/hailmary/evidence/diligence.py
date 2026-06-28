@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -22,6 +23,7 @@ from hailmary.utils.slug import slugify
 QUESTION_QUEUE_VERSION = "1"
 ANSWER_LOG_VERSION = "1"
 MAX_OPERATOR_ANSWER_CHARS = 2_000
+MAX_TRIAGE_QUESTION_IDS = 8
 
 
 class DiligenceLoopError(RuntimeError):
@@ -39,6 +41,18 @@ class DiligenceQuestionSource(StrEnum):
 class DiligenceAnswerStatus(StrEnum):
     RESOLVED = "resolved"
     UNRESOLVED = "unresolved"
+
+
+class DiligenceResolutionPath(StrEnum):
+    WEB_RESEARCH = "web_research"
+    PAID_DATA_SOURCE = "paid_data_source"
+    MERIDIAN_EMAIL = "meridian_email"
+    SOURCE_REVIEW = "source_review"
+
+
+class DiligenceTriageStatus(StrEnum):
+    DECISION_BLOCKER = "decision_blocker"
+    FOLLOW_UP = "follow_up"
 
 
 class DiligenceAnswerRecord(BaseModel):
@@ -161,6 +175,84 @@ class DiligenceQuestionItem(BaseModel):
         return cleaned
 
 
+class DiligenceTriageItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    triage_id: str
+    title: str
+    status: DiligenceTriageStatus
+    resolution_path: DiligenceResolutionPath
+    priority: int = Field(ge=1)
+    unresolved_question_count: int = Field(ge=0)
+    representative_question: str
+    why_it_matters: str
+    next_step: str
+    question_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "triage_id",
+        "title",
+        "representative_question",
+        "why_it_matters",
+        "next_step",
+    )
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+    @field_validator("question_ids", "evidence_ids")
+    @classmethod
+    def _dedupe_text_ids(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for item in value:
+            stripped = item.strip()
+            if stripped and stripped not in cleaned:
+                cleaned.append(stripped)
+        return cleaned
+
+
+class DiligenceEmailDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str
+    body: str
+    question_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("subject", "body")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+
+class DiligenceTriageSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    generated_at: datetime
+    total_question_count: int = Field(ge=0)
+    unresolved_question_count: int = Field(ge=0)
+    resolved_question_count: int = Field(ge=0)
+    decision_blocker_count: int = Field(ge=0)
+    follow_up_count: int = Field(ge=0)
+    resolution_counts: dict[DiligenceResolutionPath, int] = Field(default_factory=dict)
+    items: list[DiligenceTriageItem] = Field(default_factory=list)
+    meridian_email_draft: DiligenceEmailDraft | None = None
+
+    @property
+    def top_decision_blockers(self) -> list[DiligenceTriageItem]:
+        return [
+            item
+            for item in self.items
+            if item.status == DiligenceTriageStatus.DECISION_BLOCKER
+        ]
+
+
 class DiligenceQuestionQueue(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -169,6 +261,7 @@ class DiligenceQuestionQueue(BaseModel):
     company_name: str
     created_at: datetime
     questions: list[DiligenceQuestionItem] = Field(default_factory=list)
+    triage: DiligenceTriageSummary | None = None
 
     @field_validator("version")
     @classmethod
@@ -422,7 +515,7 @@ def build_diligence_question_queue(
         questions=questions,
     )
     if answer_log is None:
-        return queue
+        return queue.model_copy(update={"triage": build_diligence_triage(queue)})
     return apply_diligence_answers(queue, answer_log)
 
 
@@ -447,7 +540,59 @@ def apply_diligence_answers(
                 }
             )
         )
-    return queue.model_copy(update={"questions": updated_questions})
+    updated_queue = queue.model_copy(update={"questions": updated_questions})
+    return updated_queue.model_copy(update={"triage": build_diligence_triage(updated_queue)})
+
+
+def build_diligence_triage(queue: DiligenceQuestionQueue) -> DiligenceTriageSummary:
+    unresolved_questions = [
+        question
+        for question in queue.questions
+        if question.answer_status == DiligenceAnswerStatus.UNRESOLVED
+    ]
+    grouped_questions: dict[str, list[DiligenceQuestionItem]] = {}
+    for question in unresolved_questions:
+        grouped_questions.setdefault(_triage_theme_key(question), []).append(question)
+
+    items = [
+        _triage_item(
+            deal_id=queue.deal_id,
+            theme_key=theme_key,
+            questions=questions,
+        )
+        for theme_key, questions in grouped_questions.items()
+    ]
+    items = sorted(
+        items,
+        key=lambda item: (
+            0 if item.status == DiligenceTriageStatus.DECISION_BLOCKER else 1,
+            item.priority,
+            item.title.casefold(),
+        ),
+    )
+    decision_blocker_count = sum(
+        1 for item in items if item.status == DiligenceTriageStatus.DECISION_BLOCKER
+    )
+    resolution_counts = Counter(item.resolution_path for item in items)
+    triage = DiligenceTriageSummary(
+        generated_at=queue.created_at,
+        total_question_count=len(queue.questions),
+        unresolved_question_count=len(unresolved_questions),
+        resolved_question_count=queue.resolved_count,
+        decision_blocker_count=decision_blocker_count,
+        follow_up_count=len(items) - decision_blocker_count,
+        resolution_counts={
+            path: resolution_counts[path]
+            for path in DiligenceResolutionPath
+            if resolution_counts[path]
+        },
+        items=items,
+        meridian_email_draft=_meridian_email_draft(
+            company_name=queue.company_name,
+            items=items,
+        ),
+    )
+    return triage
 
 
 def effective_diligence_answers(
@@ -647,6 +792,359 @@ def _dedupe_questions(
         by_id.values(),
         key=lambda question: (question.priority, question.question.casefold()),
     )
+
+
+def _triage_theme_key(question: DiligenceQuestionItem) -> str:
+    text = f"{question.category or ''} {question.question} {question.reason}".casefold()
+    if _contains_any(
+        text,
+        (
+            "ownership",
+            "dilution",
+            "fee",
+            "carry",
+            "net return",
+            "return-math",
+            "return math",
+            "exit scenario",
+            "price/share",
+            "number of shares",
+            "fully diluted",
+            "pro rata",
+            "information rights",
+            "investment economics",
+            "side-letter",
+        ),
+    ):
+        return "return_math"
+    if _contains_any(text, ("valuation", "post-money", "pre-money", "benchmark")):
+        return "valuation"
+    if _contains_any(
+        text,
+        (
+            "security type",
+            "investment instrument",
+            "minimum check",
+            "minimum investment",
+            "round size",
+            "lead investor",
+            "closing",
+            "subscribed",
+            "deal terms",
+        ),
+    ):
+        return "deal_terms"
+    if _contains_any(
+        text,
+        (
+            "external research",
+            "public-source",
+            "third-party",
+            "audited",
+            "independent verification",
+            "attestation",
+            "competitor",
+            "polymarket",
+            "market share",
+        ),
+    ):
+        return "external_validation"
+    if _contains_any(
+        text,
+        (
+            "revenue",
+            "customer",
+            "active user",
+            "mau",
+            "wau",
+            "dau",
+            "paying user",
+            "retention",
+            "cohort",
+            "trading volume",
+            "take rate",
+            "partnership",
+            "liquidity",
+            "market-maker",
+            "market maker",
+            "bid-ask",
+            "conversion funnel",
+            "gross margin",
+        ),
+    ):
+        return "traction_metrics"
+    if _contains_any(
+        text,
+        (
+            "regulatory",
+            "cftc",
+            "state actions",
+            "50-state",
+            "50 state",
+            "140+ countries",
+            "coverage map",
+            "compliance",
+            "cross-border",
+        ),
+    ):
+        return "regulatory_scope"
+    if _contains_any(
+        text,
+        (
+            "org chart",
+            "headcount",
+            "hiring",
+            "critical hires",
+            "burn",
+            "runway",
+            "use of proceeds",
+        ),
+    ):
+        return "team_and_runway"
+    if _contains_any(
+        text,
+        (
+            "stale",
+            "undated",
+            "source dates",
+            "low-confidence",
+            "low confidence",
+            "verify",
+            "extracted claims",
+        ),
+    ):
+        return "source_review"
+    return "other"
+
+
+def _triage_item(
+    *,
+    deal_id: str,
+    theme_key: str,
+    questions: list[DiligenceQuestionItem],
+) -> DiligenceTriageItem:
+    sorted_questions = sorted(
+        questions,
+        key=lambda question: (question.priority, question.question.casefold()),
+    )
+    theme = _theme_metadata(theme_key)
+    question_ids = [question.question_id for question in sorted_questions]
+    evidence_ids = _dedupe_strings(
+        evidence_id
+        for question in sorted_questions
+        for evidence_id in question.evidence_ids
+    )
+    priority = min(question.priority for question in sorted_questions)
+    status = (
+        DiligenceTriageStatus.DECISION_BLOCKER
+        if _is_decision_blocker(theme_key, sorted_questions)
+        else DiligenceTriageStatus.FOLLOW_UP
+    )
+    resolution_path = _resolution_path(theme_key, sorted_questions)
+    return DiligenceTriageItem(
+        triage_id=_triage_id(deal_id=deal_id, theme_key=theme_key),
+        title=theme["title"],
+        status=status,
+        resolution_path=resolution_path,
+        priority=priority,
+        unresolved_question_count=len(sorted_questions),
+        representative_question=sorted_questions[0].question,
+        why_it_matters=theme["why_it_matters"],
+        next_step=_next_step(resolution_path, theme_key),
+        question_ids=question_ids[:MAX_TRIAGE_QUESTION_IDS],
+        evidence_ids=evidence_ids,
+    )
+
+
+def _theme_metadata(theme_key: str) -> dict[str, str]:
+    themes = {
+        "return_math": {
+            "title": "Return math and ownership",
+            "why_it_matters": (
+                "Hail Mary cannot size a check without ownership, dilution, fees, "
+                "carry, and a believable exit case."
+            ),
+        },
+        "valuation": {
+            "title": "Valuation support",
+            "why_it_matters": (
+                "A high valuation can force PASS unless current traction and market "
+                "evidence justify the entry price."
+            ),
+        },
+        "deal_terms": {
+            "title": "Investment terms",
+            "why_it_matters": (
+                "Security type, minimum check, round size, lead investor, and closing "
+                "status control whether the deal is investable."
+            ),
+        },
+        "external_validation": {
+            "title": "External validation",
+            "why_it_matters": (
+                "Public and third-party sources reduce reliance on company or platform "
+                "claims."
+            ),
+        },
+        "traction_metrics": {
+            "title": "Traction and customer metrics",
+            "why_it_matters": (
+                "Revenue, user activity, retention, trading volume, and liquidity show "
+                "whether demand is durable."
+            ),
+        },
+        "regulatory_scope": {
+            "title": "Regulatory scope",
+            "why_it_matters": (
+                "Regulatory limits can block growth even when customer demand looks strong."
+            ),
+        },
+        "team_and_runway": {
+            "title": "Team, runway, and use of funds",
+            "why_it_matters": (
+                "Hiring plan, cash runway, and use of proceeds show whether the team can "
+                "execute after the round."
+            ),
+        },
+        "source_review": {
+            "title": "Source quality review",
+            "why_it_matters": (
+                "Old, undated, or low-confidence evidence should not drive an investment "
+                "decision until rechecked."
+            ),
+        },
+        "other": {
+            "title": "Other diligence gaps",
+            "why_it_matters": (
+                "These questions may still matter, but they are less clearly tied to the "
+                "first decision blocker."
+            ),
+        },
+    }
+    return themes.get(theme_key, themes["other"])
+
+
+def _is_decision_blocker(
+    theme_key: str,
+    questions: list[DiligenceQuestionItem],
+) -> bool:
+    if any(question.priority <= 25 for question in questions):
+        return True
+    return theme_key in {
+        "return_math",
+        "valuation",
+        "deal_terms",
+        "external_validation",
+    }
+
+
+def _resolution_path(
+    theme_key: str,
+    questions: list[DiligenceQuestionItem],
+) -> DiligenceResolutionPath:
+    del questions
+    if theme_key in {"return_math", "deal_terms", "team_and_runway"}:
+        return DiligenceResolutionPath.MERIDIAN_EMAIL
+    if theme_key in {"valuation", "traction_metrics"}:
+        return DiligenceResolutionPath.PAID_DATA_SOURCE
+    if theme_key in {"external_validation", "regulatory_scope"}:
+        return DiligenceResolutionPath.WEB_RESEARCH
+    if theme_key == "source_review":
+        return DiligenceResolutionPath.SOURCE_REVIEW
+    return DiligenceResolutionPath.WEB_RESEARCH
+
+
+def _next_step(
+    resolution_path: DiligenceResolutionPath,
+    theme_key: str,
+) -> str:
+    if resolution_path == DiligenceResolutionPath.WEB_RESEARCH:
+        return (
+            "Hail Mary should run public web and public API research, save exact "
+            "source-linked results, and rerun evaluate-deal."
+        )
+    if resolution_path == DiligenceResolutionPath.PAID_DATA_SOURCE:
+        return (
+            "Hail Mary should use public sources first, then query configured paid "
+            "data providers if public sources cannot verify the claim."
+        )
+    if resolution_path == DiligenceResolutionPath.SOURCE_REVIEW:
+        return (
+            "Hail Mary should re-check the existing local source records and extraction "
+            "quality before treating this as a missing-data blocker."
+        )
+    if theme_key == "return_math":
+        return (
+            "Hail Mary should include this in the Meridian email draft because the "
+            "answer depends on private vehicle economics."
+        )
+    return (
+        "Hail Mary should include this in the Meridian email draft because the answer "
+        "is likely inside the authenticated deal page or held by the platform."
+    )
+
+
+def _meridian_email_draft(
+    *,
+    company_name: str,
+    items: list[DiligenceTriageItem],
+) -> DiligenceEmailDraft | None:
+    email_items = [
+        item
+        for item in items
+        if item.resolution_path == DiligenceResolutionPath.MERIDIAN_EMAIL
+        and item.status == DiligenceTriageStatus.DECISION_BLOCKER
+    ][:8]
+    if not email_items:
+        return None
+    subject = f"Follow-up diligence questions for {company_name}"
+    bullets = [
+        f"- {item.title}: {item.representative_question}"
+        for item in email_items
+    ]
+    body_lines = [
+        "Hi AngelList Meridian team,",
+        "",
+        f"I am reviewing {company_name} and need source-backed answers to a few "
+        "diligence questions before I can decide whether to invest or size a check.",
+        "",
+        *bullets,
+        "",
+        "If available, please include the relevant source document, page reference, "
+        "or platform field for each answer. Short factual answers are enough; I am "
+        "not asking for screenshots, raw page exports, cookies, signed links, or "
+        "anything that bypasses normal authenticated access.",
+        "",
+        "Thanks,",
+        "Parth",
+    ]
+    return DiligenceEmailDraft(
+        subject=subject,
+        body="\n".join(body_lines),
+        question_ids=[
+            question_id
+            for item in email_items
+            for question_id in item.question_ids
+        ],
+    )
+
+
+def _triage_id(*, deal_id: str, theme_key: str) -> str:
+    digest = hashlib.sha256(f"{deal_id}:{theme_key}".encode()).hexdigest()
+    return f"dt_{digest[:12]}"
+
+
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _dedupe_strings(values: Iterable[str]) -> list[str]:
+    cleaned: list[str] = []
+    for value in values:
+        stripped = value.strip()
+        if stripped and stripped not in cleaned:
+            cleaned.append(stripped)
+    return cleaned
 
 
 def _validate_answer_evidence_ids(
