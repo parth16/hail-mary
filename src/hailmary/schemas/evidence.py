@@ -33,6 +33,16 @@ class SourceFreshness(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SourceReliability(StrEnum):
+    OFFICIAL_COMPANY = "official_company"
+    GOVERNMENT_FILING = "government_filing"
+    PUBLIC_DATABASE = "public_database"
+    REPUTABLE_PRESS = "reputable_press"
+    REPOSITORY_METADATA = "repository_metadata"
+    MANUAL_PORTAL_ENTRY = "manual_portal_entry"
+    UNKNOWN = "unknown"
+
+
 class EvidenceQuality(BaseModel):
     claim_type: ClaimType
     source_type: SourceKind
@@ -68,6 +78,9 @@ class EvidenceRecord(BaseModel):
     retrieved_at: datetime | None = None
     external_confidence: str | None = None
     licensing_notes: str | None = None
+    source_reliability: SourceReliability = SourceReliability.UNKNOWN
+    identity_match_kind: str | None = None
+    identity_match_reason: str | None = None
 
 
 class EvidenceCitation(BaseModel):

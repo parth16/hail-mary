@@ -1939,6 +1939,14 @@ def _research_status_question(
         missing_evidence.append("run or explicitly skipped external research providers")
     if research_context.stale_record_count:
         missing_evidence.append("current external research records")
+    if research_context.stale_only_research:
+        missing_evidence.append("fresh external research support")
+    if research_context.unknown_reliability_record_count:
+        missing_evidence.append("verified source reliability for external research")
+    if research_context.ambiguous_or_related_match_count:
+        missing_evidence.append("resolved ambiguous external research identity matches")
+    if research_context.identity_mismatch_count:
+        missing_evidence.append("resolved external research identity mismatches")
     if research_context.warning_count:
         missing_evidence.append("resolved external research warnings")
     if research_context.no_prepared_result_companies:

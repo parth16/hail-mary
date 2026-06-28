@@ -542,6 +542,60 @@ def test_evaluate_deal_cli_imports_research_results_before_final_decision(
     assert "Imported 1 external research evidence record before scoring." in memo_text
 
 
+def test_evaluate_deal_cli_warns_on_stale_only_research_quality(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "CliStaleResearchCo"
+    source.mkdir()
+    (source / "memo.txt").write_text(
+        "Valuation cap $8M. Round size $1M. Lead investor committed.",
+        encoding="utf-8",
+    )
+    research_results = tmp_path / "stale-research-results.json"
+    research_results.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "company_name": "CliStaleResearchCo",
+                        "provider_id": "company_website",
+                        "provider_name": "Company website",
+                        "title": "CliStaleResearchCo old traction page",
+                        "text": (
+                            "CliStaleResearchCo old public site reports paid customers. "
+                            "STALE_SOURCE_TEXT_MARKER"
+                        ),
+                        "retrieved_at": "2024-01-01T12:00:00Z",
+                        "source_url": "https://example.com/clistaleresearchco/traction",
+                        "confidence": "high: exact synthetic company match",
+                        "licensing_notes": "Synthetic public page fixture.",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-deal",
+            str(source),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--results-file",
+            str(research_results),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "External research quality limited; 0 current, 1 stale" in normalized_output
+    assert "All imported external research was stale" in normalized_output
+    assert "STALE_SOURCE_TEXT_MARKER" not in result.output
+
+
 def test_ingest_folder_unreadable_path_has_plain_english_warning(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

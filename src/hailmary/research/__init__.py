@@ -66,6 +66,14 @@ from hailmary.research.providers import (
     builtin_provider_adapters,
     builtin_research_providers,
 )
+from hailmary.research.quality import (
+    ResearchQualityMetric,
+    ResearchQualityStatus,
+    research_quality_status,
+    source_freshness_for_retrieved_at,
+    source_reliability_for_provider,
+    source_reliability_for_result,
+)
 from hailmary.research.schemas import (
     ResearchAccessMode,
     ResearchDealInput,
@@ -130,6 +138,8 @@ __all__ = [
     "ResearchPlanRunSummary",
     "ResearchProvider",
     "ResearchProviderCategory",
+    "ResearchQualityMetric",
+    "ResearchQualityStatus",
     "ResearchProviderRunStatus",
     "ResearchProviderStatusSummary",
     "ResearchResultInput",
@@ -196,4 +206,8 @@ __all__ = [
     "prepare_research_plan",
     "prepare_research_results_template",
     "run_research_workflow",
+    "research_quality_status",
+    "source_freshness_for_retrieved_at",
+    "source_reliability_for_provider",
+    "source_reliability_for_result",
 ]

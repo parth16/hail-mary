@@ -160,6 +160,9 @@ def _template_result_for_task(
         "licensing_notes": task.licensing_notes,
         "source_kind": task.source_kind.value,
         "document_type": _document_type_for_task(task).value,
+        "source_reliability": "",
+        "identity_match_kind": "",
+        "identity_match_reason": "",
     }
 
 

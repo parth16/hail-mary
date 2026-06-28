@@ -25,6 +25,8 @@ from pydantic import BaseModel, Field, ValidationError
 from hailmary.config import AppConfig, ConfigError, validate_local_state
 from hailmary.schemas.documents import DocumentType, SourceKind
 
+from .matching import CompanyMatchKind
+from .quality import source_reliability_for_provider
 from .schemas import (
     ResearchPlan,
     ResearchProviderCategory,
@@ -517,6 +519,13 @@ def _research_result_for_task(
         ),
         source_kind=SourceKind.WEB,
         document_type=DocumentType.WEB_PAGE,
+        source_reliability=source_reliability_for_provider(
+            task.provider_id,
+            source_kind=SourceKind.WEB,
+            document_type=DocumentType.WEB_PAGE,
+        ),
+        identity_match_kind=CompanyMatchKind.EXACT,
+        identity_match_reason="The page was fetched for the exact requested company in the plan.",
     )
 
 

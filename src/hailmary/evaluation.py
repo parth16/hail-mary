@@ -4,7 +4,7 @@ import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -48,17 +48,21 @@ from hailmary.ingest.folder_loader import (
 )
 from hailmary.portfolio import PortfolioError, portfolio_status
 from hailmary.research import (
+    CompanyMatch,
     GitHubRepositorySearchClient,
     ResearchImportError,
     ResearchImportRunSummary,
     ResearchProviderRunStatus,
     ResearchProviderStatusSummary,
+    ResearchQualityMetric,
+    ResearchQualityStatus,
     ResearchWorkflowError,
     ResearchWorkflowRunSummary,
     SbirAwardsClient,
     SecFormDFilingsClient,
     UsaspendingAwardsClient,
     import_research_results,
+    research_quality_status,
     run_research_workflow,
 )
 from hailmary.research.web import WebResearchClient
@@ -214,6 +218,7 @@ class DeterministicEvidenceSelection:
 class EvaluationResearchRun:
     workflow: ResearchWorkflowRunSummary
     imports: list[ResearchImportRunSummary]
+    quality_status: ResearchQualityStatus | None = None
 
     @property
     def imported_count(self) -> int:
@@ -235,6 +240,7 @@ def _diligence_research_context(
         return None
     workflow = research_run.workflow
     summary = workflow.summary
+    quality = research_run.quality_status
     return DiligenceResearchContext(
         planned_task_count=workflow.plan.task_count,
         imported_record_count=research_run.imported_count,
@@ -244,9 +250,27 @@ def _diligence_research_context(
         manual_needed_provider_count=summary.manual_needed_provider_count,
         not_run_provider_count=summary.not_run_provider_count,
         stale_record_count=research_run.stale_count,
+        stale_only_research=quality.stale_only if quality is not None else False,
+        unknown_reliability_record_count=(
+            quality.unknown_reliability_record_count if quality is not None else 0
+        ),
+        ambiguous_or_related_match_count=(
+            quality.ambiguous_or_related_match_count if quality is not None else 0
+        ),
+        identity_mismatch_count=quality.identity_mismatch_count
+        if quality is not None
+        else 0,
         warning_count=summary.warning_count,
         no_prepared_result_companies=workflow.no_prepared_result_companies,
     )
+
+
+def _research_match_details(research_run: EvaluationResearchRun) -> list[CompanyMatch]:
+    return [
+        match
+        for collection in research_run.workflow.collections
+        for match in collection.match_details
+    ]
 
 
 @dataclass(frozen=True)
@@ -813,6 +837,14 @@ def evaluate_deal_folder(
     except EvidenceActionError as exc:
         raise EvaluationError(str(exc)) from exc
     store = action_application.store
+    if research_run is not None:
+        research_run = replace(
+            research_run,
+            quality_status=research_quality_status(
+                store,
+                match_details=_research_match_details(research_run),
+            ),
+        )
 
     _stage(stage_callback, "rule-based scoring")
     try:
@@ -1814,6 +1846,7 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
             "ran": False,
             "imported_count": 0,
             "stale_count": 0,
+            "quality": {"status": "not_run"},
             "provider_statuses": [],
             "blocking_issue_count": 0,
             "warning_count": 0,
@@ -1829,6 +1862,7 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
         "blocking_issue_count": workflow.blocking_issue_count,
         "warning_count": summary.warning_count,
         "unresolved_manual_task_count": workflow.unresolved_manual_task_count,
+        "quality": _research_quality_export(research_run.quality_status),
         "provider_statuses": [
             {
                 "provider_id": status.provider_id,
@@ -1845,6 +1879,14 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
             for status in _evaluation_research_provider_statuses(research_run)
         ],
     }
+
+
+def _research_quality_export(
+    quality_status: ResearchQualityStatus | None,
+) -> dict[str, object]:
+    if quality_status is None:
+        return {"status": "not_available"}
+    return quality_status.model_dump(mode="json")
 
 
 def _evidence_audit_export(
@@ -3062,6 +3104,7 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
             f"- Imported {research_run.stale_count} stale external research "
             f"{stale_record_word}; stale evidence is treated as limited support."
         )
+    lines.extend(_research_quality_memo_lines(research_run.quality_status))
     if workflow.unresolved_manual_task_count:
         lines.append(
             f"- {workflow.unresolved_manual_task_count} planned source tasks still need manual "
@@ -3097,6 +3140,43 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
     else:
         lines.append("- No research workflow issues were recorded.")
     return lines
+
+
+def _research_quality_memo_lines(
+    quality_status: ResearchQualityStatus | None,
+) -> list[str]:
+    if quality_status is None:
+        return ["- Research quality status was not available for this run."]
+    lines = [
+        "- Research quality: "
+        f"{_memo_text(quality_status.status)}; "
+        f"{quality_status.current_record_count} current, "
+        f"{quality_status.stale_record_count} stale, "
+        f"{quality_status.unknown_freshness_record_count} unknown freshness."
+    ]
+    reliability = _research_metric_text(quality_status.source_reliability)
+    if reliability:
+        lines.append(f"- Source reliability tags: {_memo_text(reliability)}.")
+    identity = _research_metric_text(quality_status.identity_matches)
+    if identity:
+        lines.append(f"- Imported identity matches: {_memo_text(identity)}.")
+    skipped_identity = _research_metric_text(quality_status.skipped_identity_matches)
+    if skipped_identity:
+        lines.append(f"- Skipped identity matches: {_memo_text(skipped_identity)}.")
+    for limitation in quality_status.limitations:
+        lines.append(f"- Research limitation: {_memo_text(limitation)}")
+    for guidance in quality_status.refresh_guidance:
+        lines.append(f"- Refresh guidance: {_memo_text(guidance)}")
+    return lines
+
+
+def _research_metric_text(metrics: Sequence[ResearchQualityMetric]) -> str:
+    parts: list[str] = []
+    for metric in metrics:
+        if not metric.label or not metric.count:
+            continue
+        parts.append(f"{metric.label.replace('_', ' ')} {metric.count}")
+    return ", ".join(parts)
 
 
 def _research_provider_status_memo_lines(
@@ -3227,6 +3307,7 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
             f"{research_run.stale_count} imported external research {stale_word} "
             "were stale. Treat them as limited support until refreshed."
         )
+    warnings.extend(_research_quality_warnings(research_run.quality_status))
     if workflow.unresolved_manual_task_count:
         warnings.append(
             f"{workflow.unresolved_manual_task_count} external research source tasks still need "
@@ -3242,6 +3323,49 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
         warnings.append(
             "No external research evidence was imported before scoring. The final decision "
             "relies on local documents and any previously imported evidence."
+        )
+    return warnings
+
+
+def _research_quality_warnings(
+    quality_status: ResearchQualityStatus | None,
+) -> list[str]:
+    if quality_status is None:
+        return []
+    warnings: list[str] = []
+    if quality_status.stale_only:
+        warnings.append(
+            "All imported external research was stale. Refresh it before treating it as "
+            "strong support."
+        )
+    if quality_status.unknown_reliability_record_count:
+        record_word = (
+            "record"
+            if quality_status.unknown_reliability_record_count == 1
+            else "records"
+        )
+        warnings.append(
+            f"{quality_status.unknown_reliability_record_count} imported external "
+            f"research {record_word} had unknown source reliability."
+        )
+    if quality_status.ambiguous_or_related_match_count:
+        result_word = (
+            "result"
+            if quality_status.ambiguous_or_related_match_count == 1
+            else "results"
+        )
+        warnings.append(
+            f"{quality_status.ambiguous_or_related_match_count} external research "
+            f"{result_word} were skipped because the identity match was related, "
+            "product-like, founder-related, or ambiguous."
+        )
+    if quality_status.identity_mismatch_count:
+        result_word = (
+            "result" if quality_status.identity_mismatch_count == 1 else "results"
+        )
+        warnings.append(
+            f"{quality_status.identity_mismatch_count} external research {result_word} "
+            "were skipped because the company identity did not match."
         )
     return warnings
 

@@ -165,6 +165,10 @@ class DiligenceResearchContext(BaseModel):
     manual_needed_provider_count: int = Field(default=0, ge=0)
     not_run_provider_count: int = Field(default=0, ge=0)
     stale_record_count: int = Field(default=0, ge=0)
+    stale_only_research: bool = False
+    unknown_reliability_record_count: int = Field(default=0, ge=0)
+    ambiguous_or_related_match_count: int = Field(default=0, ge=0)
+    identity_mismatch_count: int = Field(default=0, ge=0)
     warning_count: int = Field(default=0, ge=0)
     no_prepared_result_companies: list[str] = Field(default_factory=list)
 
