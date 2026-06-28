@@ -243,6 +243,19 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="evaluate-deal-research-status-export",
+                category=EvalCategory.RESEARCH_IMPORT,
+                name="Evaluate-deal research status export",
+                description=(
+                    "Checks that evaluate-deal imports stale local public research, "
+                    "surfaces stale limitations, and keeps provider status visible in "
+                    "the memo and JSON export."
+                ),
+            ),
+            run=fixtures.run_evaluate_deal_research_status_export_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="public-collectors-source-guards",
                 category=EvalCategory.PUBLIC_COLLECTORS,
                 name="Public collector exact-match and source guards",
@@ -264,6 +277,19 @@ def _eval_definitions() -> list[EvalDefinition]:
                 ),
             ),
             run=fixtures.run_meridian_workflow_guards_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="evaluate-deal-meridian-manual-loop",
+                category=EvalCategory.MERIDIAN,
+                name="Evaluate-deal Meridian manual loop",
+                description=(
+                    "Checks unsafe Meridian URL rejection through evaluate-deal, "
+                    "untouched placeholder non-import, unresolved manual workflow "
+                    "status, and completed synthetic Meridian import lineage."
+                ),
+            ),
+            run=fixtures.run_evaluate_deal_meridian_manual_loop_fixture,
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
@@ -530,6 +556,18 @@ def _eval_definitions() -> list[EvalDefinition]:
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
+                id="portfolio-batch-allocation",
+                category=EvalCategory.SCORE_CALIBRATION,
+                name="Batch portfolio allocation ordering",
+                description=(
+                    "Checks synthetic multi-deal scoring allocation order, budget "
+                    "caps, and skipped-deal reasons without network calls."
+                ),
+            ),
+            run=fixtures.run_portfolio_batch_allocation_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
                 id="missing-data-pass",
                 category=EvalCategory.MISSING_DATA,
                 name="Missing data pass gate",
@@ -601,6 +639,32 @@ def _eval_definitions() -> list[EvalDefinition]:
                 ),
             ),
             run=fixtures.run_evaluate_deal_golden_workflow_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="evaluate-deal-audit-guardrails",
+                category=EvalCategory.MEMO_SNAPSHOT,
+                name="Evaluate-deal audit guardrails",
+                description=(
+                    "Checks evidence-completeness audit PASS/$0 forcing only when "
+                    "scoring otherwise allows INVEST, plus neutral wording when "
+                    "scoring already forces PASS."
+                ),
+            ),
+            run=fixtures.run_evaluate_deal_audit_guardrails_fixture,
+        ),
+        EvalDefinition(
+            metadata=EvalCaseMetadata(
+                id="evaluate-deal-diligence-loop-json-privacy",
+                category=EvalCategory.PRIVACY,
+                name="Evaluate-deal diligence loop JSON privacy",
+                description=(
+                    "Checks diligence question creation, private operator answer "
+                    "handling, rerun resolution, final JSON export privacy, and "
+                    "decision lineage contracts."
+                ),
+            ),
+            run=fixtures.run_evaluate_deal_diligence_loop_json_privacy_fixture,
         ),
         EvalDefinition(
             metadata=EvalCaseMetadata(
