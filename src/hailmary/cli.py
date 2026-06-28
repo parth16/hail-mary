@@ -3354,9 +3354,9 @@ def _meridian_import_preview_lines(preview: MeridianImportPreview) -> list[Text]
                 "  Unresolved Meridian fields: "
                 f"{_meridian_unresolved_field_text(preview.unresolved_required_fields)}."
             )
-        )
+    )
     for row in preview.rows:
-        label = row.label or row.title or "unnamed Meridian row"
+        label = row.label or "Meridian row"
         details = ""
         if row.missing_fields:
             details = f" Missing fields: {', '.join(row.missing_fields)}."

@@ -145,6 +145,12 @@ def import_research_results(
     input_path = _resolve_input_file(results_path)
     results_file = _load_results_file(input_path, imported_at=imported_at)
     _validate_results(results_file.results, imported_at=imported_at)
+    if not dry_run and not results_file.results and results_file._meridian_preview is not None:
+        raise ResearchImportError(
+            "The Meridian results file has no import-ready rows. Run the dry run to "
+            "review placeholder and unresolved rows, then complete at least one row "
+            "before importing evidence."
+        )
 
     summary_path = config.data_dir / "processed" / "ingestion_summary.json"
     if not summary_path.exists():
@@ -461,6 +467,7 @@ def _meridian_preview_row(
     title = result.get("title")
     title_text = title.strip() if isinstance(title, str) and title.strip() else None
     checklist_item = meridian_checklist_item_for_title(title_text)
+    safe_title = checklist_item.template_title if checklist_item is not None else None
     missing_fields = (
         _missing_completed_meridian_template_fields(result)
         if _looks_like_meridian_template_result(result)
@@ -469,7 +476,7 @@ def _meridian_preview_row(
     if _is_untouched_meridian_placeholder_result(result):
         return MeridianImportPreviewRow(
             row_number=index,
-            title=title_text,
+            title=safe_title,
             field_id=checklist_item.field_id if checklist_item is not None else None,
             label=checklist_item.label if checklist_item is not None else None,
             status="placeholder",
@@ -478,7 +485,7 @@ def _meridian_preview_row(
     if missing_fields:
         return MeridianImportPreviewRow(
             row_number=index,
-            title=title_text,
+            title=safe_title,
             field_id=checklist_item.field_id if checklist_item is not None else None,
             label=checklist_item.label if checklist_item is not None else None,
             status="unsafe_or_incomplete",
@@ -497,7 +504,7 @@ def _meridian_preview_row(
     except (ResearchImportError, ValidationError) as exc:
         return MeridianImportPreviewRow(
             row_number=index,
-            title=title_text,
+            title=safe_title,
             field_id=checklist_item.field_id if checklist_item is not None else None,
             label=checklist_item.label if checklist_item is not None else None,
             status="unsafe_or_incomplete",
@@ -506,7 +513,7 @@ def _meridian_preview_row(
 
     return MeridianImportPreviewRow(
         row_number=index,
-        title=title_text,
+        title=safe_title,
         field_id=checklist_item.field_id if checklist_item is not None else None,
         label=checklist_item.label if checklist_item is not None else None,
         status="import_ready",

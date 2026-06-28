@@ -78,6 +78,7 @@ from hailmary.research.meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
     MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER,
+    MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX,
     MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
     clean_meridian_url,
 )
@@ -6311,6 +6312,69 @@ def test_preview_meridian_results_file_reports_placeholders_and_unresolved_field
     assert "Valuation or valuation cap" in unresolved_labels
 
 
+def test_import_research_results_rejects_empty_meridian_import_without_dry_run(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=config,
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+
+    with pytest.raises(ResearchImportError, match="no import-ready rows"):
+        import_research_results(
+            config=config,
+            results_path=workflow.result_template_path,
+            imported_at=datetime(2026, 1, 3, tzinfo=UTC),
+            dry_run=False,
+        )
+
+
+def test_run_research_workflow_clears_meridian_fields_resolved_by_supplied_results(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    meridian_results_path = tmp_path / "meridian-results.json"
+    _write_results(
+        meridian_results_path,
+        [
+            _research_result(
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian: Company name",
+                text="Acme AI is the company name shown on the Meridian deal page.",
+                retrieved_at="2025-12-31T12:00:00Z",
+                source_url="https://portal.angellist.com/m/example/invest",
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                confidence="high: exact short page excerpt",
+                licensing_notes=(
+                    "Authenticated portal permits saving this short fact. "
+                    f"{MERIDIAN_WORKFLOW_TEMPLATE_MARKER} "
+                    f"{MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER} "
+                    f"{MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX}"
+                    "https://portal.angellist.com/m/example/invest"
+                ),
+            )
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        results_files=[meridian_results_path],
+        created_at=BUILT_AT,
+    )
+
+    unresolved_labels = [field.label for field in result.meridian_unresolved_fields]
+    assert "Company name" not in unresolved_labels
+    assert "Deal URL or base portal URL" not in unresolved_labels
+    assert "Valuation or valuation cap" in unresolved_labels
+
+
 def test_import_research_results_skips_legacy_meridian_placeholder_confidence(
     tmp_path: Path,
 ) -> None:
@@ -8246,6 +8310,46 @@ def test_import_research_results_command_dry_run_reports_blocked_meridian_previe
     assert "Row 1: Company name - placeholder." in result.output
     assert "No evidence stores were changed." in result.output
     assert "Traceback" not in result.output
+
+
+def test_import_research_results_command_dry_run_hides_custom_meridian_titles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workflow = prepare_meridian_workflow(
+        config=AppConfig(data_dir=tmp_path / "data"),
+        company_name="Acme AI",
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        created_at=BUILT_AT,
+    )
+    template_payload = json.loads(
+        workflow.result_template_path.read_text(encoding="utf-8")
+    )
+    template_payload["results"][0]["title"] = (
+        "Copied portal claim: revenue doubled last month"
+    )
+    workflow.result_template_path.write_text(
+        json.dumps(template_payload),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "import-research-results",
+            str(workflow.result_template_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Research import preview blocked" in result.output
+    assert "Row 1: Meridian row - unsafe or incomplete." in result.output
+    assert "Copied portal claim" not in result.output
+    assert "revenue doubled" not in result.output
 
 
 def _ingest_deal_and_write_results(

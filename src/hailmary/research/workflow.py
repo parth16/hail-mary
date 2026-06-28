@@ -229,12 +229,22 @@ class ResearchWorkflowRunSummary(BaseModel):
     @property
     def meridian_unresolved_fields(self) -> list[MeridianUnresolvedField]:
         unresolved_by_id: dict[str, MeridianUnresolvedField] = {}
+        resolved_field_ids: set[str] = set()
         for preview in self.import_previews:
             if preview.meridian_preview is None:
                 continue
+            if preview.meridian_preview.source_url is not None:
+                resolved_field_ids.add("deal_url")
+            for row in preview.meridian_preview.rows:
+                if row.status == "import_ready" and row.field_id is not None:
+                    resolved_field_ids.add(row.field_id)
             for field in preview.meridian_preview.unresolved_required_fields:
                 unresolved_by_id.setdefault(field.field_id, field)
-        return list(unresolved_by_id.values())
+        return [
+            field
+            for field in unresolved_by_id.values()
+            if field.field_id not in resolved_field_ids
+        ]
 
     @property
     def artifacts(self) -> list[ResearchWorkflowArtifact]:
