@@ -1073,6 +1073,38 @@ def test_net_return_math_treats_zero_ownership_as_verified_downside() -> None:
     )
 
 
+def test_net_return_math_treats_zero_ownership_as_complete_without_fees() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M. ARR "
+            "revenue growth with paid customers and retention. Lead investor committed.",
+        ),
+        _evidence(
+            "ev_return",
+            "Investor ownership 0%. Estimated dilution 50%. Exit value $1B.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.net_return_multiple == 0
+    assert scored.net_return.missing_inputs == []
+    assert "fees or carry" not in scored.net_return.explanation
+    assert any(
+        gate.name == "Verified return below capital back"
+        for gate in scored.triggered_kill_gates
+    )
+
+
 def test_net_return_math_prefers_itemized_fees_over_summary_total() -> None:
     evidence = [
         _evidence("ev_terms", "Series A stage. Post-money valuation $100M."),
@@ -1095,6 +1127,51 @@ def test_net_return_math_prefers_itemized_fees_over_summary_total() -> None:
         gate.name == "Verified return below capital back"
         for gate in scored.triggered_kill_gates
     )
+
+
+def test_net_return_math_does_not_treat_summary_fees_as_itemized_carry() -> None:
+    evidence = [
+        _evidence("ev_terms", "Series A stage. Post-money valuation $100M."),
+        _evidence(
+            "ev_return",
+            "Investor ownership 100%. Estimated dilution 0%. SPV expenses 10%. "
+            "Total fees and carry 30%. Exit value $130M.",
+        ),
+    ]
+    claims = [_claim("post-money valuation", "$100M", "ev_terms")]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.net_return_multiple == 0.91
+    assert scored.net_return.estimated_fees_and_carry_percent == 30
+    assert any(
+        gate.name == "Verified return below capital back"
+        for gate in scored.triggered_kill_gates
+    )
+
+
+def test_net_return_math_rejects_itemized_carry_above_100_percent() -> None:
+    evidence = [
+        _evidence("ev_terms", "Seed stage. Post-money valuation $1M."),
+        _evidence(
+            "ev_return",
+            "Investor ownership 100%. Estimated dilution 0%. SPV expenses 5%. "
+            "Carry 150%. Exit value $10M.",
+        ),
+    ]
+    claims = [_claim("post-money valuation", "$1M", "ev_terms")]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.net_return_multiple is None
+    assert scored.net_return.estimated_fees_and_carry_percent is None
+    assert "fees or carry" in scored.net_return.missing_inputs
 
 
 def test_net_return_math_rejects_impossible_ownership_percentages() -> None:

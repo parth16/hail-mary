@@ -1255,22 +1255,28 @@ def _net_return_estimate(
 
     return_inputs = _return_inputs(store.evidence)
     evidence_ids = list(dict.fromkeys([*evidence_ids, *return_inputs.evidence_ids]))
+    zero_ownership = return_inputs.ownership_percent == 0
     missing_inputs: list[str] = []
     if return_inputs.ownership_percent is None:
         missing_inputs.append("ownership")
-    if return_inputs.dilution_percent is None:
+    if return_inputs.dilution_percent is None and not zero_ownership:
         missing_inputs.append("dilution")
-    if return_inputs.fees_and_carry_percent is None:
+    if return_inputs.fees_and_carry_percent is None and not zero_ownership:
         missing_inputs.append("fees or carry")
-    if return_inputs.gross_exit_value is None:
+    if return_inputs.gross_exit_value is None and not zero_ownership:
         missing_inputs.append("gross exit scenario")
 
     net_multiple: float | None = None
     if (
         return_inputs.ownership_percent is not None
-        and return_inputs.dilution_percent is not None
-        and return_inputs.fees_and_carry_percent is not None
-        and return_inputs.gross_exit_value is not None
+        and (
+            zero_ownership
+            or (
+                return_inputs.dilution_percent is not None
+                and return_inputs.fees_and_carry_percent is not None
+                and return_inputs.gross_exit_value is not None
+            )
+        )
         and entry_valuation > 0
     ):
         net_multiple = _net_return_multiple(
@@ -1285,12 +1291,18 @@ def _net_return_estimate(
         )
         support_status = ScoreSupportStatus.NEEDS_DILIGENCE
     else:
-        explanation = (
-            f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
-            f"Using cited ownership, dilution, fees or carry, and exit value "
-            f"against implied invested capital, "
-            f"estimated net return is {net_multiple:g}x."
-        )
+        if zero_ownership:
+            explanation = (
+                f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
+                f"Cited ownership is 0%, so estimated net return is {net_multiple:g}x."
+            )
+        else:
+            explanation = (
+                f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
+                f"Using cited ownership, dilution, fees or carry, and exit value "
+                f"against implied invested capital, "
+                f"estimated net return is {net_multiple:g}x."
+            )
         support_status = ScoreSupportStatus.VERIFIED
 
     return NetReturnEstimate(
@@ -1343,28 +1355,38 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
     gross_exit_value: int | None = None
     evidence_ids: list[str] = []
     for record in evidence:
+        combined_matches = list(
+            RETURN_INPUT_PATTERNS["combined_fees_and_carry"].finditer(record.text)
+        )
         ownership_match = RETURN_INPUT_PATTERNS["ownership"].search(record.text)
         if ownership_percent is None and ownership_match:
-            parsed_ownership = _float_text(ownership_match.group("value"))
-            if parsed_ownership is not None and 0 <= parsed_ownership <= 100:
+            parsed_ownership = _percent_text(ownership_match.group("value"))
+            if parsed_ownership is not None:
                 ownership_percent = parsed_ownership
                 evidence_ids.append(record.id)
         dilution_match = RETURN_INPUT_PATTERNS["dilution"].search(record.text)
         if dilution_percent is None and dilution_match:
-            dilution_percent = _float_text(dilution_match.group("value"))
-            evidence_ids.append(record.id)
+            parsed_dilution = _percent_text(dilution_match.group("value"))
+            if parsed_dilution is not None:
+                dilution_percent = parsed_dilution
+                evidence_ids.append(record.id)
         fees_match = RETURN_INPUT_PATTERNS["fees"].search(record.text)
         if fees_percent is None and fees_match:
-            fees_percent = _float_text(fees_match.group("value"))
-            evidence_ids.append(record.id)
-        carry_match = RETURN_INPUT_PATTERNS["carry"].search(record.text)
-        if carry_percent is None and carry_match:
-            carry_percent = _float_text(carry_match.group("value"))
-            evidence_ids.append(record.id)
-        combined_match = RETURN_INPUT_PATTERNS["combined_fees_and_carry"].search(record.text)
-        if combined_fees_and_carry_percent is None and combined_match:
-            combined_fees_and_carry_percent = _float_text(combined_match.group("value"))
-            evidence_ids.append(record.id)
+            parsed_fees = _percent_text(fees_match.group("value"))
+            if parsed_fees is not None:
+                fees_percent = parsed_fees
+                evidence_ids.append(record.id)
+        if carry_percent is None:
+            carry_percent = _first_standalone_carry_percent(
+                record.text,
+                combined_matches=combined_matches,
+            )
+            if carry_percent is not None:
+                evidence_ids.append(record.id)
+        if combined_fees_and_carry_percent is None:
+            combined_fees_and_carry_percent = _first_valid_percent(combined_matches)
+            if combined_fees_and_carry_percent is not None:
+                evidence_ids.append(record.id)
         exit_match = RETURN_INPUT_PATTERNS["gross_exit_value"].search(record.text)
         if (
             gross_exit_value is None
@@ -1398,14 +1420,18 @@ def _net_return_multiple(
     gross_exit_value = return_inputs.gross_exit_value
     if (
         ownership_percent is None
-        or ownership_percent < 0
-        or dilution_percent is None
-        or gross_exit_value is None
+        or not _valid_percent(ownership_percent)
         or entry_valuation <= 0
     ):
         return None
     if ownership_percent == 0:
         return 0.0
+    if (
+        dilution_percent is None
+        or gross_exit_value is None
+        or not _valid_percent(dilution_percent)
+    ):
+        return None
 
     ownership_fraction = Decimal(str(ownership_percent)) / Decimal("100")
     invested_capital = Decimal(entry_valuation) * ownership_fraction
@@ -1423,6 +1449,10 @@ def _net_return_multiple(
         return_inputs.platform_fee_percent is not None
         and return_inputs.carry_percent is not None
     ):
+        if not _valid_percent(return_inputs.platform_fee_percent) or not _valid_percent(
+            return_inputs.carry_percent
+        ):
+            return None
         platform_fee = (
             invested_capital
             * Decimal(str(return_inputs.platform_fee_percent))
@@ -1440,6 +1470,8 @@ def _net_return_multiple(
         net_cash_returned = value_after_dilution - carry
         cash_in = invested_capital + platform_fee
     elif return_inputs.combined_fees_and_carry_percent is not None:
+        if not _valid_percent(return_inputs.combined_fees_and_carry_percent):
+            return None
         proceeds_after_fees = max(
             Decimal("0"),
             Decimal("1")
@@ -1456,6 +1488,40 @@ def _net_return_multiple(
     if cash_in <= 0:
         return None
     return round(float(net_cash_returned / cash_in), 2)
+
+
+def _first_standalone_carry_percent(
+    text: str,
+    *,
+    combined_matches: list[re.Match[str]],
+) -> float | None:
+    combined_spans = [match.span() for match in combined_matches]
+    for carry_match in RETURN_INPUT_PATTERNS["carry"].finditer(text):
+        if _span_overlaps(carry_match.span(), combined_spans):
+            continue
+        carry_percent = _percent_text(carry_match.group("value"))
+        if carry_percent is not None:
+            return carry_percent
+    return None
+
+
+def _first_valid_percent(matches: list[re.Match[str]]) -> float | None:
+    for match in matches:
+        percent = _percent_text(match.group("value"))
+        if percent is not None:
+            return percent
+    return None
+
+
+def _percent_text(raw_value: str) -> float | None:
+    value = _float_text(raw_value)
+    if value is None or not _valid_percent(value):
+        return None
+    return value
+
+
+def _valid_percent(value: float) -> bool:
+    return 0 <= value <= 100
 
 
 def _float_text(raw_value: str) -> float | None:
