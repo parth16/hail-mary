@@ -39,7 +39,11 @@ from hailmary.research.collection import (
     collect_usaspending_awards,
     prepare_public_research_results,
 )
-from hailmary.research.importer import ResearchImportError, import_research_results
+from hailmary.research.importer import (
+    ResearchImportError,
+    import_research_results,
+    preview_meridian_results_file,
+)
 from hailmary.research.matching import (
     CompanyMatch,
     CompanyMatchKind,
@@ -75,6 +79,10 @@ from hailmary.research.quality import (
     source_reliability_for_result,
 )
 from hailmary.research.schemas import (
+    MeridianChecklistItem,
+    MeridianImportPreview,
+    MeridianImportPreviewRow,
+    MeridianUnresolvedField,
     ResearchAccessMode,
     ResearchDealInput,
     ResearchImportDealSummary,
@@ -115,6 +123,10 @@ from hailmary.research.workflow import (
 
 __all__ = [
     "ResearchAccessMode",
+    "MeridianChecklistItem",
+    "MeridianImportPreview",
+    "MeridianImportPreviewRow",
+    "MeridianUnresolvedField",
     "MeridianWorkflow",
     "MeridianWorkflowError",
     "MeridianWorkflowRunSummary",
@@ -202,6 +214,7 @@ __all__ = [
     "normalize_company_name",
     "normalize_company_slug",
     "prepare_meridian_workflow",
+    "preview_meridian_results_file",
     "prepare_public_research_results",
     "prepare_research_plan",
     "prepare_research_results_template",

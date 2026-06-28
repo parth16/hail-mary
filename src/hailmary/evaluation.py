@@ -20,7 +20,9 @@ from hailmary.agents.validation import validate_agent_output
 from hailmary.config import AppConfig, ConfigError, create_local_state, validate_local_state
 from hailmary.evidence import (
     DiligenceLoopError,
+    DiligenceQuestionCandidate,
     DiligenceQuestionQueue,
+    DiligenceQuestionSource,
     EvidenceAuditReadiness,
     EvidenceAuditSeverity,
     EvidenceCompletenessAudit,
@@ -50,6 +52,7 @@ from hailmary.portfolio import PortfolioError, portfolio_status
 from hailmary.research import (
     CompanyMatch,
     GitHubRepositorySearchClient,
+    MeridianUnresolvedField,
     ResearchImportError,
     ResearchImportRunSummary,
     ResearchProviderRunStatus,
@@ -271,6 +274,32 @@ def _research_match_details(research_run: EvaluationResearchRun) -> list[Company
         for collection in research_run.workflow.collections
         for match in collection.match_details
     ]
+
+
+def _meridian_question_candidates(
+    research_run: EvaluationResearchRun | None,
+) -> list[DiligenceQuestionCandidate]:
+    if research_run is None:
+        return []
+    candidates: list[DiligenceQuestionCandidate] = []
+    for index, unresolved_field in enumerate(
+        research_run.workflow.meridian_unresolved_fields,
+        start=1,
+    ):
+        candidates.append(
+            DiligenceQuestionCandidate(
+                source=DiligenceQuestionSource.MERIDIAN_WORKFLOW,
+                priority=20 + index,
+                question=f"Resolve the Meridian field: {unresolved_field.label}.",
+                reason=(
+                    "The Meridian manual workflow still needs this portal field before "
+                    f"its coverage can be treated as complete. {unresolved_field.explanation}"
+                ),
+                category=f"meridian:{unresolved_field.field_id}",
+                missing_evidence=True,
+            )
+        )
+    return candidates
 
 
 @dataclass(frozen=True)
@@ -1003,6 +1032,7 @@ def evaluate_deal_folder(
         diligence_question_queue = build_diligence_question_queue(
             scored_deal,
             evidence_audit=evidence_audit,
+            extra_questions=_meridian_question_candidates(research_run),
             final_output=final_output,
             specialist_outputs=[
                 result.output for result in specialist_results if result.output is not None
@@ -1850,6 +1880,7 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
             "provider_statuses": [],
             "blocking_issue_count": 0,
             "warning_count": 0,
+            "meridian_unresolved_fields": [],
         }
     workflow = research_run.workflow
     summary = workflow.summary
@@ -1863,6 +1894,14 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
         "warning_count": summary.warning_count,
         "unresolved_manual_task_count": workflow.unresolved_manual_task_count,
         "quality": _research_quality_export(research_run.quality_status),
+        "meridian_unresolved_fields": [
+            {
+                "field_id": field.field_id,
+                "label": field.label,
+                "explanation": field.explanation,
+            }
+            for field in workflow.meridian_unresolved_fields
+        ],
         "provider_statuses": [
             {
                 "provider_id": status.provider_id,
@@ -3110,6 +3149,11 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
             f"- {workflow.unresolved_manual_task_count} planned source tasks still need manual "
             "or local-file work."
         )
+    if workflow.meridian_unresolved_fields:
+        lines.append(
+            "- Meridian unresolved fields: "
+            f"{_memo_text(_meridian_unresolved_field_text(workflow.meridian_unresolved_fields))}."
+        )
     lines.extend(_research_provider_status_memo_lines(research_run))
     if workflow.no_prepared_result_companies:
         lines.append(
@@ -3313,6 +3357,11 @@ def _research_warnings(research_run: EvaluationResearchRun | None) -> list[str]:
             f"{workflow.unresolved_manual_task_count} external research source tasks still need "
             "manual or local-file follow-up."
         )
+    if workflow.meridian_unresolved_fields:
+        warnings.append(
+            "Meridian manual workflow still has unresolved fields: "
+            f"{_meridian_unresolved_field_text(workflow.meridian_unresolved_fields)}."
+        )
     for issue in workflow.issues:
         prefix = "Research error" if issue.severity == "error" else "Research warning"
         warnings.append(f"{prefix}: {issue.source}: {issue.message}")
@@ -3368,6 +3417,12 @@ def _research_quality_warnings(
             "were skipped because the company identity did not match."
         )
     return warnings
+
+
+def _meridian_unresolved_field_text(
+    fields: Sequence[MeridianUnresolvedField],
+) -> str:
+    return ", ".join(field.label for field in fields)
 
 
 def _research_count_phrase(count: int, singular: str, plural: str | None = None) -> str:

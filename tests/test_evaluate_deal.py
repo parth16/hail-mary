@@ -1137,10 +1137,31 @@ def test_evaluate_deal_surfaces_meridian_manual_workflow_warning(
         in warning
         for warning in result.warnings
     )
+    assert any(
+        "Meridian manual workflow still has unresolved fields" in warning
+        and "Valuation or valuation cap" in warning
+        for warning in result.warnings
+    )
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "Warning: meridian: Meridian is a manual authenticated workflow." in memo_text
+    assert "Meridian unresolved fields:" in memo_text
+    assert "Valuation or valuation cap" in memo_text
     assert "Manual research follow-up queue:" in memo_text
     assert memo_text.index("## External Research") < memo_text.index("## Final Recommendation")
+    assert result.diligence_question_queue is not None
+    meridian_questions = [
+        question
+        for question in result.diligence_question_queue.questions
+        if question.source.value == "meridian_manual_workflow"
+    ]
+    assert meridian_questions
+    assert any("Valuation or valuation cap" in question.question for question in meridian_questions)
+    export = json.loads(result.final_json_path.read_text(encoding="utf-8"))
+    unresolved_fields = export["research"]["meridian_unresolved_fields"]
+    assert any(
+        field["field_id"] == "valuation" and field["label"] == "Valuation or valuation cap"
+        for field in unresolved_fields
+    )
 
 
 def test_evaluate_deal_warns_incomplete_search_is_not_clean_no_evidence(

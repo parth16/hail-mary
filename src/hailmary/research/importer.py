@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,6 +33,7 @@ from hailmary.utils.slug import slugify
 from .matching import CompanyMatch, CompanyMatchKind, classify_company_match
 from .meridian import (
     MERIDIAN_LEGACY_PLACEHOLDER_CONFIDENCE,
+    MERIDIAN_LEGACY_RECOMMENDED_FACTS,
     MERIDIAN_LEGACY_WORKFLOW_PLACEHOLDER_MARKER,
     MERIDIAN_PLACEHOLDER_CONFIDENCE,
     MERIDIAN_RECOMMENDED_FACTS,
@@ -40,6 +42,8 @@ from .meridian import (
     MERIDIAN_WORKFLOW_TEMPLATE_MARKER,
     MeridianWorkflowError,
     clean_meridian_url,
+    meridian_checklist_item_for_title,
+    meridian_required_checklist_items,
 )
 from .providers import builtin_research_providers
 from .quality import (
@@ -48,6 +52,9 @@ from .quality import (
     source_reliability_for_result,
 )
 from .schemas import (
+    MeridianImportPreview,
+    MeridianImportPreviewRow,
+    MeridianUnresolvedField,
     ResearchImportDealSummary,
     ResearchImportRunSummary,
     ResearchProvider,
@@ -101,7 +108,8 @@ TEMPLATE_REQUIRED_FACT_FIELDS = {
     "confidence",
 }
 MERIDIAN_PLACEHOLDER_TITLES = {
-    f"Meridian: {fact}" for fact in MERIDIAN_RECOMMENDED_FACTS
+    f"Meridian: {fact}"
+    for fact in [*MERIDIAN_RECOMMENDED_FACTS, *MERIDIAN_LEGACY_RECOMMENDED_FACTS]
 }
 PLACEHOLDER_LICENSING_NOTES = {
     "n/a",
@@ -135,7 +143,7 @@ def import_research_results(
 
     imported_at = _as_utc(imported_at or datetime.now(UTC))
     input_path = _resolve_input_file(results_path)
-    results_file = _load_results_file(input_path)
+    results_file = _load_results_file(input_path, imported_at=imported_at)
     _validate_results(results_file.results, imported_at=imported_at)
 
     summary_path = config.data_dir / "processed" / "ingestion_summary.json"
@@ -248,6 +256,11 @@ def import_research_results(
         imported_at=imported_at,
         dry_run=dry_run,
         skipped_blank_template_row_count=results_file._skipped_blank_template_row_count,
+        meridian_preview=results_file._meridian_preview,
+        evaluate_deal_command=_evaluate_deal_rerun_command(
+            summary,
+            data_dir=config.data_dir,
+        ),
         provider_imported_counts=provider_imported_counts,
         provider_stale_counts=provider_stale_counts,
         provider_names=provider_names,
@@ -258,6 +271,22 @@ def import_research_results(
             duplicate_counts=duplicate_counts,
             stale_counts=stale_counts,
         ),
+    )
+
+
+def preview_meridian_results_file(
+    *,
+    results_path: Path,
+    imported_at: datetime | None = None,
+) -> MeridianImportPreview | None:
+    input_path = _resolve_input_file(results_path)
+    raw_payload = _load_raw_results_payload(input_path)
+    raw_results = raw_payload.get("results") if isinstance(raw_payload, dict) else None
+    if not isinstance(raw_results, list):
+        return None
+    return _meridian_import_preview_for_raw_results(
+        raw_results,
+        imported_at=_as_utc(imported_at or datetime.now(UTC)),
     )
 
 
@@ -279,7 +308,16 @@ def _resolve_input_file(path: Path) -> Path:
     return resolved_path
 
 
-def _load_results_file(path: Path) -> ResearchResultsFile:
+def _load_results_file(path: Path, *, imported_at: datetime) -> ResearchResultsFile:
+    raw_payload = _load_raw_results_payload(path)
+    try:
+        return _validate_results_file_payload(raw_payload, imported_at=imported_at)
+    except ValidationError as exc:
+        detail = _first_validation_detail(exc)
+        raise ResearchImportError(f"The research results file is incomplete: {detail}") from exc
+
+
+def _load_raw_results_payload(path: Path) -> dict[str, object]:
     try:
         raw_text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
@@ -302,14 +340,14 @@ def _load_results_file(path: Path) -> ResearchResultsFile:
         raise ResearchImportError(
             "The research results file must be a JSON object with a `results` list."
         )
-    try:
-        return _validate_results_file_payload(raw_payload)
-    except ValidationError as exc:
-        detail = _first_validation_detail(exc)
-        raise ResearchImportError(f"The research results file is incomplete: {detail}") from exc
+    return raw_payload
 
 
-def _validate_results_file_payload(raw_payload: dict[str, object]) -> ResearchResultsFile:
+def _validate_results_file_payload(
+    raw_payload: dict[str, object],
+    *,
+    imported_at: datetime,
+) -> ResearchResultsFile:
     raw_results = raw_payload.get("results")
     if not isinstance(raw_results, list):
         return ResearchResultsFile.model_validate(raw_payload)
@@ -318,6 +356,10 @@ def _validate_results_file_payload(raw_payload: dict[str, object]) -> ResearchRe
     if extra_top_level_fields:
         return ResearchResultsFile.model_validate(raw_payload)
 
+    meridian_preview = _meridian_import_preview_for_raw_results(
+        raw_results,
+        imported_at=imported_at,
+    )
     results: list[ResearchResultInput] = []
     skipped_blank_template_row_count = 0
     for index, raw_result in enumerate(raw_results, start=1):
@@ -334,9 +376,168 @@ def _validate_results_file_payload(raw_payload: dict[str, object]) -> ResearchRe
             ) from exc
         result._original_row_number = index
         results.append(result)
-    results_file = ResearchResultsFile.model_validate({"results": results})
+    if results:
+        results_file = ResearchResultsFile.model_validate({"results": results})
+    elif meridian_preview is not None:
+        results_file = ResearchResultsFile.model_construct(results=[])
+    else:
+        results_file = ResearchResultsFile.model_validate({"results": results})
     results_file._skipped_blank_template_row_count = skipped_blank_template_row_count
+    results_file._meridian_preview = meridian_preview
     return results_file
+
+
+def _meridian_import_preview_for_raw_results(
+    raw_results: list[object],
+    *,
+    imported_at: datetime,
+) -> MeridianImportPreview | None:
+    rows: list[MeridianImportPreviewRow] = []
+    resolved_field_ids: set[str] = set()
+    source_url: str | None = None
+    for index, raw_result in enumerate(raw_results, start=1):
+        if not _is_meridian_preview_candidate(raw_result):
+            continue
+        row = _meridian_preview_row(
+            raw_result,
+            index=index,
+            imported_at=imported_at,
+        )
+        rows.append(row)
+        source_url = source_url or _preview_meridian_source_url(raw_result)
+        if row.status == "import_ready" and row.field_id is not None:
+            resolved_field_ids.add(row.field_id)
+
+    if not rows:
+        return None
+    if source_url is not None:
+        resolved_field_ids.add("deal_url")
+
+    required_items = meridian_required_checklist_items()
+    unresolved = [
+        MeridianUnresolvedField(
+            field_id=item.field_id,
+            label=item.label,
+            explanation=item.explanation,
+        )
+        for item in required_items
+        if item.field_id not in resolved_field_ids
+    ]
+    return MeridianImportPreview(
+        source_url=source_url,
+        import_ready_count=sum(1 for row in rows if row.status == "import_ready"),
+        placeholder_count=sum(1 for row in rows if row.status == "placeholder"),
+        unsafe_or_incomplete_count=sum(
+            1 for row in rows if row.status == "unsafe_or_incomplete"
+        ),
+        unresolved_required_fields=unresolved,
+        rows=rows,
+    )
+
+
+def _is_meridian_preview_candidate(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return (
+        result.get("provider_id") == "meridian"
+        or result.get("source_kind") in {SourceKind.MERIDIAN.value, SourceKind.MERIDIAN}
+        or _looks_like_meridian_template_result(result)
+    )
+
+
+def _meridian_preview_row(
+    result: object,
+    *,
+    index: int,
+    imported_at: datetime,
+) -> MeridianImportPreviewRow:
+    if not isinstance(result, dict):
+        return MeridianImportPreviewRow(
+            row_number=index,
+            status="unsafe_or_incomplete",
+            message="This row is not a JSON object.",
+        )
+
+    title = result.get("title")
+    title_text = title.strip() if isinstance(title, str) and title.strip() else None
+    checklist_item = meridian_checklist_item_for_title(title_text)
+    missing_fields = (
+        _missing_completed_meridian_template_fields(result)
+        if _looks_like_meridian_template_result(result)
+        else []
+    )
+    if _is_untouched_meridian_placeholder_result(result):
+        return MeridianImportPreviewRow(
+            row_number=index,
+            title=title_text,
+            field_id=checklist_item.field_id if checklist_item is not None else None,
+            label=checklist_item.label if checklist_item is not None else None,
+            status="placeholder",
+            message="This generated placeholder row is still untouched.",
+        )
+    if missing_fields:
+        return MeridianImportPreviewRow(
+            row_number=index,
+            title=title_text,
+            field_id=checklist_item.field_id if checklist_item is not None else None,
+            label=checklist_item.label if checklist_item is not None else None,
+            status="unsafe_or_incomplete",
+            missing_fields=missing_fields,
+            message=(
+                "This Meridian row is partly complete. Fill the missing fields or "
+                "leave the generated placeholder untouched."
+            ),
+        )
+
+    try:
+        _preflight_meridian_template_result(result, index=index)
+        validated = ResearchResultInput.model_validate(result)
+        validated._original_row_number = index
+        _validate_results([validated], imported_at=imported_at)
+    except (ResearchImportError, ValidationError) as exc:
+        return MeridianImportPreviewRow(
+            row_number=index,
+            title=title_text,
+            field_id=checklist_item.field_id if checklist_item is not None else None,
+            label=checklist_item.label if checklist_item is not None else None,
+            status="unsafe_or_incomplete",
+            message=_meridian_preview_error_message(exc),
+        )
+
+    return MeridianImportPreviewRow(
+        row_number=index,
+        title=title_text,
+        field_id=checklist_item.field_id if checklist_item is not None else None,
+        label=checklist_item.label if checklist_item is not None else None,
+        status="import_ready",
+        message="This Meridian row is ready for import preview.",
+    )
+
+
+def _meridian_preview_error_message(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        return f"This Meridian row is incomplete: {_first_validation_detail(exc)}"
+    return str(exc)
+
+
+def _preview_meridian_source_url(result: object) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    source_url = result.get("source_url")
+    if isinstance(source_url, str) and source_url.strip():
+        try:
+            return clean_meridian_url(source_url)
+        except MeridianWorkflowError:
+            return None
+    licensing_notes = result.get("licensing_notes")
+    if isinstance(licensing_notes, str):
+        generated_source_url = _generated_meridian_source_url(licensing_notes)
+        if generated_source_url is not None:
+            try:
+                return clean_meridian_url(generated_source_url)
+            except MeridianWorkflowError:
+                return None
+    return None
 
 
 def _is_blank_template_result(result: object) -> bool:
@@ -961,6 +1162,20 @@ def _load_ingestion_summary(summary_path: Path) -> IngestionSummary:
         raise ResearchImportError(
             "The ingestion summary could not be read. Run `hailmary ingest-folder` again."
         ) from exc
+
+
+def _evaluate_deal_rerun_command(
+    summary: IngestionSummary,
+    *,
+    data_dir: Path,
+) -> str | None:
+    if len(summary.deals) != 1:
+        return None
+    return (
+        "hailmary evaluate-deal "
+        f"{shlex.quote(str(summary.root_path))} "
+        f"--data-dir {shlex.quote(str(data_dir))}"
+    )
 
 
 def _load_evidence_store(path: Path, *, company_name: str) -> EvidenceStore:
