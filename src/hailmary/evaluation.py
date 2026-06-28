@@ -1999,6 +1999,7 @@ def _diligence_queue_export(
             "resolved_count": 0,
             "unresolved_count": 0,
             "queue_path": str(queue_path) if queue_path is not None else None,
+            "triage": {"ran": False, "items": []},
             "questions": [],
         }
     return {
@@ -2007,6 +2008,7 @@ def _diligence_queue_export(
         "resolved_count": queue.resolved_count,
         "unresolved_count": queue.unresolved_count,
         "queue_path": str(queue_path) if queue_path is not None else None,
+        "triage": _diligence_triage_export(queue),
         "questions": [
             {
                 "question_id": question.question_id,
@@ -2021,6 +2023,45 @@ def _diligence_queue_export(
             }
             for question in queue.questions
         ],
+    }
+
+
+def _diligence_triage_export(queue: DiligenceQuestionQueue) -> dict[str, object]:
+    triage = queue.triage
+    if triage is None:
+        return {"ran": False, "items": []}
+    return {
+        "ran": True,
+        "decision_blocker_count": triage.decision_blocker_count,
+        "follow_up_count": triage.follow_up_count,
+        "resolution_counts": {
+            path.value: count for path, count in triage.resolution_counts.items()
+        },
+        "items": [
+            {
+                "triage_id": item.triage_id,
+                "title": item.title,
+                "status": item.status.value,
+                "resolution_path": item.resolution_path.value,
+                "priority": item.priority,
+                "unresolved_question_count": item.unresolved_question_count,
+                "representative_question": item.representative_question,
+                "question_texts": list(item.question_texts),
+                "why_it_matters": item.why_it_matters,
+                "next_step": item.next_step,
+                "question_ids": list(item.question_ids),
+                "evidence_ids": list(item.evidence_ids),
+            }
+            for item in triage.items
+        ],
+        "meridian_email_draft": (
+            {
+                "subject": triage.meridian_email_draft.subject,
+                "question_ids": list(triage.meridian_email_draft.question_ids),
+            }
+            if triage.meridian_email_draft is not None
+            else None
+        ),
     }
 
 
@@ -4103,6 +4144,46 @@ def _diligence_question_queue_memo_lines(
     if not queue.questions:
         lines.append("- No diligence questions were recorded.")
         return lines
+    if queue.triage is not None:
+        triage = queue.triage
+        lines.append(
+            "- Triage: "
+            f"{triage.decision_blocker_count} decision blockers and "
+            f"{triage.follow_up_count} follow-up groups."
+        )
+        triage_rows = [
+            [
+                item.status.value.replace("_", " "),
+                item.title,
+                item.resolution_path.value.replace("_", " "),
+                str(item.unresolved_question_count),
+                item.next_step,
+            ]
+            for item in triage.items[:8]
+        ]
+        if triage_rows:
+            lines.extend(
+                _markdown_table(
+                    ["Status", "Theme", "Resolution path", "Questions", "Next step"],
+                    triage_rows,
+                )
+            )
+        if triage.meridian_email_draft is not None:
+            lines.extend(
+                [
+                    "",
+                    "### Draft Email To AngelList Meridian",
+                    (
+                        f"- Subject: "
+                        f"{_memo_text(triage.meridian_email_draft.subject)}"
+                    ),
+                    "",
+                ]
+            )
+            lines.extend(
+                f"> {_memo_text(line)}"
+                for line in triage.meridian_email_draft.body.splitlines()
+            )
     rows = [
         [
             question.question_id,
