@@ -179,7 +179,7 @@ def test_batch_evaluate_accepts_private_raw_batch_root(
     assert result.allocation_rows[0].company_name == "RawStrongCo"
 
 
-def test_batch_ranks_before_applying_scarce_capital_skips(
+def test_batch_preserves_skipped_research_cap_before_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -209,14 +209,14 @@ def test_batch_ranks_before_applying_scarce_capital_skips(
     )
 
     rows = {row.company_name: row for row in result.allocation_rows}
-    assert rows["HighMinimumCo"].portfolio_rank == 1
+    assert rows["LowerMinimumCo"].portfolio_rank == 1
+    assert rows["LowerMinimumCo"].evaluation_status == "allocated"
+    assert rows["LowerMinimumCo"].batch_check_size == 1_000
+    assert rows["HighMinimumCo"].portfolio_rank == 2
     assert rows["HighMinimumCo"].evaluation_status == "skipped"
     assert rows["HighMinimumCo"].batch_check_size == 0
     assert rows["HighMinimumCo"].skipped_reason is not None
     assert "budget" in rows["HighMinimumCo"].skipped_reason.casefold()
-    assert rows["LowerMinimumCo"].portfolio_rank == 2
-    assert rows["LowerMinimumCo"].evaluation_status == "allocated"
-    assert rows["LowerMinimumCo"].batch_check_size == 1_000
 
 
 def test_batch_evaluate_fails_when_no_child_deal_evaluates(
@@ -430,6 +430,100 @@ def test_batch_allocation_preserves_child_research_context(
     )
 
     assert contexts == ["synthetic-research-context", "synthetic-research-context"]
+    assert rows[0].evaluation_status == "allocated"
+    assert rows[0].batch_check_size == 1_000
+
+
+def test_batch_allocation_preserves_skipped_research_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contexts: list[object] = []
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="SkippedResearchBatchCo",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    scored = ScoredDeal(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        recommendation=Recommendation.INVEST,
+        check_size=1_000,
+        total_score=80,
+        one_line_reason="Synthetic invest score.",
+        capital_remaining_before=10_000,
+        capital_remaining_after=9_000,
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.INVEST,
+        check_size=1_000,
+        reason="Synthetic final recommendation.",
+    )
+    result = DealEvaluationResult(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        evaluation_mode="local-only",
+        mode_explanation="Synthetic test mode.",
+        document_count=1,
+        evidence_count=1,
+        claim_count=0,
+        conflict_count=0,
+        deterministic_score=scored,
+        final_recommendation=final_recommendation,
+        final_output=AgentReviewOutput(
+            deal_id=store.deal_id,
+            company_name=store.company_name,
+            agent_role=AgentRole.FINAL_DECISION,
+            recommendation=final_recommendation,
+        ),
+        specialist_results=[],
+        failed_specialist_roles=[],
+        final_memo_path=tmp_path / "memo.md",
+        final_json_path=tmp_path / "result.json",
+        agent_output_dir=tmp_path / "agent-outputs",
+        ocr_status="OCR was not enabled.",
+    )
+
+    monkeypatch.setattr(
+        batch_module,
+        "_diligence_research_context",
+        lambda research_run: pytest.fail(f"Unexpected research run: {research_run!r}"),
+    )
+    monkeypatch.setattr(
+        batch_module,
+        "_skipped_research_context",
+        lambda: "synthetic-skipped-research-context",
+    )
+    monkeypatch.setattr(
+        batch_module,
+        "_load_actioned_store_for_result",
+        lambda _result, *, config: store,
+    )
+
+    def fake_score_evidence_store(
+        _store: EvidenceStore,
+        **kwargs: object,
+    ) -> ScoredDeal:
+        contexts.append(kwargs.get("research_context"))
+        return scored
+
+    monkeypatch.setattr(batch_module, "score_evidence_store", fake_score_evidence_store)
+
+    rows, _constraints = batch_module._allocate_batch(
+        [
+            BatchDealOutcome(
+                folder=tmp_path / "deal",
+                company_name=store.company_name,
+                result=result,
+            )
+        ],
+        config=AppConfig(data_dir=tmp_path / "data", capital_budget=10_000),
+    )
+
+    assert contexts == [
+        "synthetic-skipped-research-context",
+        "synthetic-skipped-research-context",
+    ]
     assert rows[0].evaluation_status == "allocated"
     assert rows[0].batch_check_size == 1_000
 

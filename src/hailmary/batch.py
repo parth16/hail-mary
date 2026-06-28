@@ -20,13 +20,14 @@ from hailmary.evaluation import (
     DealEvaluationResult,
     EvaluationError,
     _diligence_research_context,
+    _skipped_research_context,
     evaluate_deal_folder,
 )
 from hailmary.evidence.actions import EvidenceActionError, apply_evidence_actions
 from hailmary.portfolio import PortfolioError, portfolio_status
 from hailmary.portfolio.scenario import portfolio_scenario
 from hailmary.schemas.evidence import EvidenceStore
-from hailmary.schemas.scoring import Recommendation, ScoredDeal
+from hailmary.schemas.scoring import DiligenceResearchContext, Recommendation, ScoredDeal
 from hailmary.scoring.portfolio import (
     portfolio_exposure_state_after_score,
     portfolio_exposure_state_from_ledger,
@@ -486,7 +487,7 @@ def _allocate_batch(
             config=config,
             capital_remaining=ranking_capital,
             exposure_state=base_exposure_state,
-            research_context=_diligence_research_context(result.research_run),
+            research_context=_batch_research_context(result),
         )
     ranked_successes = sorted(
         [outcome for outcome in successful_outcomes if outcome.folder in ranking_scores],
@@ -518,7 +519,7 @@ def _allocate_batch(
             config=config,
             capital_remaining=remaining_capital,
             exposure_state=exposure_state,
-            research_context=_diligence_research_context(result.research_run),
+            research_context=_batch_research_context(result),
         )
         if reallocated_score.recommendation == Recommendation.INVEST:
             allocation_sequence += 1
@@ -655,6 +656,14 @@ def _row_from_success(
         capital_after=scored.capital_remaining_after,
         skipped_reason=skipped_reason or "Batch allocation did not select this deal.",
     )
+
+
+def _batch_research_context(
+    result: DealEvaluationResult,
+) -> DiligenceResearchContext | None:
+    if result.research_run is None:
+        return _skipped_research_context()
+    return _diligence_research_context(result.research_run)
 
 
 def _eligible_for_batch_allocation(result: DealEvaluationResult) -> bool:

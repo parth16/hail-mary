@@ -260,6 +260,12 @@ ABSENCE_TRACTION_PATTERNS = (
 BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_INSTITUTIONAL_FOLLOWING_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 BENIGN_FUNDING_CONCERN_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
+CALCULATED_RISK_FUNDING_SIGNAL = (
+    r"(?:lead\s+investor|institutional(?:\s+investors?)?|"
+    r"series\s+a(?:\s+investors?)?|"
+    r"seed(?:\s+(?:round|funding|investors?))?|"
+    r"follow[-\s]?on(?:\s+financing)?)"
+)
 NEGATED_FUNDING_PATTERNS = (
     re.compile(
         r"\b(?:planned|projected|expected|future|upcoming|target|targeted)\s+"
@@ -329,6 +335,48 @@ NEGATED_FUNDING_PATTERNS = (
         r"\bno\s+"
         rf"(?!(?:[\w-]+\s+){{0,4}}{BENIGN_FUNDING_CONCERN_NOUNS}\b)"
         r"(?:\w+\s+){0,3}follow[-\s]?on\b",
+        re.IGNORECASE,
+    ),
+)
+CALCULATED_RISK_NON_CURRENT_FUNDING_PATTERNS = (
+    re.compile(
+        rf"\b(?:planned|projected|expected|future|upcoming|target|targeted)\s+"
+        rf"{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:plans?|planned|planning|targets?|targeting|intends?|expects?)\s+"
+        rf"(?:to\s+)?(?:raise|pursue|seek|close|secure)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:will|would|could|may)\s+(?:raise|pursue|seek|close|secure)\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bnot\s+(?:yet\s+)?ready\s+for\s+"
+        rf"(?:a\s+|an\s+|the\s+)?{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+)
+CALCULATED_RISK_FUNDING_NEGATED_PATTERNS = (
+    *NEGATED_FUNDING_PATTERNS,
+    *CALCULATED_RISK_NON_CURRENT_FUNDING_PATTERNS,
+)
+CALCULATED_RISK_CURRENT_FUNDING_PATTERNS = (
+    re.compile(
+        rf"\b{CALCULATED_RISK_FUNDING_SIGNAL}\b"
+        r"(?:\s+\S+){0,4}\s+"
+        r"(?:active|backed|closed|committed|confirmed|joined|named|"
+        r"participating|secured|signed)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:active|backed|closed|committed|confirmed|named|"
+        r"participating|secured|signed)\s+"
+        rf"(?:\S+\s+){{0,4}}{CALCULATED_RISK_FUNDING_SIGNAL}\b",
         re.IGNORECASE,
     ),
 )
@@ -2880,12 +2928,20 @@ def _positive_calculated_risk_funding_evidence(
     return [
         record
         for record in evidence
+        if _has_current_calculated_risk_funding_support(record.text)
         if _text_contains_positive_keyword(
             record.text,
             CALCULATED_RISK_FUNDING_KEYWORDS,
-            negated_patterns=NEGATED_FUNDING_PATTERNS,
+            negated_patterns=CALCULATED_RISK_FUNDING_NEGATED_PATTERNS,
         )
     ]
+
+
+def _has_current_calculated_risk_funding_support(text: str) -> bool:
+    return any(
+        pattern.search(text) is not None
+        for pattern in CALCULATED_RISK_CURRENT_FUNDING_PATTERNS
+    )
 
 
 def _negative_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceRecord]:

@@ -302,8 +302,8 @@ def render_portfolio_report(
         lines.extend(
             [
                 "| Rank | Company | Recommendation | Check size | Score | Confidence | "
-                "Triggered kill gates | Diligence questions | Budget before | Budget after |",
-                "| ---: | --- | --- | ---: | ---: | --- | --- | ---: | ---: | ---: |",
+                "Hard blockers | Risk gaps | Diligence questions | Budget before | Budget after |",
+                "| ---: | --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: |",
             ]
         )
         for rank, deal in enumerate(ranked_deals, start=1):
@@ -315,7 +315,8 @@ def render_portfolio_report(
                 f"{_format_check_size(deal.check_size)} | "
                 f"{deal.total_score}/{deal.max_score} | "
                 f"{_memo_metadata_value(str(deal.confidence))} | "
-                f"{_triggered_gate_summary(deal)} | "
+                f"{_hard_blocker_summary(deal)} | "
+                f"{_risk_gap_summary(deal)} | "
                 f"{len(deal.diligence_questions)} | "
                 f"{_optional_check_size(deal.capital_remaining_before)} | "
                 f"{_optional_check_size(deal.capital_remaining_after)} |"
@@ -373,8 +374,20 @@ def render_portfolio_report(
         for risk in _portfolio_key_risk_lines(deal):
             lines.append(f"  - {risk}")
 
-        lines.append("- Kill gates:")
-        for gate in deal.kill_gates:
+        lines.append("- Hard blockers:")
+        for gate in (candidate for candidate in deal.kill_gates if candidate.force_pass):
+            status = "TRIGGERED" if gate.triggered else "Clear"
+            lineage_label = "NEEDS_DILIGENCE" if gate.triggered else "INFERRED"
+            lines.append(
+                "  - "
+                f"{status} ({lineage_label}): {_memo_metadata_value(gate.name)}. "
+                f"{_memo_metadata_value(gate.reason)}"
+            )
+
+        lines.append(f"- {_risk_gap_plural_label(deal)}:")
+        for gate in (
+            candidate for candidate in deal.kill_gates if not candidate.force_pass
+        ):
             status = "TRIGGERED" if gate.triggered else "Clear"
             lineage_label = "NEEDS_DILIGENCE" if gate.triggered else "INFERRED"
             lines.append(
@@ -471,17 +484,32 @@ def _optional_check_size(check_size: int | None) -> str:
     return _format_check_size(check_size)
 
 
-def _triggered_gate_summary(deal: ScoredDeal) -> str:
-    if not deal.triggered_kill_gates:
+def _hard_blocker_summary(deal: ScoredDeal) -> str:
+    if not deal.triggered_hard_blockers:
         return "None"
-    return "; ".join(_memo_metadata_value(gate.name) for gate in deal.triggered_kill_gates)
+    return "; ".join(
+        _memo_metadata_value(gate.name) for gate in deal.triggered_hard_blockers
+    )
+
+
+def _risk_gap_summary(deal: ScoredDeal) -> str:
+    if not deal.triggered_risk_gaps:
+        return "None"
+    return "; ".join(_memo_metadata_value(gate.name) for gate in deal.triggered_risk_gaps)
 
 
 def _portfolio_key_risk_lines(deal: ScoredDeal) -> list[str]:
     risks: list[str] = []
-    for gate in deal.triggered_kill_gates:
+    for gate in deal.triggered_hard_blockers:
         risks.append(
             "NEEDS_DILIGENCE: "
+            f"{_memo_metadata_value(gate.name)}. {_memo_metadata_value(gate.reason)}"
+            f"{_portfolio_evidence_text(gate.evidence_ids)}"
+        )
+    gap_label = _risk_gap_plural_label(deal)
+    for gate in deal.triggered_risk_gaps:
+        risks.append(
+            f"{gap_label}: "
             f"{_memo_metadata_value(gate.name)}. {_memo_metadata_value(gate.reason)}"
             f"{_portfolio_evidence_text(gate.evidence_ids)}"
         )

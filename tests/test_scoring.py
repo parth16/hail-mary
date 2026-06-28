@@ -310,6 +310,47 @@ def test_score_evidence_store_requires_business_signal_for_calculated_risk() -> 
     )
 
 
+@pytest.mark.parametrize(
+    "funding_text",
+    [
+        "The company plans to raise a seed round.",
+        "The company is not ready for Series A.",
+    ],
+)
+def test_score_evidence_store_requires_current_funding_for_calculated_risk_signal(
+    funding_text: str,
+) -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. Pre-seed company. "
+            "Investor ownership target 1%. Estimated dilution 20%. Platform fee 5%. "
+            "Carry 20%. Gross exit value $1B.",
+        ),
+        _evidence("ev_category", "Category: synthetic software."),
+        _evidence("ev_future_funding", funding_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert 60 <= scored.total_score < 75
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert not scored.calculated_risk
+    assert (
+        "source-linked traction, customer, usage, pilot, or funding support"
+        in scored.one_line_reason
+    )
+
+
 def test_score_evidence_store_clears_calculated_risk_when_no_check_tier_fits() -> None:
     evidence = [
         _evidence(
@@ -3864,6 +3905,42 @@ def test_render_portfolio_report_labels_risks_with_evidence_or_uncertainty() -> 
         "NEEDS_DILIGENCE: Find concrete customer, revenue, retention, or usage evidence"
         in report
     )
+
+
+def test_render_portfolio_report_separates_hard_blockers_from_risk_gaps() -> None:
+    evidence = [
+        _evidence(
+            "ev_all",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_all"),
+        _claim("discount", "20%", "ev_all"),
+        _claim("round size", "$1M", "ev_all"),
+    ]
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+        research_context=DiligenceResearchContext(
+            planned_task_count=1,
+            imported_record_count=0,
+            not_run_provider_count=1,
+        ),
+    )
+
+    report = render_portfolio_report([scored], config=AppConfig(data_dir=Path("data")))
+
+    assert scored.recommendation == Recommendation.INVEST
+    assert "Hard blockers | Risk gaps" in report
+    assert "None | External research incomplete" in report
+    assert "- Calculated-Risk Gaps:" in report
+    assert "TRIGGERED (NEEDS_DILIGENCE): External research incomplete" in report
+    hard_blocker_section = report.split("- Hard blockers:", 1)[1].split(
+        "- Calculated-Risk Gaps:",
+        1,
+    )[0]
+    assert "External research incomplete" not in hard_blocker_section
 
 
 def test_render_portfolio_report_filters_allowed_check_sizes_by_config() -> None:
