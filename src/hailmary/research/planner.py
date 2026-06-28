@@ -20,6 +20,7 @@ from .schemas import (
     ResearchProviderCategory,
     ResearchTask,
     ResearchTaskStatus,
+    research_topics_for_provider,
 )
 
 
@@ -247,15 +248,7 @@ def _build_tasks(
 
 
 def _provider_topics(provider_id: str) -> tuple[str, ...]:
-    if provider_id == "public_web":
-        return ("market", "competition", "industry")
-    if provider_id in {"sec_form_d", "usaspending", "sbir", "sam_gov"}:
-        return ("funding",)
-    if provider_id == "uspto":
-        return ("legal",)
-    if provider_id == "github":
-        return ("traction",)
-    return ("company",)
+    return research_topics_for_provider(provider_id)
 
 
 def _task_status(

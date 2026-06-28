@@ -38,6 +38,36 @@ BUILTIN_RESEARCH_PROVIDER_SOURCE_KINDS: dict[str, SourceKind] = {
     "cb_insights": SourceKind.WEB,
 }
 
+BUILTIN_RESEARCH_PROVIDER_TOPICS: dict[str, tuple[str, ...]] = {
+    "public_web": ("market", "competition", "industry"),
+    "sec_form_d": ("funding",),
+    "usaspending": ("funding",),
+    "sbir": ("funding",),
+    "sam_gov": ("funding",),
+    "uspto": ("legal",),
+    "github": ("traction",),
+}
+
+
+def research_topics_for_provider(provider_id: str) -> tuple[str, ...]:
+    return BUILTIN_RESEARCH_PROVIDER_TOPICS.get(provider_id.strip(), ("company",))
+
+
+def default_research_topic_for_provider(provider_id: str) -> str:
+    return research_topics_for_provider(provider_id)[0]
+
+
+def resolved_research_result_topics(provider_id: str, research_topic: str) -> set[str]:
+    topic = research_topic.strip().casefold() or "company"
+    if provider_id.strip() == "public_web" and topic == "company":
+        return set(research_topics_for_provider("public_web"))
+    if topic != "company":
+        return {topic}
+    default_topic = default_research_topic_for_provider(provider_id)
+    if default_topic != "company":
+        return {topic, default_topic}
+    return {topic}
+
 
 class ResearchProviderCategory(StrEnum):
     FREE_PUBLIC = "free_public"
@@ -245,6 +275,19 @@ class ResearchResultInput(BaseModel):
             raise ValueError("Each research result needs a deal_id or company_name.")
         if self.source_url is None and self.source_api is None:
             raise ValueError("Each research result needs a source_url or source_api.")
+        provider_id = self.provider_id.strip()
+        topic = self.research_topic.strip().casefold()
+        allowed_topics = set(research_topics_for_provider(provider_id))
+        if provider_id in BUILTIN_RESEARCH_PROVIDER_SOURCE_KINDS:
+            legacy_allowed_topics = allowed_topics | {"company"}
+            if topic not in legacy_allowed_topics:
+                allowed_text = ", ".join(sorted(legacy_allowed_topics))
+                raise ValueError(
+                    f"provider_id {provider_id} research_topic must be one of: "
+                    f"{allowed_text}."
+                )
+        self.provider_id = provider_id
+        self.research_topic = topic
         return self
 
 

@@ -2815,6 +2815,15 @@ def _one_line_reason(
     )
     if recommendation == Recommendation.PASS and total_score < score_floor:
         return f"Passed because the score was {total_score}/100, below the investment bar."
+    if (
+        recommendation == Recommendation.PASS
+        and calculated_risk_mode
+        and total_score < INVEST_MINIMUM_SCORE
+    ):
+        return (
+            "Passed because calculated-risk mode needs source-linked traction, "
+            "customer, usage, pilot, or funding support for a 60-74 score."
+        )
     if recommendation == Recommendation.PASS and risk_gaps:
         return f"Passed because {risk_gaps[0].reason}"
     if recommendation == Recommendation.PASS:

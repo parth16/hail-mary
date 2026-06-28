@@ -695,11 +695,15 @@ def test_evaluate_deal_research_statuses_preserve_provider_topics(
     import_summary = ResearchImportRunSummary(
         input_path=tmp_path / "research-results.json",
         imported_at=datetime(2026, 1, 2, tzinfo=UTC),
-        provider_imported_counts={"public_web": 1},
+        provider_imported_counts={"public_web": 1, "sec_form_d": 1},
         provider_topic_imported_counts={
-            "public_web": {"company": 1}
+            "public_web": {"company": 1},
+            "sec_form_d": {"company": 1},
         },
-        provider_names={"public_web": "Public web and press search"},
+        provider_names={
+            "public_web": "Public web and press search",
+            "sec_form_d": "SEC Form D",
+        },
         deals=[
             ResearchImportDealSummary(
                 deal_id="deal-1",
@@ -722,6 +726,7 @@ def test_evaluate_deal_research_statuses_preserve_provider_topics(
     assert statuses[("public_web", "market")]["imported_count"] == 1
     assert statuses[("public_web", "competition")]["imported_count"] == 1
     assert statuses[("public_web", "industry")]["imported_count"] == 1
+    assert statuses[("sec_form_d", "funding")]["imported_count"] == 1
 
     scored_deal = ScoredDeal(
         deal_id="deal-1",
@@ -2759,6 +2764,27 @@ def test_deterministic_pass_explanation_prefers_score_floor_over_soft_gap() -> N
 
     assert "score 50/100 was below the 60/100 investment bar" in explanation
     assert "calculated-risk gap" not in explanation
+
+
+def test_deterministic_pass_explanation_names_missing_calculated_risk_signal() -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="MissingSignalCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=65,
+        calculated_risk_mode=True,
+        one_line_reason=(
+            "Passed because calculated-risk mode needs source-linked traction."
+        ),
+    )
+
+    explanation = evaluation._deterministic_pass_explanation(scored_deal)
+
+    assert "source-linked traction, customer, usage, pilot, or funding support" in (
+        explanation
+    )
+    assert "investment bar" not in explanation
 
 
 def test_evaluate_deal_cli_commentary_separates_check_size_caps_from_overrides(

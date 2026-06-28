@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 import hailmary.cli as cli_module
@@ -145,6 +146,27 @@ def test_research_result_source_kind_defaults_match_builtin_registry() -> None:
         result = ResearchResultInput.model_validate(payload)
 
         assert result.source_kind == provider.source_kind
+
+
+def test_research_result_rejects_unknown_builtin_topic() -> None:
+    payload = {
+        **_research_result(provider_id="sec_form_d"),
+        "research_topic": "fundng",
+    }
+
+    with pytest.raises(ValidationError, match="research_topic must be one of"):
+        ResearchResultInput.model_validate(payload)
+
+
+def test_research_result_accepts_legacy_company_topic_for_builtin() -> None:
+    payload = {
+        **_research_result(provider_id="github"),
+        "research_topic": "company",
+    }
+
+    result = ResearchResultInput.model_validate(payload)
+
+    assert result.research_topic == "company"
 
 
 def test_company_match_classifies_exact_related_likely_and_rejected() -> None:

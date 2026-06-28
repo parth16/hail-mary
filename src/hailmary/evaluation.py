@@ -70,6 +70,7 @@ from hailmary.research import (
     research_quality_status,
     run_research_workflow,
 )
+from hailmary.research.schemas import resolved_research_result_topics
 from hailmary.research.web import WebResearchClient
 from hailmary.schemas.agents import (
     AgentCommitteeContext,
@@ -3015,6 +3016,14 @@ def _deterministic_pass_explanation(scored_deal: ScoredDeal) -> str:
     )
     if scored_deal.total_score < score_floor:
         return f"score {scored_deal.total_score}/100 was below the {score_floor}/100 investment bar"
+    if (
+        scored_deal.calculated_risk_mode
+        and scored_deal.total_score < INVEST_MINIMUM_SCORE
+    ):
+        return (
+            "calculated-risk mode needs source-linked traction, customer, usage, "
+            "pilot, or funding support for a 60-74 score"
+        )
     if scored_deal.triggered_risk_gaps:
         gate = scored_deal.triggered_risk_gaps[0]
         gap_kind = _risk_gap_label(scored_deal)
@@ -3532,12 +3541,7 @@ def _provider_topic_import_counts(
 
 
 def _evaluation_import_topics(provider_id: str, research_topic: str) -> set[str]:
-    if (
-        provider_id.strip() == "public_web"
-        and research_topic.strip().casefold() == "company"
-    ):
-        return {"market", "competition", "industry"}
-    return {research_topic.strip().casefold() or "company"}
+    return resolved_research_result_topics(provider_id, research_topic)
 
 
 def _merge_imported_research_status(

@@ -298,6 +298,9 @@ def test_score_evidence_store_requires_business_signal_for_calculated_risk() -> 
     assert scored.recommendation == Recommendation.PASS
     assert scored.check_size == 0
     assert scored.calculated_risk is False
+    assert "calculated-risk mode needs source-linked traction" in (
+        scored.one_line_reason
+    )
     assert "Calculated-risk score range needs source-linked traction" in skip_reason(
         scored
     )

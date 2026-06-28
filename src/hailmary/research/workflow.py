@@ -47,6 +47,8 @@ from .schemas import (
     ResearchResultsFile,
     ResearchTask,
     ResearchTaskStatus,
+    default_research_topic_for_provider,
+    resolved_research_result_topics,
 )
 from .templates import prepare_research_results_template
 from .web import WebResearchClient, WebResearchTaskSummary, collect_web_research
@@ -1594,27 +1596,11 @@ def _resolved_research_result_topics(
     provider_id: str,
     research_topic: str,
 ) -> set[str]:
-    topics = {research_topic}
-    normalized_topic = research_topic.strip().casefold()
-    if provider_id == "public_web" and normalized_topic == "company":
-        topics.update({"market", "competition", "industry"})
-        return topics
-    if normalized_topic != "company":
-        return topics
-    default_topic = _single_provider_default_research_topic(provider_id)
-    if default_topic != "company":
-        topics.add(default_topic)
-    return topics
+    return resolved_research_result_topics(provider_id, research_topic)
 
 
 def _single_provider_default_research_topic(provider_id: str) -> str:
-    if provider_id in {"sec_form_d", "usaspending", "sbir", "sam_gov"}:
-        return "funding"
-    if provider_id == "uspto":
-        return "legal"
-    if provider_id == "github":
-        return "traction"
-    return "company"
+    return default_research_topic_for_provider(provider_id)
 
 
 def _research_result_key(
