@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from hailmary.batch import (
 )
 from hailmary.cli import app
 from hailmary.config import AppConfig
+from hailmary.evaluation import DealEvaluationResult
+from hailmary.schemas.evidence import EvidenceStore
 from hailmary.schemas.scoring import Recommendation
 
 runner = CliRunner()
@@ -222,7 +225,7 @@ def test_batch_evaluate_fails_when_no_child_deal_evaluates(
         broken_dir.mkdir(parents=True)
         (broken_dir / "malformed.bin").write_bytes(b"\x00synthetic unsupported input")
 
-    with pytest.raises(BatchEvaluationError, match="No deal could be evaluated"):
+    with pytest.raises(BatchEvaluationError, match="BrokenOne.*BrokenTwo"):
         batch_evaluate_folder(
             root,
             config=AppConfig(
@@ -263,6 +266,8 @@ def test_batch_evaluate_cli_fails_when_no_child_deal_evaluates(
 
     assert result.exit_code == 1
     assert "No deal could be evaluated successfully" in result.output
+    assert "BrokenOne" in result.output
+    assert "BrokenTwo" in result.output
     assert "Batch evaluation complete" not in result.output
 
 
@@ -290,6 +295,125 @@ def test_batch_evaluate_fails_when_all_allocation_rows_fail(
             run_research=False,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
+
+
+def test_batch_counts_allocation_stage_failures_in_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "allocation-mixed"
+    _write_deal(root, "ActionFailureCo", _strong_investable_text())
+    _write_deal(root, "HealthyCo", _strong_investable_text())
+    original_loader = batch_module._load_actioned_store_for_result
+
+    def fail_one_store_load(
+        result: DealEvaluationResult,
+        *,
+        config: AppConfig,
+    ) -> EvidenceStore:
+        if result.company_name == "ActionFailureCo":
+            raise BatchEvaluationError("Synthetic allocation reload failure.")
+        return original_loader(result, config=config)
+
+    monkeypatch.setattr(
+        batch_module,
+        "_load_actioned_store_for_result",
+        fail_one_store_load,
+    )
+
+    result = batch_evaluate_folder(
+        root,
+        config=AppConfig(
+            data_dir=tmp_path / "private-data",
+            local_only=True,
+            capital_budget=2_000,
+        ),
+        max_concurrency=1,
+        run_research=False,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert result.deal_count == 2
+    assert result.evaluated_count == 1
+    assert result.failed_count == 1
+    rows = {row.company_name: row for row in result.allocation_rows}
+    assert rows["ActionFailureCo"].evaluation_status == "failed"
+    assert rows["HealthyCo"].evaluation_status == "allocated"
+
+
+def test_batch_rejects_symlinked_parent_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    real_parent = tmp_path / "real-parent"
+    deals_root = real_parent / "deals"
+    _write_deal(deals_root, "StrongCo", _strong_investable_text())
+    symlink_parent = tmp_path / "linked-parent"
+    try:
+        symlink_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Symlinks are not available in this environment: {exc}")
+
+    with pytest.raises(BatchEvaluationError, match="symlinked parent"):
+        batch_evaluate_folder(
+            symlink_parent / "deals",
+            config=AppConfig(
+                data_dir=tmp_path / "private-data",
+                local_only=True,
+            ),
+            max_concurrency=1,
+            run_research=False,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+
+def test_batch_final_pass_rows_report_final_pass_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "final-pass-row"
+    folder = _write_deal(root, "StrongCo", _strong_investable_text())
+
+    result = batch_evaluate_folder(
+        root,
+        config=AppConfig(
+            data_dir=tmp_path / "private-data",
+            local_only=True,
+            capital_budget=1_000,
+        ),
+        max_concurrency=1,
+        run_research=False,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    original_row = next(row for row in result.allocation_rows if row.company_name == "StrongCo")
+    assert original_row.final_recommendation == Recommendation.INVEST
+    evaluation_result = next(outcome.result for outcome in result.outcomes if outcome.result)
+    final_pass = evaluation_result.final_recommendation.model_copy(
+        update={
+            "recommendation": Recommendation.PASS,
+            "check_size": 0,
+            "reason": "Final review found a blocking source-linked risk.",
+        }
+    )
+    overridden_result = replace(evaluation_result, final_recommendation=final_pass)
+
+    row = batch_module._row_from_success(
+        BatchDealOutcome(
+            folder=folder,
+            company_name="StrongCo",
+            result=overridden_result,
+        ),
+        portfolio_rank=1,
+        ranking_score=overridden_result.deterministic_score,
+    )
+
+    assert row.skipped_reason == "Final recommendation was PASS."
+    assert row.key_blockers == [
+        "Final PASS: review the child memo for the cited final-decision blocker."
+    ]
 
 
 def test_batch_markdown_report_escapes_untrusted_html_delimiters() -> None:

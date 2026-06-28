@@ -6375,6 +6375,49 @@ def test_run_research_workflow_clears_meridian_fields_resolved_by_supplied_resul
     assert "Valuation or valuation cap" in unresolved_labels
 
 
+def test_run_research_workflow_keeps_meridian_fields_unresolved_for_failed_preview(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    meridian_results_path = tmp_path / "meridian-results-wrong-company.json"
+    _write_results(
+        meridian_results_path,
+        [
+            _research_result(
+                company_name="Different Company",
+                provider_id="meridian",
+                provider_name="Meridian deal page",
+                title="Meridian: Company name",
+                text="Acme AI is the company name shown on the Meridian deal page.",
+                retrieved_at="2025-12-31T12:00:00Z",
+                source_url="https://portal.angellist.com/m/example/invest",
+                source_kind="meridian",
+                document_type="platform_deal_page",
+                confidence="high: exact short page excerpt",
+                licensing_notes=(
+                    "Authenticated portal permits saving this short fact. "
+                    f"{MERIDIAN_WORKFLOW_TEMPLATE_MARKER} "
+                    f"{MERIDIAN_WORKFLOW_PLACEHOLDER_MARKER} "
+                    f"{MERIDIAN_WORKFLOW_SOURCE_URL_MARKER_PREFIX}"
+                    "https://portal.angellist.com/m/example/invest"
+                ),
+            )
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        meridian_url="https://portal.angellist.com/m/example/invest",
+        results_files=[meridian_results_path],
+        created_at=BUILT_AT,
+    )
+
+    unresolved_labels = [field.label for field in result.meridian_unresolved_fields]
+    assert "Company name" in unresolved_labels
+    assert any(issue.severity == "error" for issue in result.issues)
+
+
 def test_import_research_results_skips_legacy_meridian_placeholder_confidence(
     tmp_path: Path,
 ) -> None:
@@ -8172,6 +8215,38 @@ def test_import_research_results_returns_quoted_evaluate_deal_handoff(
     ]
     assert shlex.quote(str(root)) in result.evaluate_deal_command
     assert shlex.quote(str(data_dir)) in result.evaluate_deal_command
+
+
+def test_import_research_results_handoff_uses_absolute_data_dir_for_relative_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "pitch-decks"
+    company = root / "Acme AI"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text("Valuation cap $8M.", encoding="utf-8")
+    config = AppConfig(data_dir=Path("data"))
+    ingest_folder(root, config=config)
+    results_path = tmp_path / "research-results.json"
+    _write_results(results_path, [_research_result(company_name="Acme AI")])
+
+    result = import_research_results(
+        config=config,
+        results_path=results_path,
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        dry_run=True,
+    )
+
+    assert result.evaluate_deal_command is not None
+    command_parts = shlex.split(result.evaluate_deal_command)
+    assert command_parts == [
+        "hailmary",
+        "evaluate-deal",
+        str(root),
+        "--data-dir",
+        str((tmp_path / "data").resolve(strict=False)),
+    ]
 
 
 def test_import_research_results_command_dry_run_has_plain_english_preview(

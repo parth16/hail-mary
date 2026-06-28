@@ -116,10 +116,16 @@ class BatchEvaluationResult:
 
     @property
     def evaluated_count(self) -> int:
+        if self.allocation_rows:
+            return sum(
+                1 for row in self.allocation_rows if row.evaluation_status != "failed"
+            )
         return sum(1 for outcome in self.outcomes if outcome.succeeded)
 
     @property
     def failed_count(self) -> int:
+        if self.allocation_rows:
+            return sum(1 for row in self.allocation_rows if row.evaluation_status == "failed")
         return sum(1 for outcome in self.outcomes if not outcome.succeeded)
 
     @property
@@ -213,17 +219,11 @@ def batch_evaluate_folder(
             )
         )
     if not any(outcome.succeeded for outcome in outcomes):
-        raise BatchEvaluationError(
-            "No deal could be evaluated successfully. Fix the per-deal failures "
-            "and run batch-evaluate again."
-        )
+        raise BatchEvaluationError(_all_failed_batch_message(outcomes))
 
     rows, constraints = _allocate_batch(outcomes, config=config)
     if not any(row.evaluation_status != "failed" for row in rows):
-        raise BatchEvaluationError(
-            "No deal could be evaluated successfully. Fix the per-deal failures "
-            "and run batch-evaluate again."
-        )
+        raise BatchEvaluationError(_all_failed_batch_message(outcomes, rows=rows))
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir, description="batch report")
     run_slug = slugify(root.name) or "batch"
@@ -644,7 +644,7 @@ def _row_from_success(
         score=ranking_score.total_score,
         max_score=ranking_score.max_score,
         confidence=ranking_score.confidence.value,
-        key_blockers=_key_blockers(scored),
+        key_blockers=_row_key_blockers(result, scored),
         memo_path=result.final_memo_path,
         json_path=result.final_json_path,
         portfolio_rank=portfolio_rank,
@@ -661,6 +661,17 @@ def _eligible_for_batch_allocation(result: DealEvaluationResult) -> bool:
         and result.deterministic_score.recommendation == Recommendation.INVEST
         and result.deterministic_score.check_size > 0
     )
+
+
+def _row_key_blockers(result: DealEvaluationResult, scored: ScoredDeal) -> list[str]:
+    if (
+        result.final_recommendation.recommendation == Recommendation.PASS
+        and scored.recommendation == Recommendation.INVEST
+    ):
+        return [
+            "Final PASS: review the child memo for the cited final-decision blocker."
+        ]
+    return _key_blockers(scored)
 
 
 def _load_actioned_store_for_result(
@@ -709,12 +720,52 @@ def _resolve_batch_root(root_folder: Path) -> Path:
     absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
     if absolute.is_symlink():
         raise BatchEvaluationError("The batch root folder cannot be a symlink.")
+    for parent in absolute.parents:
+        if parent.is_symlink():
+            raise BatchEvaluationError(
+                f"Hail Mary cannot read {root_folder} because {parent} is a "
+                "symlinked parent folder."
+            )
     resolved = absolute.resolve(strict=False)
     if not resolved.exists():
         raise BatchEvaluationError(f"The batch root folder does not exist: {root_folder}")
     if not resolved.is_dir():
         raise BatchEvaluationError(f"This is not a folder: {root_folder}")
     return resolved
+
+
+def _all_failed_batch_message(
+    outcomes: Sequence[BatchDealOutcome],
+    *,
+    rows: Sequence[BatchAllocationRow] = (),
+) -> str:
+    failures: list[tuple[str, str]] = []
+    for outcome in outcomes:
+        if outcome.succeeded:
+            continue
+        failures.append(
+            (
+                outcome.company_name or outcome.folder.name,
+                outcome.failure_reason or "The deal evaluation failed.",
+            )
+        )
+    for row in rows:
+        if row.evaluation_status != "failed":
+            continue
+        key = (row.company_name, row.failure_reason or "The deal evaluation failed.")
+        if key not in failures:
+            failures.append(key)
+
+    details = []
+    for company_name, reason in failures[:5]:
+        details.append(f"{company_name}: {' '.join(reason.split())}")
+    if len(failures) > 5:
+        details.append(f"{len(failures) - 5} more failed deal folders")
+    detail_text = f" Per-deal failures: {'; '.join(details)}." if details else ""
+    return (
+        "No deal could be evaluated successfully. Fix the per-deal failures "
+        f"and run batch-evaluate again.{detail_text}"
+    )
 
 
 def _discover_deal_folders(root: Path, *, config: AppConfig) -> list[Path]:
