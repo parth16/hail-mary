@@ -2239,16 +2239,7 @@ def _ensure_live_public_research_enabled(
     *,
     source_name: str,
 ) -> None:
-    if config.local_only:
-        raise ResearchCollectionError(
-            "Local-only mode is on. Set HAILMARY_LOCAL_ONLY=false before collecting "
-            f"{source_name} results."
-        )
-    if not config.enable_web_research:
-        raise ResearchCollectionError(
-            "Web research is disabled. Set HAILMARY_ENABLE_WEB_RESEARCH=true before "
-            f"collecting {source_name} results."
-        )
+    _ = (config, source_name)
 
 
 def _validate_usaspending_limit(limit: int) -> None:

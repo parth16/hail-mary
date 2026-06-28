@@ -425,15 +425,7 @@ class _FetchedPage:
 
 
 def _ensure_web_research_enabled(config: AppConfig) -> None:
-    if config.local_only:
-        raise WebResearchError(
-            "Local-only mode is on. Set HAILMARY_LOCAL_ONLY=false before collecting web research."
-        )
-    if not config.enable_web_research:
-        raise WebResearchError(
-            "Web research is disabled. Set HAILMARY_ENABLE_WEB_RESEARCH=true before "
-            "collecting web research."
-        )
+    _ = config
 
 
 def _task_fetch_eligibility(task: ResearchTask) -> str | None:

@@ -26,7 +26,7 @@ class AppConfig(BaseModel):
     """Runtime settings for local Hail Mary commands."""
 
     data_dir: Path = Field(default=Path("./data"))
-    local_only: bool = True
+    local_only: bool = False
     log_level: str = "INFO"
     capital_budget: int = 100_000
     min_check: int = 1_000
@@ -45,7 +45,7 @@ class AppConfig(BaseModel):
     max_high_confidence_exposure_percent: Decimal = Field(default=Decimal("0"))
     meridian_profile_dir: Path = Field(default=Path("./data/browser-profiles/meridian"))
     enable_ocr: bool = False
-    enable_web_research: bool = False
+    enable_web_research: bool = True
     enabled_paid_providers: tuple[str, ...] = Field(default_factory=tuple)
     mock_llm: bool = True
     llm_specialist_token_budget: int | None = None
@@ -220,23 +220,13 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
     else:
         raw_data_dir = Path(saved_values.get("data_dir", "./data"))
     resolved_data_dir = _expand_project_path(raw_data_dir)
-    local_only = (
-        _env_bool("HAILMARY_LOCAL_ONLY", True)
-        if "HAILMARY_LOCAL_ONLY" in os.environ
-        else _config_bool(saved_values, "local_only", True)
-    )
-    enable_web_research = (
-        _env_bool("HAILMARY_ENABLE_WEB_RESEARCH", False)
-        if "HAILMARY_ENABLE_WEB_RESEARCH" in os.environ
-        else _config_bool(saved_values, "enable_web_research", False)
-    )
+    local_only = False
+    enable_web_research = True
     enable_ocr = (
         _env_bool("HAILMARY_ENABLE_OCR", False)
         if "HAILMARY_ENABLE_OCR" in os.environ
         else _config_bool(saved_values, "enable_ocr", False)
     )
-    if local_only:
-        enable_web_research = False
     mock_llm = (
         _env_bool("HAILMARY_MOCK_LLM", True)
         if "HAILMARY_MOCK_LLM" in os.environ
@@ -577,9 +567,7 @@ def _expand_config_paths(config: AppConfig) -> AppConfig:
         update={
             "data_dir": _expand_project_path(config.data_dir),
             "meridian_profile_dir": _expand_project_path(meridian_profile_dir),
-            "enable_web_research": (
-                False if config.local_only else config.enable_web_research
-            ),
+            "enable_web_research": True,
         }
     )
 

@@ -1090,7 +1090,7 @@ def test_invalid_boolean_env_value_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "treu")
+    monkeypatch.setenv("HAILMARY_ENABLE_OCR", "treu")
 
     with pytest.raises(ConfigError, match="must be true or false"):
         load_config()
@@ -1120,17 +1120,17 @@ def test_numeric_env_value_overrides_invalid_saved_config(
     assert config.max_check == 7500
 
 
-def test_local_only_disables_web_research_env(
+def test_web_research_ignores_legacy_env_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "true")
-    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "false")
 
     config = load_config()
 
-    assert config.local_only is True
-    assert config.enable_web_research is False
+    assert config.local_only is False
+    assert config.enable_web_research is True
 
 
 def test_enable_ocr_env_is_local_and_independent_of_web_research(
@@ -1143,9 +1143,9 @@ def test_enable_ocr_env_is_local_and_independent_of_web_research(
 
     config = load_config()
 
-    assert config.local_only is True
+    assert config.local_only is False
     assert config.enable_ocr is True
-    assert config.enable_web_research is False
+    assert config.enable_web_research is True
 
 
 def test_enable_ocr_env_overrides_saved_config(
@@ -1162,7 +1162,7 @@ def test_enable_ocr_env_overrides_saved_config(
     assert config.enable_ocr is False
 
 
-def test_local_only_disables_web_research_saved_config(
+def test_web_research_ignores_legacy_saved_config_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -1175,11 +1175,11 @@ def test_local_only_disables_web_research_saved_config(
 
     config = load_config()
 
-    assert config.local_only is True
-    assert config.enable_web_research is False
+    assert config.local_only is False
+    assert config.enable_web_research is True
 
 
-def test_init_persists_web_research_off_in_local_only_mode(
+def test_init_persists_web_research_on_even_with_legacy_local_only_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -1194,7 +1194,8 @@ def test_init_persists_web_research_off_in_local_only_mode(
     )
 
     config_text = (tmp_path / ".hailmary" / "config.yaml").read_text(encoding="utf-8")
-    assert "enable_web_research: false" in config_text
+    assert "local_only: true" in config_text
+    assert "enable_web_research: true" in config_text
 
 
 def test_local_state_rejects_file_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

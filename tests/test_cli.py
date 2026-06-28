@@ -429,7 +429,7 @@ def test_evaluate_deal_local_only_cli_prints_safe_run_summary(
     assert "What stood out positively" in normalized_output
     assert "Key risks" in normalized_output
     assert "Decisive factor" in normalized_output
-    assert "Local-only mode was used" in normalized_output
+    assert "Model review was skipped because HAILMARY_MOCK_LLM is true" in normalized_output
     assert "rule-based scoring" in normalized_output
     assert "Documents ingested" in normalized_output
     assert "Evidence records" in normalized_output
@@ -648,7 +648,7 @@ def test_invalid_boolean_env_has_plain_english_error(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "treu")
+    monkeypatch.setenv("HAILMARY_ENABLE_OCR", "treu")
 
     result = runner.invoke(app, ["init", "--data-dir", str(tmp_path / "data")])
 
@@ -725,7 +725,8 @@ def test_init_force_recovers_invalid_saved_config(
     assert "Created local config" in result.output
     config_text = (config_dir / "config.yaml").read_text(encoding="utf-8")
     assert 'data_dir: "local-data"' in config_text
-    assert "local_only: true" in config_text
+    assert "local_only: false" in config_text
+    assert "enable_web_research: true" in config_text
 
 
 def test_ingest_folder_unsafe_data_dir_has_plain_english_error(

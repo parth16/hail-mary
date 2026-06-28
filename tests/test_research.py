@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 import hailmary.cli as cli_module
 import hailmary.research.collection as collection_module
+import hailmary.research.workflow as workflow_module
 from hailmary.agents.packets import build_agent_input_packet
 from hailmary.cli import app
 from hailmary.config import AppConfig
@@ -401,6 +402,7 @@ def test_paid_provider_collection_respects_local_only_gate(
         collect_paid_research_results(
             config=AppConfig(
                 data_dir=tmp_path / "data",
+                local_only=True,
                 enabled_paid_providers=("crunchbase",),
             ),
             company_names=["Acme AI"],
@@ -713,7 +715,9 @@ def test_research_workflow_does_not_call_paid_clients_in_local_only_mode(
 ) -> None:
     monkeypatch.setenv("CRUNCHBASE_API_KEY", "synthetic-test-key")
     config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
-    config = config.model_copy(update={"enabled_paid_providers": ("crunchbase",)})
+    config = config.model_copy(
+        update={"local_only": True, "enabled_paid_providers": ("crunchbase",)}
+    )
     client = _FakePaidProviderClient(
         provider_id="crunchbase",
         facts=[_paid_fact(company_name="Acme AI")],
@@ -777,6 +781,7 @@ def test_research_workflow_command_creates_artifacts_and_reports_status(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data"
+    monkeypatch.setattr(workflow_module, "_run_live_collectors", lambda **_kwargs: [])
 
     result = runner.invoke(
         app,
@@ -802,7 +807,7 @@ def test_research_workflow_command_creates_artifacts_and_reports_status(
     assert "Meridian is a manual authenticated workflow" in result.output
     assert "need manual or local-file work" in result.output
     assert "Provider statuses" in result.output
-    assert "Live public collection did not run" in result.output
+    assert "Live public collection ran because web research is enabled" in result.output
     assert "Import dry-run previews" in result.output
     assert "Meridian preview:" in result.output
     assert "Unresolved Meridian fields:" in result.output
@@ -820,6 +825,7 @@ def test_research_workflow_command_json_includes_summary(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data"
+    monkeypatch.setattr(workflow_module, "_run_live_collectors", lambda **_kwargs: [])
 
     result = runner.invoke(
         app,
@@ -850,7 +856,7 @@ def test_research_workflow_command_json_includes_summary(
         for status in payload["summary"]["provider_statuses"]
         if status["provider_id"] == "sec_form_d"
     )
-    assert sec_status["status"] == ResearchProviderRunStatus.NOT_RUN
+    assert sec_status["status"] == ResearchProviderRunStatus.PLANNED
 
 
 def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
@@ -1392,15 +1398,34 @@ def test_prepare_research_plan_adds_meridian_manual_task(tmp_path: Path) -> None
     assert "Do not bypass" in meridian_task.licensing_notes
 
 
-def test_collect_web_research_requires_enabled_web_research(tmp_path: Path) -> None:
-    with pytest.raises(WebResearchError, match="Local-only mode is on"):
-        collect_web_research(
-            config=AppConfig(
-                data_dir=tmp_path / "data",
-                local_only=True,
-                enable_web_research=True,
-            ),
-        )
+def test_collect_web_research_ignores_legacy_disabled_web_research(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=True,
+        enable_web_research=False,
+    )
+    plan_result = prepare_research_plan(
+        config=config,
+        company_names=["Acme AI"],
+        website_url="https://example.com",
+        created_at=BUILT_AT,
+    )
+    client = _FakeWebResearchClient({})
+
+    result = collect_web_research(
+        config=config,
+        plan_path=plan_result.output_path,
+        provider_ids=["company_website"],
+        client=client,
+        dry_run=True,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.planned_count == 1
+    assert result.tasks[0].reason == "Dry run: the page was not fetched."
 
 
 def test_collect_web_research_fetches_public_plan_url(tmp_path: Path) -> None:
@@ -1750,18 +1775,28 @@ def test_collect_web_research_command_exits_nonzero_when_fetch_fails(
     assert "Traceback" not in result.output
 
 
-def test_collect_usaspending_awards_requires_enabled_web_research(
+def test_collect_usaspending_awards_ignores_legacy_disabled_web_research(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ResearchCollectionError, match="Local-only mode is on"):
-        collect_usaspending_awards(
-            config=AppConfig(
-                data_dir=tmp_path / "data",
-                local_only=True,
-                enable_web_research=True,
-            ),
-            company_names=["Acme AI"],
-        )
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=True,
+        enable_web_research=False,
+    )
+    client = _FakeUsaspendingAwardsClient({})
+
+    result = collect_usaspending_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=3,
+        dry_run=True,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.dry_run is True
+    assert result.deal_count == 1
 
 
 def test_collect_usaspending_awards_writes_private_exact_matches(
@@ -2552,18 +2587,28 @@ def test_collect_usaspending_awards_command_reports_incomplete_search_warning(
     assert "No results file was saved" in output
 
 
-def test_collect_sbir_awards_requires_enabled_web_research(
+def test_collect_sbir_awards_ignores_legacy_disabled_web_research(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ResearchCollectionError, match="SBIR/STTR results"):
-        collect_sbir_awards(
-            config=AppConfig(
-                data_dir=tmp_path / "data",
-                local_only=True,
-                enable_web_research=True,
-            ),
-            company_names=["Acme AI"],
-        )
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=True,
+        enable_web_research=False,
+    )
+    client = _FakeSbirAwardsClient({})
+
+    result = collect_sbir_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=3,
+        dry_run=True,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.dry_run is True
+    assert result.deal_count == 1
 
 
 def test_collect_sbir_awards_writes_private_exact_matches(
@@ -3293,18 +3338,28 @@ def test_collect_sbir_awards_command_reports_incomplete_search_warning(
     assert "No results file was saved" in output
 
 
-def test_collect_sec_form_d_filings_requires_enabled_web_research(
+def test_collect_sec_form_d_filings_ignores_legacy_disabled_web_research(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ResearchCollectionError, match="SEC Form D results"):
-        collect_sec_form_d_filings(
-            config=AppConfig(
-                data_dir=tmp_path / "data",
-                local_only=True,
-                enable_web_research=True,
-            ),
-            company_names=["Acme AI"],
-        )
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=True,
+        enable_web_research=False,
+    )
+    client = _FakeSecFormDFilingsClient({})
+
+    result = collect_sec_form_d_filings(
+        config=config,
+        company_names=["Acme AI"],
+        limit=3,
+        dry_run=True,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.dry_run is True
+    assert result.deal_count == 1
 
 
 def test_collect_sec_form_d_filings_writes_private_exact_matches(
@@ -3799,18 +3854,28 @@ def test_sec_form_d_client_disables_ambient_proxies(
     assert proxy_handler.proxies == {}
 
 
-def test_collect_github_repositories_requires_enabled_web_research(
+def test_collect_github_repositories_ignores_legacy_disabled_web_research(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ResearchCollectionError, match="GitHub results"):
-        collect_github_repositories(
-            config=AppConfig(
-                data_dir=tmp_path / "data",
-                local_only=True,
-                enable_web_research=True,
-            ),
-            company_names=["Acme AI"],
-        )
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=True,
+        enable_web_research=False,
+    )
+    client = _FakeGitHubRepositorySearchClient({})
+
+    result = collect_github_repositories(
+        config=config,
+        company_names=["Acme AI"],
+        limit=3,
+        dry_run=True,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert client.calls == []
+    assert result.dry_run is True
+    assert result.deal_count == 1
 
 
 def test_collect_github_repositories_writes_private_exact_matches(
