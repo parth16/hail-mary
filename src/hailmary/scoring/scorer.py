@@ -1273,15 +1273,9 @@ def _net_return_estimate(
         and return_inputs.gross_exit_value is not None
         and entry_valuation > 0
     ):
-        ownership_fraction = max(0.0, return_inputs.ownership_percent / 100)
-        ownership_after_dilution = max(0.0, 1 - (return_inputs.dilution_percent / 100))
-        proceeds_after_fees = max(0.0, 1 - (return_inputs.fees_and_carry_percent / 100))
-        net_multiple = round(
-            (return_inputs.gross_exit_value / entry_valuation)
-            * ownership_fraction
-            * ownership_after_dilution
-            * proceeds_after_fees,
-            2,
+        net_multiple = _net_return_multiple(
+            entry_valuation=entry_valuation,
+            return_inputs=return_inputs,
         )
 
     if net_multiple is None:
@@ -1293,7 +1287,8 @@ def _net_return_estimate(
     else:
         explanation = (
             f"Verified entry valuation is {_format_dollars(entry_valuation)}. "
-            f"Using cited ownership, dilution, fees or carry, and exit value, "
+            f"Using cited ownership, dilution, fees or carry, and exit value "
+            f"against implied invested capital, "
             f"estimated net return is {net_multiple:g}x."
         )
         support_status = ScoreSupportStatus.VERIFIED
@@ -1318,15 +1313,27 @@ class _ReturnInputs:
         *,
         ownership_percent: float | None,
         dilution_percent: float | None,
-        fees_and_carry_percent: float | None,
+        platform_fee_percent: float | None,
+        carry_percent: float | None,
+        combined_fees_and_carry_percent: float | None,
         gross_exit_value: int | None,
         evidence_ids: list[str],
     ) -> None:
         self.ownership_percent = ownership_percent
         self.dilution_percent = dilution_percent
-        self.fees_and_carry_percent = fees_and_carry_percent
+        self.platform_fee_percent = platform_fee_percent
+        self.carry_percent = carry_percent
+        self.combined_fees_and_carry_percent = combined_fees_and_carry_percent
         self.gross_exit_value = gross_exit_value
         self.evidence_ids = evidence_ids
+
+    @property
+    def fees_and_carry_percent(self) -> float | None:
+        if self.combined_fees_and_carry_percent is not None:
+            return self.combined_fees_and_carry_percent
+        if self.platform_fee_percent is None or self.carry_percent is None:
+            return None
+        return self.platform_fee_percent + self.carry_percent
 
 
 def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
@@ -1341,7 +1348,7 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
         ownership_match = RETURN_INPUT_PATTERNS["ownership"].search(record.text)
         if ownership_percent is None and ownership_match:
             parsed_ownership = _float_text(ownership_match.group("value"))
-            if parsed_ownership is not None and 0 <= parsed_ownership <= 100:
+            if parsed_ownership is not None and 0 < parsed_ownership <= 100:
                 ownership_percent = parsed_ownership
                 evidence_ids.append(record.id)
         dilution_match = RETURN_INPUT_PATTERNS["dilution"].search(record.text)
@@ -1372,20 +1379,83 @@ def _return_inputs(evidence: list[EvidenceRecord]) -> _ReturnInputs:
         ):
             gross_exit_value = _money_text_to_dollars(exit_match.group("value"))
             evidence_ids.append(record.id)
-    fees_and_carry: float | None
-    if combined_fees_and_carry_percent is not None:
-        fees_and_carry = combined_fees_and_carry_percent
-    elif fees_percent is not None and carry_percent is not None:
-        fees_and_carry = fees_percent + carry_percent
-    else:
-        fees_and_carry = None
     return _ReturnInputs(
         ownership_percent=ownership_percent,
         dilution_percent=dilution_percent,
-        fees_and_carry_percent=fees_and_carry,
+        platform_fee_percent=fees_percent,
+        carry_percent=carry_percent,
+        combined_fees_and_carry_percent=combined_fees_and_carry_percent,
         gross_exit_value=gross_exit_value,
         evidence_ids=list(dict.fromkeys(evidence_ids)),
     )
+
+
+def _net_return_multiple(
+    *,
+    entry_valuation: int,
+    return_inputs: _ReturnInputs,
+) -> float | None:
+    ownership_percent = return_inputs.ownership_percent
+    dilution_percent = return_inputs.dilution_percent
+    gross_exit_value = return_inputs.gross_exit_value
+    if (
+        ownership_percent is None
+        or ownership_percent <= 0
+        or dilution_percent is None
+        or gross_exit_value is None
+        or entry_valuation <= 0
+    ):
+        return None
+
+    ownership_fraction = Decimal(str(ownership_percent)) / Decimal("100")
+    invested_capital = Decimal(entry_valuation) * ownership_fraction
+    if invested_capital <= 0:
+        return None
+
+    gross_proceeds = Decimal(gross_exit_value) * ownership_fraction
+    dilution_factor = max(
+        Decimal("0"),
+        Decimal("1") - (Decimal(str(dilution_percent)) / Decimal("100")),
+    )
+    value_after_dilution = gross_proceeds * dilution_factor
+
+    if return_inputs.combined_fees_and_carry_percent is not None:
+        proceeds_after_fees = max(
+            Decimal("0"),
+            Decimal("1")
+            - (
+                Decimal(str(return_inputs.combined_fees_and_carry_percent))
+                / Decimal("100")
+            ),
+        )
+        net_cash_returned = value_after_dilution * proceeds_after_fees
+        cash_in = invested_capital
+    elif (
+        return_inputs.platform_fee_percent is not None
+        and return_inputs.carry_percent is not None
+    ):
+        platform_fee = (
+            invested_capital
+            * Decimal(str(return_inputs.platform_fee_percent))
+            / Decimal("100")
+        )
+        profit_after_dilution = max(
+            Decimal("0"),
+            value_after_dilution - invested_capital,
+        )
+        carry = (
+            profit_after_dilution
+            * Decimal(str(return_inputs.carry_percent))
+            / Decimal("100")
+        )
+        net_cash_returned = value_after_dilution - carry
+        cash_in = invested_capital + platform_fee
+    else:
+        return None
+
+    if cash_in <= 0:
+        return None
+    return round(float(net_cash_returned / cash_in), 2)
 
 
 def _float_text(raw_value: str) -> float | None:

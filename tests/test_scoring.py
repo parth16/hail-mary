@@ -910,7 +910,7 @@ def test_net_return_math_uses_cited_inputs_when_available() -> None:
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert scored.net_return.net_return_multiple == 15
+    assert scored.net_return.net_return_multiple == 76.38
     assert scored.net_return.estimated_ownership_percent == 20
     assert scored.net_return.missing_inputs == []
     assert scored.net_return.evidence_ids == ["ev_terms", "ev_return"]
@@ -982,11 +982,11 @@ def test_net_return_math_adds_round_size_to_pre_money_valuation() -> None:
     )
 
     assert scored.net_return.entry_valuation == 60_000_000
-    assert scored.net_return.net_return_multiple == 0.1
+    assert scored.net_return.net_return_multiple == 10.35
     assert scored.net_return.evidence_ids == ["ev_valuation", "ev_round", "ev_return"]
 
 
-def test_net_return_math_applies_cited_ownership_to_multiple() -> None:
+def test_net_return_math_uses_implied_invested_capital() -> None:
     evidence = [
         _evidence("ev_terms", "Seed stage. Valuation cap $8M. Discount 20%. Round size $1M."),
         _evidence(
@@ -1006,9 +1006,37 @@ def test_net_return_math_applies_cited_ownership_to_multiple() -> None:
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert scored.net_return.net_return_multiple == 0.08
+    assert scored.net_return.net_return_multiple == 76.38
     assert scored.net_return.estimated_ownership_percent == 0.1
-    assert _score_factor(scored, "Valuation and net return").score == 9
+    assert _score_factor(scored, "Valuation and net return").score == 16
+
+
+def test_net_return_math_does_not_understate_small_ownership_returns() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Seed stage. Post-money valuation $1M. ARR revenue growth with paid "
+            "customers and retention. Lead investor committed.",
+        ),
+        _evidence(
+            "ev_return",
+            "Investor ownership 1%. Estimated dilution 0%. SPV expenses 0%. "
+            "Carry 0%. Exit value $10M.",
+        ),
+    ]
+    claims = [_claim("post-money valuation", "$1M", "ev_terms")]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.net_return.net_return_multiple == 10
+    assert scored.recommendation == Recommendation.INVEST
+    assert not any(
+        gate.name == "Verified return below capital back"
+        for gate in scored.triggered_kill_gates
+    )
 
 
 def test_net_return_math_rejects_impossible_ownership_percentages() -> None:
@@ -1766,7 +1794,7 @@ def test_score_evidence_store_gates_verified_sub_1x_return_math() -> None:
         _evidence(
             "ev_return",
             "Investor ownership 0.1%. Estimated dilution 20%. SPV expenses 5%. "
-            "Carry 20%. Exit value $1B.",
+            "Carry 20%. Exit value $1M.",
         ),
     ]
     claims = [
@@ -1780,7 +1808,7 @@ def test_score_evidence_store_gates_verified_sub_1x_return_math() -> None:
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert scored.net_return.net_return_multiple == 0.08
+    assert scored.net_return.net_return_multiple == 0.1
     assert scored.recommendation == Recommendation.PASS
     assert scored.check_size == 0
     assert any(
