@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 from collections.abc import Callable, Sequence
@@ -218,6 +219,11 @@ def batch_evaluate_folder(
         )
 
     rows, constraints = _allocate_batch(outcomes, config=config)
+    if not any(row.evaluation_status != "failed" for row in rows):
+        raise BatchEvaluationError(
+            "No deal could be evaluated successfully. Fix the per-deal failures "
+            "and run batch-evaluate again."
+        )
     report_dir = config.data_dir / "reports"
     _ensure_private_directory(report_dir, private_root=config.data_dir, description="batch report")
     run_slug = slugify(root.name) or "batch"
@@ -896,15 +902,10 @@ def _blocker_text(blockers: Sequence[str]) -> str:
 
 
 def _markdown_text(value: str) -> str:
-    return (
-        " ".join(value.split())
-        .replace("\\", "\\\\")
-        .replace("|", "\\|")
-        .replace("[", "\\[")
-        .replace("]", "\\]")
-        .replace("(", "\\(")
-        .replace(")", "\\)")
-        .replace("_", "\\_")
-        .replace("*", "\\*")
-        .replace("#", "\\#")
+    collapsed = " ".join(value.split())
+    markdown_characters = "\\`*_{}[]()#+!|>"
+    markdown_escaped = "".join(
+        f"\\{character}" if character in markdown_characters else character
+        for character in collapsed
     )
+    return html.escape(markdown_escaped, quote=True)

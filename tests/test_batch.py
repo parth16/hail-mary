@@ -7,7 +7,16 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from hailmary.batch import BatchEvaluationError, batch_evaluate_folder
+from hailmary import batch as batch_module
+from hailmary.batch import (
+    BatchAllocationRow,
+    BatchDealOutcome,
+    BatchEvaluationError,
+    BatchEvaluationResult,
+    BatchPortfolioConstraints,
+    batch_evaluate_folder,
+    render_batch_portfolio_report,
+)
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.schemas.scoring import Recommendation
@@ -224,6 +233,123 @@ def test_batch_evaluate_fails_when_no_child_deal_evaluates(
             run_research=False,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
+
+
+def test_batch_evaluate_cli_fails_when_no_child_deal_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "true")
+    monkeypatch.setenv("HAILMARY_MOCK_LLM", "true")
+    root = tmp_path / "all-broken-cli"
+    for company_name in ("BrokenOne", "BrokenTwo"):
+        broken_dir = root / company_name
+        broken_dir.mkdir(parents=True)
+        (broken_dir / "malformed.bin").write_bytes(b"\x00synthetic unsupported input")
+
+    result = runner.invoke(
+        app,
+        [
+            "batch-evaluate",
+            str(root),
+            "--data-dir",
+            str(tmp_path / "private-data"),
+            "--skip-research",
+            "--max-concurrency",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "No deal could be evaluated successfully" in result.output
+    assert "Batch evaluation complete" not in result.output
+
+
+def test_batch_evaluate_fails_when_all_allocation_rows_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "allocation-fails"
+    _write_deal(root, "StrongCo", _strong_investable_text())
+
+    def fail_store_load(*args: object, **kwargs: object) -> None:
+        raise BatchEvaluationError("Synthetic allocation failure.")
+
+    monkeypatch.setattr(batch_module, "_load_actioned_store_for_result", fail_store_load)
+
+    with pytest.raises(BatchEvaluationError, match="No deal could be evaluated"):
+        batch_evaluate_folder(
+            root,
+            config=AppConfig(
+                data_dir=tmp_path / "private-data",
+                local_only=True,
+            ),
+            max_concurrency=1,
+            run_research=False,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+
+def test_batch_markdown_report_escapes_untrusted_html_delimiters() -> None:
+    root = Path("batch <img src=x onerror=alert(1)>")
+    report = render_batch_portfolio_report(
+        BatchEvaluationResult(
+            root_folder=root,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            report_path=Path("data/reports/batch.md"),
+            json_path=Path("data/reports/batch.json"),
+            outcomes=[
+                BatchDealOutcome(
+                    folder=root / "Bad <script>alert(1)</script>",
+                    company_name="Bad <script>alert(1)</script>",
+                    failure_reason="Failed <img src=x onerror=alert(1)> | [bad](url)",
+                )
+            ],
+            allocation_rows=[
+                BatchAllocationRow(
+                    company_name="Bad <script>alert(1)</script>",
+                    deal_id=None,
+                    folder=root / "Bad <script>alert(1)</script>",
+                    evaluation_status="failed",
+                    final_recommendation=Recommendation.PASS,
+                    single_deal_check_size=0,
+                    batch_check_size=0,
+                    score=None,
+                    max_score=None,
+                    confidence=None,
+                    key_blockers=["Failed <img src=x onerror=alert(1)> | [bad](url)"],
+                    failure_reason="Failed <img src=x onerror=alert(1)> | [bad](url)",
+                )
+            ],
+            constraints=BatchPortfolioConstraints(
+                starting_capital=10_000,
+                reserve_amount=0,
+                allocatable_capital=10_000,
+                existing_invested_capital=0,
+                available_capital_before_batch=10_000,
+                new_allocated_capital=0,
+                remaining_allocatable_capital=10_000,
+                allowed_check_sizes=[0, 1_000, 2_500, 5_000, 7_500, 10_000],
+                configured_min_check=1_000,
+                configured_max_check=10_000,
+                max_company_exposure_percent="10",
+                max_category_exposure_percent="25",
+                max_stage_exposure_percent="30",
+                max_low_confidence_exposure_percent="5",
+                max_medium_confidence_exposure_percent="10",
+                max_high_confidence_exposure_percent="20",
+            ),
+        )
+    )
+
+    assert "<img" not in report
+    assert "<script" not in report
+    assert "&lt;img" in report
+    assert "&lt;script" in report
+    assert "\\|" in report
+    assert "\\[bad\\]\\(url\\)" in report
 
 
 def _write_deal(root: Path, company_name: str, body: str) -> Path:
