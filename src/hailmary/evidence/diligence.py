@@ -795,13 +795,17 @@ def _dedupe_questions(
 
 
 def _triage_theme_key(question: DiligenceQuestionItem) -> str:
-    text = f"{question.category or ''} {question.question} {question.reason}".casefold()
+    category_text = (question.category or "").casefold()
+    if _contains_any(category_text, ("financing terms",)):
+        return "deal_terms"
+    text = f"{category_text} {question.question} {question.reason}".casefold()
     if _contains_any(
         text,
         (
             "ownership",
             "dilution",
             "fee",
+            "fees",
             "carry",
             "net return",
             "return-math",
@@ -1104,8 +1108,7 @@ def _meridian_email_draft(
         item
         for item in items
         if item.resolution_path == DiligenceResolutionPath.MERIDIAN_EMAIL
-        and item.status == DiligenceTriageStatus.DECISION_BLOCKER
-    ][:8]
+    ]
     if not email_items:
         return None
     subject = f"Follow-up diligence questions for {company_name}"
@@ -1146,7 +1149,17 @@ def _triage_id(*, deal_id: str, theme_key: str) -> str:
 
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
-    return any(needle in text for needle in needles)
+    return any(_contains_phrase(text, needle) for needle in needles)
+
+
+def _contains_phrase(text: str, needle: str) -> bool:
+    normalized_needle = needle.casefold().strip()
+    if not normalized_needle:
+        return False
+    escaped = re.escape(normalized_needle).replace(r"\ ", r"\s+")
+    if any(character.isalnum() for character in normalized_needle):
+        return re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", text) is not None
+    return normalized_needle in text
 
 
 def _dedupe_strings(values: Iterable[str]) -> list[str]:

@@ -177,6 +177,78 @@ def test_diligence_triage_classifies_fundability_as_investment_terms() -> None:
     assert item.status == DiligenceTriageStatus.DECISION_BLOCKER
 
 
+def test_diligence_triage_does_not_match_fee_inside_feedback() -> None:
+    queue = _queue(
+        [
+            _question(
+                "dq_feedback",
+                priority=30,
+                source=DiligenceQuestionSource.RULE_BASED_SCORING,
+                question="Collect customer feedback and retention evidence.",
+                reason="Customer feedback should support retention before scoring traction.",
+                category="customers",
+            ),
+        ]
+    )
+
+    triage = build_diligence_triage(queue)
+
+    assert len(triage.items) == 1
+    item = triage.items[0]
+    assert item.title == "Traction and customer metrics"
+    assert item.resolution_path == DiligenceResolutionPath.PAID_DATA_SOURCE
+
+
+def test_diligence_triage_includes_follow_up_meridian_items_in_email() -> None:
+    queue = _queue(
+        [
+            _question(
+                "dq_meridian_traction",
+                priority=40,
+                source=DiligenceQuestionSource.MERIDIAN_WORKFLOW,
+                question="Resolve the Meridian field: Traction, revenue, and customers.",
+                reason=(
+                    "The Meridian manual workflow still needs this portal field "
+                    "before its coverage can be treated as complete."
+                ),
+                category="meridian:traction_revenue_customers",
+            ),
+        ]
+    )
+
+    triage = build_diligence_triage(queue)
+
+    assert len(triage.items) == 1
+    item = triage.items[0]
+    assert item.status == DiligenceTriageStatus.FOLLOW_UP
+    assert item.resolution_path == DiligenceResolutionPath.MERIDIAN_EMAIL
+    assert triage.meridian_email_draft is not None
+    assert "Traction and customer metrics" in triage.meridian_email_draft.body
+    assert triage.meridian_email_draft.question_ids == ["dq_meridian_traction"]
+
+
+def test_diligence_triage_financing_category_beats_valuation_keywords() -> None:
+    queue = _queue(
+        [
+            _question(
+                "dq_mixed_terms",
+                priority=8,
+                source=DiligenceQuestionSource.RULE_BASED_SCORING,
+                question="Confirm valuation, round size, discount, and minimum check.",
+                reason="No source-backed financing terms were available.",
+                category="financing terms",
+            ),
+        ]
+    )
+
+    triage = build_diligence_triage(queue)
+
+    assert len(triage.items) == 1
+    item = triage.items[0]
+    assert item.title == "Investment terms"
+    assert item.resolution_path == DiligenceResolutionPath.MERIDIAN_EMAIL
+
+
 def _queue(questions: list[DiligenceQuestionItem]) -> DiligenceQuestionQueue:
     return DiligenceQuestionQueue(
         deal_id="synthetic-deal",
