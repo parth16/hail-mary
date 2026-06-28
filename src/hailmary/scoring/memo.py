@@ -15,7 +15,7 @@ from hailmary.portfolio.scenario import (
 )
 from hailmary.schemas.documents import IngestionSummary
 from hailmary.schemas.evidence import ClaimRecord, EvidenceRecord, EvidenceStore
-from hailmary.schemas.scoring import MemoRunSummary, ScoredDeal
+from hailmary.schemas.scoring import KillGate, MemoRunSummary, ScoredDeal
 from hailmary.scoring.portfolio import (
     allowed_check_tiers,
     portfolio_exposure_state_after_score,
@@ -178,14 +178,11 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         "",
         "## Kill Gates",
     ]
-    for gate in scored_deal.kill_gates:
-        status = "TRIGGERED" if gate.triggered else "Clear"
-        lines.append(
-            f"- {status}: {_memo_metadata_value(gate.name)}. "
-            f"{_memo_metadata_value(gate.reason)}"
-            f"{_support_text(gate.support_status)}"
-            f"{_evidence_reference_text(gate.evidence_ids)}"
-        )
+    lines.extend(_memo_gate_lines([gate for gate in scored_deal.kill_gates if gate.force_pass]))
+    risk_gaps = [gate for gate in scored_deal.kill_gates if not gate.force_pass]
+    if risk_gaps:
+        lines.extend(["", f"## {_risk_gap_plural_label(scored_deal)}"])
+        lines.extend(_memo_gate_lines(risk_gaps))
 
     lines.extend(["", "## Score Factors"])
     for factor in scored_deal.score_factors:
@@ -236,6 +233,29 @@ def render_markdown_memo(scored_deal: ScoredDeal, store: EvidenceStore) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _memo_gate_lines(gates: list[KillGate]) -> list[str]:
+    if not gates:
+        return ["- None."]
+    lines: list[str] = []
+    for gate in gates:
+        status = "TRIGGERED" if gate.triggered else "Clear"
+        lines.append(
+            f"- {status}: {_memo_metadata_value(gate.name)}. "
+            f"{_memo_metadata_value(gate.reason)}"
+            f"{_support_text(gate.support_status)}"
+            f"{_evidence_reference_text(gate.evidence_ids)}"
+        )
+    return lines
+
+
+def _risk_gap_plural_label(scored_deal: ScoredDeal) -> str:
+    return (
+        "Calculated-Risk Gaps"
+        if scored_deal.calculated_risk_mode
+        else "Strict-Risk Gaps"
+    )
 
 
 def render_portfolio_report(

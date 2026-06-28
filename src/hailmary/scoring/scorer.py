@@ -53,6 +53,15 @@ TRACTION_KEYWORDS = (
 )
 EARLY_PMF_KEYWORDS = ("pilot", "beta", "loi", "waitlist", "design partner")
 FUNDABILITY_KEYWORDS = ("lead investor", "institutional", "series a", "seed", "follow-on")
+CALCULATED_RISK_FUNDING_KEYWORDS = (
+    "lead investor",
+    "institutional",
+    "series a",
+    "seed round",
+    "seed funding",
+    "seed investor",
+    "follow-on",
+)
 INVEST_MINIMUM_SCORE = 75
 CALCULATED_RISK_MINIMUM_SCORE = 60
 HARD_MAX_CHECK = max(CHECK_SIZE_TIERS)
@@ -410,7 +419,7 @@ def score_evidence_store(
             )
     elif (
         total_score >= CALCULATED_RISK_MINIMUM_SCORE
-        and _has_calculated_risk_positive_signal(store, verified_claims, pmf_level)
+        and _has_calculated_risk_positive_signal(store, pmf_level)
     ):
         recommendation = Recommendation.INVEST
         calculated_risk_reason = _calculated_risk_reason(
@@ -503,6 +512,7 @@ def score_evidence_store(
             total_score=total_score,
             confidence=confidence,
             kill_gates=kill_gates,
+            calculated_risk_mode=config.calculated_risk_mode,
             calculated_risk=calculated_risk,
             calculated_risk_reason=calculated_risk_reason,
         ),
@@ -2262,7 +2272,6 @@ def _triggered_gate_questions(kill_gates: list[KillGate]) -> list[DiligenceQuest
 
 def _has_calculated_risk_positive_signal(
     store: EvidenceStore,
-    verified_claims: list[ClaimRecord],
     pmf_level: PMFLevel,
 ) -> bool:
     safe_evidence = [
@@ -2272,18 +2281,11 @@ def _has_calculated_risk_positive_signal(
     ]
     if not safe_evidence:
         return False
-    if (
+    return bool(
         _positive_traction_evidence(safe_evidence)
         or _positive_early_pmf_evidence(safe_evidence)
-        or _positive_funding_evidence(safe_evidence)
+        or _positive_calculated_risk_funding_evidence(safe_evidence)
         or _pmf_evidence(safe_evidence, pmf_level)
-    ):
-        return True
-    safe_evidence_ids = {evidence.id for evidence in safe_evidence}
-    return any(
-        citation.evidence_id in safe_evidence_ids
-        for claim in verified_claims
-        for citation in claim.citations
     )
 
 
@@ -2794,6 +2796,7 @@ def _one_line_reason(
     total_score: int,
     confidence: ConfidenceLevel,
     kill_gates: list[KillGate],
+    calculated_risk_mode: bool = True,
     calculated_risk: bool = False,
     calculated_risk_reason: str | None = None,
 ) -> str:
@@ -2805,6 +2808,13 @@ def _one_line_reason(
     ]
     if recommendation == Recommendation.PASS and hard_blockers:
         return f"Passed because {hard_blockers[0].reason}"
+    score_floor = (
+        CALCULATED_RISK_MINIMUM_SCORE
+        if calculated_risk_mode
+        else INVEST_MINIMUM_SCORE
+    )
+    if recommendation == Recommendation.PASS and total_score < score_floor:
+        return f"Passed because the score was {total_score}/100, below the investment bar."
     if recommendation == Recommendation.PASS and risk_gaps:
         return f"Passed because {risk_gaps[0].reason}"
     if recommendation == Recommendation.PASS:
@@ -2850,6 +2860,20 @@ def _positive_funding_evidence(evidence: list[EvidenceRecord]) -> list[EvidenceR
         if _text_contains_positive_keyword(
             record.text,
             FUNDABILITY_KEYWORDS,
+            negated_patterns=NEGATED_FUNDING_PATTERNS,
+        )
+    ]
+
+
+def _positive_calculated_risk_funding_evidence(
+    evidence: list[EvidenceRecord],
+) -> list[EvidenceRecord]:
+    return [
+        record
+        for record in evidence
+        if _text_contains_positive_keyword(
+            record.text,
+            CALCULATED_RISK_FUNDING_KEYWORDS,
             negated_patterns=NEGATED_FUNDING_PATTERNS,
         )
     ]

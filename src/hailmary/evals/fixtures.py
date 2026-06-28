@@ -3187,7 +3187,7 @@ def run_model_invest_guardrail_score_fixture() -> None:
     )
     _expect(
         guarded.warning is not None
-        and "kept final PASS/$0 because calculated-risk gap" in guarded.warning,
+        and "kept final PASS/$0 because score" in guarded.warning,
         "Expected model override guardrail to produce a deterministic PASS warning.",
     )
 
@@ -4517,7 +4517,7 @@ def run_portfolio_batch_allocation_fixture(work_dir: Path) -> None:
     )
     expected_reasons = [
         "No allocatable capital remained for an allowed nonzero check.",
-        "Score below the 75/100 INVEST threshold.",
+        "Score below the 60/100 INVEST threshold.",
     ]
     missing_reasons = [reason for reason in expected_reasons if reason not in report]
     _expect(

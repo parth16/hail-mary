@@ -105,6 +105,8 @@ from hailmary.schemas.scoring import (
 )
 from hailmary.scoring.portfolio import portfolio_exposure_state_from_ledger
 from hailmary.scoring.scorer import (
+    CALCULATED_RISK_MINIMUM_SCORE,
+    INVEST_MINIMUM_SCORE,
     score_evidence_store,
     validated_conflicts,
     validated_verified_claims,
@@ -248,9 +250,14 @@ def _diligence_research_context(
     workflow = research_run.workflow
     summary = workflow.summary
     quality = research_run.quality_status
+    imported_record_count = (
+        quality.imported_record_count
+        if quality is not None
+        else research_run.imported_count + research_run.skipped_duplicate_count
+    )
     return DiligenceResearchContext(
         planned_task_count=workflow.plan.task_count,
-        imported_record_count=research_run.imported_count,
+        imported_record_count=imported_record_count,
         failed_provider_count=summary.failed_provider_count,
         incomplete_search_count=summary.incomplete_search_count,
         no_exact_result_provider_count=summary.no_exact_result_provider_count,
@@ -269,6 +276,14 @@ def _diligence_research_context(
         else 0,
         warning_count=summary.warning_count,
         no_prepared_result_companies=workflow.no_prepared_result_companies,
+    )
+
+
+def _skipped_research_context() -> DiligenceResearchContext:
+    return DiligenceResearchContext(
+        planned_task_count=1,
+        imported_record_count=0,
+        not_run_provider_count=1,
     )
 
 
@@ -910,11 +925,14 @@ def evaluate_deal_folder(
         raise EvaluationError(
             f"Could not read the private portfolio ledger: {exc}"
         ) from exc
+    research_context = _diligence_research_context(research_run)
+    if research_context is None and not run_research:
+        research_context = _skipped_research_context()
     scored_deal = score_evidence_store(
         store,
         config=config,
         capital_remaining=status.available_capital,
-        research_context=_diligence_research_context(research_run),
+        research_context=research_context,
         exposure_state=portfolio_exposure_state_from_ledger(
             status.ledger,
             config=config,
@@ -1593,7 +1611,8 @@ def render_final_evaluation_memo(
         f"**Confidence:** {scored_deal.confidence}",
         f"**Mode:** {_decision_mode_summary(scored_deal)}",
         f"**Hard blockers:** {_gate_name_summary(scored_deal.triggered_hard_blockers)}",
-        f"**Calculated-risk gaps:** {_gate_name_summary(scored_deal.triggered_risk_gaps)}",
+        f"**{_risk_gap_plural_label(scored_deal)}:** "
+        f"{_gate_name_summary(scored_deal.triggered_risk_gaps)}",
         f"**Research coverage:** {_research_coverage_summary(research_run)}",
         f"**One-line reason:** {_memo_text(final_recommendation.reason)}",
         "**Deadline:** unknown",
@@ -1617,7 +1636,7 @@ def render_final_evaluation_memo(
     ]
     for gate in scored_deal.kill_gates:
         status = "TRIGGERED" if gate.triggered else "Clear"
-        gate_kind = "hard blocker" if gate.force_pass else "calculated-risk gap"
+        gate_kind = "hard blocker" if gate.force_pass else _risk_gap_label(scored_deal)
         lines.append(
             f"- {status} {_memo_text(gate_kind)}: {_memo_text(gate.name)}. "
             f"{_memo_text(gate.reason)}"
@@ -2968,18 +2987,37 @@ def _recommendation_summary(recommendation: AgentRecommendationRationale) -> str
     return f"{recommendation.recommendation}/{_format_check_size(recommendation.check_size)}"
 
 
+def _risk_gap_label(scored_deal: ScoredDeal) -> str:
+    return (
+        "calculated-risk gap"
+        if scored_deal.calculated_risk_mode
+        else "strict-risk gap"
+    )
+
+
+def _risk_gap_plural_label(scored_deal: ScoredDeal) -> str:
+    return (
+        "Calculated-risk gaps"
+        if scored_deal.calculated_risk_mode
+        else "Strict-risk gaps"
+    )
+
+
 def _deterministic_pass_explanation(scored_deal: ScoredDeal) -> str:
     if scored_deal.triggered_hard_blockers:
         gate = scored_deal.triggered_hard_blockers[0]
         reason = _clean_cli_commentary_text(gate.reason, max_chars=260).rstrip(".")
         return f"hard blocker '{gate.name}' triggered: {reason}"
+    score_floor = (
+        CALCULATED_RISK_MINIMUM_SCORE
+        if scored_deal.calculated_risk_mode
+        else INVEST_MINIMUM_SCORE
+    )
+    if scored_deal.total_score < score_floor:
+        return f"score {scored_deal.total_score}/100 was below the {score_floor}/100 investment bar"
     if scored_deal.triggered_risk_gaps:
         gate = scored_deal.triggered_risk_gaps[0]
-        gap_kind = (
-            "calculated-risk gap"
-            if scored_deal.calculated_risk_mode
-            else "strict-risk gap"
-        )
+        gap_kind = _risk_gap_label(scored_deal)
         reason = _clean_cli_commentary_text(gate.reason, max_chars=260).rstrip(".")
         return f"{gap_kind} '{gate.name}' remained unresolved: {reason}"
     return _reason_fragment(scored_deal.one_line_reason)
@@ -3476,14 +3514,30 @@ def _provider_topic_import_counts(
         for research_topic, imported_count in topic_counts_by_topic.items():
             if imported_count > 0:
                 providers_with_topic_counts.add(provider_id.strip())
-                topic_counts[
-                    _research_provider_topic_key(provider_id, research_topic)
-                ] = imported_count
+                for resolved_topic in _evaluation_import_topics(
+                    provider_id,
+                    research_topic,
+                ):
+                    topic_counts[
+                        _research_provider_topic_key(provider_id, resolved_topic)
+                    ] = imported_count
     for provider_id, imported_count in import_summary.provider_imported_counts.items():
         if imported_count <= 0 or provider_id.strip() in providers_with_topic_counts:
             continue
-        topic_counts[_research_provider_topic_key(provider_id, "company")] = imported_count
+        for resolved_topic in _evaluation_import_topics(provider_id, "company"):
+            topic_counts[
+                _research_provider_topic_key(provider_id, resolved_topic)
+            ] = imported_count
     return topic_counts
+
+
+def _evaluation_import_topics(provider_id: str, research_topic: str) -> set[str]:
+    if (
+        provider_id.strip() == "public_web"
+        and research_topic.strip().casefold() == "company"
+    ):
+        return {"market", "competition", "industry"}
+    return {research_topic.strip().casefold() or "company"}
 
 
 def _merge_imported_research_status(

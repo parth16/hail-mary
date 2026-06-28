@@ -54,6 +54,7 @@ from hailmary.scoring import (
     score_latest_ingestion,
 )
 from hailmary.scoring.memo import ScoringError, _write_private_text
+from hailmary.scoring.portfolio import skip_reason
 
 runner = CliRunner()
 _TEST_EVIDENCE_TEXT_BY_ID: dict[str, str] = {}
@@ -270,6 +271,42 @@ def test_score_evidence_store_invests_calculated_risk_with_borderline_evidence()
     assert "calculated_risk_target" in scored.check_sizing.reason_codes
 
 
+def test_score_evidence_store_requires_business_signal_for_calculated_risk() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            (
+                "Valuation cap $8M. Discount 20%. Round size $1M. Pre-seed company. "
+                "Investor ownership target 1%. Estimated dilution 20%. Platform fee 5%. "
+                "Carry 20%. Gross exit value $1B."
+            ),
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.total_score >= 60
+    assert scored.total_score < 75
+    assert scored.recommendation == Recommendation.PASS
+    assert scored.check_size == 0
+    assert scored.calculated_risk is False
+    assert "Calculated-risk score range needs source-linked traction" in skip_reason(
+        scored
+    )
+    pmf_factor = _score_factor(scored, "Stage and product-market fit")
+    assert "customer, revenue, retention, usage, pilot, or design-partner proof" in (
+        pmf_factor.missing_inputs
+    )
+
+
 def test_score_evidence_store_clears_calculated_risk_when_no_check_tier_fits() -> None:
     evidence = [
         _evidence(
@@ -299,6 +336,35 @@ def test_score_evidence_store_clears_calculated_risk_when_no_check_tier_fits() -
         and "Calculated-risk mode capped" in gate.reason
         for gate in scored.triggered_hard_blockers
     )
+    assert "Calculated-risk sizing capped" in skip_reason(scored)
+
+
+def test_score_evidence_store_prefers_score_floor_over_soft_gap_reason() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+        research_context=DiligenceResearchContext(
+            planned_task_count=1,
+            imported_record_count=0,
+        ),
+    )
+
+    assert scored.total_score < 60
+    assert scored.recommendation == Recommendation.PASS
+    assert "score was" in scored.one_line_reason
+    assert "External research remains incomplete" not in scored.one_line_reason
 
 
 def test_stage_aware_score_changes_are_deterministic_and_evidence_linked() -> None:
@@ -1700,7 +1766,11 @@ def test_portfolio_report_prefers_score_reason_over_budget_for_low_scoring_skip(
         _claim("discount", "20%", "ev_all"),
         _claim("round size", "$1M", "ev_all"),
     ]
-    config = AppConfig(data_dir=Path("data"), capital_budget=0)
+    config = AppConfig(
+        data_dir=Path("data"),
+        capital_budget=0,
+        calculated_risk_mode=False,
+    )
     scored = score_evidence_store(_store(evidence=evidence, claims=claims), config=config)
 
     report = render_portfolio_report([scored], config=config)
@@ -3033,6 +3103,35 @@ def test_render_markdown_memo_includes_v2_score_context_and_citations() -> None:
     assert "- Valuation and net return: 13/20." in markdown
     assert "Support: NEEDS_DILIGENCE." in markdown
     assert "Evidence: ev\\_terms." in markdown
+
+
+def test_render_markdown_memo_separates_soft_risk_gaps_from_kill_gates() -> None:
+    store = _strong_store(deal_id="deal_research_gap", company_name="SoftGapMemoCo")
+    scored = score_evidence_store(
+        store,
+        config=AppConfig(data_dir=Path("data")),
+        research_context=DiligenceResearchContext(
+            planned_task_count=1,
+            imported_record_count=0,
+        ),
+    )
+
+    markdown = render_markdown_memo(scored, store)
+
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.calculated_risk is True
+    assert "## Kill Gates" in markdown
+    assert "## Calculated-Risk Gaps" in markdown
+    kill_gate_section = markdown.split("## Kill Gates", maxsplit=1)[1].split(
+        "## Calculated-Risk Gaps",
+        maxsplit=1,
+    )[0]
+    risk_gap_section = markdown.split("## Calculated-Risk Gaps", maxsplit=1)[1].split(
+        "## Score Factors",
+        maxsplit=1,
+    )[0]
+    assert "External research incomplete" not in kill_gate_section
+    assert "TRIGGERED: External research incomplete" in risk_gap_section
 
 
 def test_render_markdown_memo_escapes_untrusted_company_and_claim_text() -> None:

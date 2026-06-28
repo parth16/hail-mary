@@ -34,6 +34,7 @@ from hailmary.research import (
     ResearchImportRunSummary,
     ResearchPlan,
     ResearchProviderRunStatus,
+    ResearchQualityStatus,
     ResearchWorkflowCollectionSummary,
     ResearchWorkflowIssue,
     ResearchWorkflowRunSummary,
@@ -694,9 +695,9 @@ def test_evaluate_deal_research_statuses_preserve_provider_topics(
     import_summary = ResearchImportRunSummary(
         input_path=tmp_path / "research-results.json",
         imported_at=datetime(2026, 1, 2, tzinfo=UTC),
-        provider_imported_counts={"public_web": 2},
+        provider_imported_counts={"public_web": 1},
         provider_topic_imported_counts={
-            "public_web": {"market": 1, "industry": 1}
+            "public_web": {"company": 1}
         },
         provider_names={"public_web": "Public web and press search"},
         deals=[
@@ -704,7 +705,7 @@ def test_evaluate_deal_research_statuses_preserve_provider_topics(
                 deal_id="deal-1",
                 company_name="TopicResearchCo",
                 evidence_store_path=tmp_path / "evidence.json",
-                imported_count=2,
+                imported_count=1,
             )
         ],
     )
@@ -719,6 +720,7 @@ def test_evaluate_deal_research_statuses_preserve_provider_topics(
         for status in exported["provider_statuses"]
     }
     assert statuses[("public_web", "market")]["imported_count"] == 1
+    assert statuses[("public_web", "competition")]["imported_count"] == 1
     assert statuses[("public_web", "industry")]["imported_count"] == 1
 
     scored_deal = ScoredDeal(
@@ -756,6 +758,82 @@ def test_evaluate_deal_research_statuses_preserve_provider_topics(
 
     assert "Public web and press search / industry: imported" in memo_text
     assert "Public web and press search / market: imported" in memo_text
+    assert "Public web and press search / competition: imported" in memo_text
+
+
+def test_diligence_research_context_counts_existing_quality_records(
+    tmp_path: Path,
+) -> None:
+    workflow = _research_workflow_summary(
+        tmp_path,
+        company_name="ExistingResearchCo",
+        live_collection_enabled=False,
+    )
+    research_run = evaluation.EvaluationResearchRun(
+        workflow=workflow,
+        imports=[
+            ResearchImportRunSummary(
+                input_path=tmp_path / "research-results.json",
+                imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+                deals=[
+                    ResearchImportDealSummary(
+                        deal_id="deal-1",
+                        company_name="ExistingResearchCo",
+                        evidence_store_path=tmp_path / "evidence.json",
+                        imported_count=0,
+                        skipped_duplicate_count=1,
+                    )
+                ],
+            )
+        ],
+        quality_status=ResearchQualityStatus(
+            status="usable",
+            imported_record_count=1,
+            current_record_count=1,
+            stale_record_count=0,
+            unknown_freshness_record_count=0,
+            unknown_reliability_record_count=0,
+            ambiguous_or_related_match_count=0,
+            identity_mismatch_count=0,
+        ),
+    )
+
+    context = evaluation._diligence_research_context(research_run)
+
+    assert context is not None
+    assert context.imported_record_count == 1
+
+
+def test_evaluate_deal_skip_research_adds_soft_research_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="SkipResearchCo",
+        body=(
+            "Valuation cap $8M. Discount 20%. Round size $1M. "
+            "ARR revenue growth with paid customers and retention. "
+            "Lead investor committed and seed round is active."
+        ),
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+        run_research=False,
+    )
+
+    research_gap = next(
+        gate
+        for gate in result.deterministic_score.triggered_risk_gaps
+        if gate.name == "External research incomplete"
+    )
+    assert "1 provider was not run" in research_gap.reason
+    assert result.deterministic_score.recommendation == Recommendation.INVEST
+    assert result.deterministic_score.calculated_risk is True
 
 
 def test_evaluate_deal_surfaces_stale_only_research_quality(
@@ -2105,12 +2183,12 @@ def test_evaluate_deal_deterministic_pass_overrides_model_invest(
     assert result.final_recommendation.recommendation == Recommendation.PASS
     assert result.final_recommendation.check_size == 0
     assert any(
-        "kept final PASS/$0 because calculated-risk gap" in warning
+        "kept final PASS/$0 because score" in warning
         for warning in result.warnings
     )
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "**Recommendation:** PASS" in memo_text
-    assert "Final PASS/$0 because calculated-risk gap" in memo_text
+    assert "Final PASS/$0 because score" in memo_text
     assert "Model recommendation before guardrails: INVEST" in memo_text
     assert "Guardrail override" in memo_text
     assert "Valuation cap" not in result.final_recommendation.reason
@@ -2482,8 +2560,8 @@ def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(
     assert "guardrails controlled" in normalized_output
     assert "final recommendation" in normalized_output
     assert "could not override" in normalized_output
-    assert "calculated-risk gap" in normalized_output
-    assert "valuation-cap term" in normalized_output
+    assert "score" in normalized_output
+    assert "investment bar" in normalized_output
     assert "Valuation cap" not in result.output
 
 
@@ -2604,6 +2682,83 @@ def test_evaluate_deal_cli_commentary_labels_strict_mode_gaps(
 
     assert "strict-risk gap" in risks
     assert "calculated-risk gap" not in risks
+
+
+def test_final_memo_labels_strict_mode_gaps(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="StrictMemoCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=65,
+        calculated_risk_mode=False,
+        one_line_reason="Passed under strict-risk scoring.",
+        kill_gates=[
+            KillGate(
+                name="Missing external research",
+                triggered=True,
+                reason="External research is missing.",
+                support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+                force_pass=False,
+            )
+        ],
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Strict-risk scoring kept the deal at PASS.",
+        evidence=[],
+    )
+    final_output = AgentReviewOutput(
+        deal_id=scored_deal.deal_id,
+        company_name=scored_deal.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        EvidenceStore(
+            deal_id=scored_deal.deal_id,
+            company_name=scored_deal.company_name,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+    )
+
+    assert "**Strict-risk gaps:** Missing external research" in memo_text
+    assert "TRIGGERED strict-risk gap: Missing external research" in memo_text
+    assert "**Calculated-risk gaps:**" not in memo_text
+
+
+def test_deterministic_pass_explanation_prefers_score_floor_over_soft_gap() -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="LowScoreSoftGapCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=50,
+        calculated_risk_mode=True,
+        one_line_reason="Passed because external research is missing.",
+        kill_gates=[
+            KillGate(
+                name="External research incomplete",
+                triggered=True,
+                reason="External research is missing.",
+                support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+                force_pass=False,
+            )
+        ],
+    )
+
+    explanation = evaluation._deterministic_pass_explanation(scored_deal)
+
+    assert "score 50/100 was below the 60/100 investment bar" in explanation
+    assert "calculated-risk gap" not in explanation
 
 
 def test_evaluate_deal_cli_commentary_separates_check_size_caps_from_overrides(
@@ -3053,8 +3208,26 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
             "SPV expenses 5%. Carry 20%. Exit value $1B."
         ),
     )
+    def high_check_output_json(packet: AgentInputPacket) -> str:
+        evidence = packet.evidence[0]
+        reference = AgentEvidenceReference(
+            evidence_id=evidence.id,
+            quote=_quote(evidence.text),
+        )
+        return AgentReviewOutput(
+            deal_id=packet.deal_id,
+            company_name=packet.company_name,
+            agent_role=packet.agent_role,
+            recommendation=AgentRecommendationRationale(
+                recommendation=Recommendation.INVEST,
+                check_size=10_000,
+                reason="The model recommends a larger synthetic check.",
+                evidence=[reference],
+            ),
+        ).model_dump_json()
+
     client = RecordingReviewClient(
-        outputs_by_role={AgentRole.FINAL_DECISION: [_invest_output_json]}
+        outputs_by_role={AgentRole.FINAL_DECISION: [high_check_output_json]}
     )
 
     result = evaluate_deal_folder(
@@ -3063,7 +3236,6 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
             data_dir=tmp_path / "data",
             local_only=False,
             mock_llm=False,
-            min_check=2_500,
         ),
         model_client=client,
         max_concurrency=1,
@@ -3071,9 +3243,10 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
     )
 
     assert result.deterministic_score.recommendation == Recommendation.INVEST
-    assert result.deterministic_score.check_size == 7_500
+    assert result.deterministic_score.check_size == 1_000
+    assert result.deterministic_score.calculated_risk is True
     assert result.final_recommendation.recommendation == Recommendation.INVEST
-    assert result.final_recommendation.check_size == 7_500
+    assert result.final_recommendation.check_size == 1_000
     assert any("rule-based allocation" in warning for warning in result.warnings)
     assert any("deterministic allocation" in warning for warning in result.warnings)
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
