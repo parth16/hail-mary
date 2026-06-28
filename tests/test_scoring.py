@@ -293,8 +293,10 @@ def test_score_evidence_store_clears_calculated_risk_when_no_check_tier_fits() -
     assert scored.check_size == 0
     assert scored.calculated_risk is False
     assert scored.calculated_risk_reason is None
+    assert "calculated_risk_cap_below_minimum" in scored.check_sizing.reason_codes
     assert any(
         gate.name == "No available check size"
+        and "Calculated-risk mode capped" in gate.reason
         for gate in scored.triggered_hard_blockers
     )
 

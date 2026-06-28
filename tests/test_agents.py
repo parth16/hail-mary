@@ -59,6 +59,7 @@ from hailmary.schemas.evidence import (
 )
 from hailmary.schemas.scoring import (
     ConfidenceLevel,
+    KillGate,
     NetReturnEstimate,
     PortfolioExposureDimension,
     Recommendation,
@@ -362,6 +363,48 @@ def test_build_agent_input_packet_carries_v3_context_without_provider_metadata()
     assert "SEC EDGAR Form D search" not in packet_json
     assert "https://example.com/private-source" not in packet_json
     assert "Use SEC EDGAR public filings" not in packet_json
+
+
+def test_build_agent_input_packet_keeps_soft_risk_gaps_out_of_kill_gates() -> None:
+    store = _strong_store()
+    scored_deal = score_evidence_store(store, config=AppConfig(data_dir=Path("data")))
+    scored_deal = scored_deal.model_copy(
+        update={
+            "kill_gates": [
+                KillGate(
+                    name="Missing external research",
+                    triggered=True,
+                    reason="External research has not been imported.",
+                    evidence_ids=["ev_terms"],
+                    support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+                    force_pass=False,
+                ),
+                KillGate(
+                    name="Material term conflict",
+                    triggered=True,
+                    reason="Conflicting terms must force PASS.",
+                    evidence_ids=["ev_funding"],
+                    support_status=ScoreSupportStatus.VERIFIED,
+                    force_pass=True,
+                ),
+            ],
+        }
+    )
+
+    packet = build_agent_input_packet(
+        store,
+        scored_deal,
+        role=AgentRole.FINAL_DECISION,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert [gate.name for gate in packet.triggered_kill_gates] == [
+        "Material term conflict"
+    ]
+    assert packet.scoring_support is not None
+    assert [gate.name for gate in packet.scoring_support.triggered_kill_gates] == [
+        "Material term conflict"
+    ]
 
 
 def test_build_agent_input_packet_preserves_score_factor_support_metadata() -> None:

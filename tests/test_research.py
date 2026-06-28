@@ -1443,6 +1443,47 @@ def test_run_research_workflow_keeps_public_web_topics_unresolved_individually(
     assert result.unresolved_manual_task_count >= 2
 
 
+def test_run_research_workflow_maps_legacy_public_web_results_to_split_topics(
+    tmp_path: Path,
+) -> None:
+    config, _deal, results_path = _ingest_deal_and_write_results(tmp_path)
+    _write_results(
+        results_path,
+        [
+            _research_result(
+                provider_id="public_web",
+                provider_name="Public web and press search",
+                title="Acme AI public web source",
+                text=(
+                    "Acme AI participates in a growing synthetic market with "
+                    "visible competitors."
+                ),
+                retrieved_at="2025-12-31T12:00:00Z",
+                source_url="https://example.com/acme-ai-public-web",
+                licensing_notes="Public web source.",
+            )
+        ],
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        results_files=[results_path],
+        created_at=BUILT_AT,
+    )
+
+    public_web_statuses = {
+        status.research_topic: status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "public_web"
+    }
+    for research_topic in {"market", "competition", "industry"}:
+        assert public_web_statuses[research_topic].status == (
+            ResearchProviderRunStatus.PLANNED
+        )
+        assert public_web_statuses[research_topic].collected_count == 1
+
+
 def test_run_research_workflow_local_public_manual_provider_is_ready_to_import(
     tmp_path: Path,
 ) -> None:
@@ -6308,6 +6349,8 @@ def test_import_research_results_skips_untouched_template_rows(
         created_at=datetime(2026, 1, 2, tzinfo=UTC),
     )
     template_payload = json.loads(template_result.output_path.read_text(encoding="utf-8"))
+    for row in template_payload["results"]:
+        row.pop("research_topic", None)
     template_payload["results"][1].update(
         {
             "provider_id": "meridian",
@@ -7850,6 +7893,7 @@ def test_import_research_results_imports_stale_sources_as_stale(
         tmp_path,
         extra_results=[
             _research_result(
+                research_topic="funding",
                 title="Older public source",
                 text="Acme AI reported customer traction in an older public source.",
                 retrieved_at="2024-01-01T12:00:00Z",
@@ -7868,6 +7912,10 @@ def test_import_research_results_imports_stale_sources_as_stale(
     assert summary.stale_count == 1
     assert summary.provider_imported_counts == {"sec_form_d": 2}
     assert summary.provider_stale_counts == {"sec_form_d": 1}
+    assert summary.provider_topic_imported_counts == {
+        "sec_form_d": {"company": 1, "funding": 1}
+    }
+    assert summary.provider_topic_stale_counts == {"sec_form_d": {"funding": 1}}
     assert summary.provider_names == {"sec_form_d": "SEC EDGAR Form D search"}
     assert deal.evidence_store_path is not None
     saved_store = EvidenceStore.model_validate_json(

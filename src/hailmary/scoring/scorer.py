@@ -2399,6 +2399,7 @@ def _check_sizing_decision(
                 capital_remaining=capital_remaining,
                 risk_cap=risk_cap,
                 exposure_cap=exposure_cap,
+                calculated_risk_cap=calculated_risk_target,
             )
         )
         return CheckSizingDecision(
@@ -2462,6 +2463,16 @@ def _no_available_check_size_reason(
     check_sizing: CheckSizingDecision,
 ) -> str:
     reason_codes = set(check_sizing.reason_codes)
+    if "calculated_risk_cap_below_minimum" in reason_codes:
+        return (
+            "Calculated-risk mode capped the maximum check below the configured or "
+            "platform minimum check."
+        )
+    if "calculated_risk_cap_no_tier" in reason_codes:
+        return (
+            "No configured check size fits the calculated-risk cap, platform minimum, "
+            "and remaining capital."
+        )
     if "risk_cap_below_minimum" in reason_codes:
         return (
             "Risk caps lowered the maximum check below the configured or "
@@ -2520,6 +2531,7 @@ def _no_tier_reason_codes(
     capital_remaining: int,
     risk_cap: int | None,
     exposure_cap: int | None,
+    calculated_risk_cap: int | None = None,
 ) -> list[str]:
     reason_codes = ["no_allowed_tier"]
     minimum_check = config.min_check
@@ -2544,6 +2556,19 @@ def _no_tier_reason_codes(
                 "risk_cap_below_minimum"
                 if risk_cap < minimum_check
                 else "risk_cap_no_tier"
+            )
+    if calculated_risk_cap is not None:
+        calculated_risk_tiers = _available_nonzero_tiers(
+            config,
+            platform_minimum_check=platform_minimum_check,
+            capital_remaining=capital_remaining,
+            check_size_cap=calculated_risk_cap,
+        )
+        if base_tiers and not calculated_risk_tiers:
+            reason_codes.append(
+                "calculated_risk_cap_below_minimum"
+                if calculated_risk_cap < minimum_check
+                else "calculated_risk_cap_no_tier"
             )
     if exposure_cap is not None:
         cap_before_exposure = risk_cap

@@ -30,6 +30,8 @@ from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
 from hailmary.portfolio import add_portfolio_investment
 from hailmary.research import (
     ResearchDealInput,
+    ResearchImportDealSummary,
+    ResearchImportRunSummary,
     ResearchPlan,
     ResearchProviderRunStatus,
     ResearchWorkflowCollectionSummary,
@@ -681,6 +683,81 @@ def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
     )
 
 
+def test_evaluate_deal_research_statuses_preserve_provider_topics(
+    tmp_path: Path,
+) -> None:
+    workflow = _research_workflow_summary(
+        tmp_path,
+        company_name="TopicResearchCo",
+        live_collection_enabled=False,
+    )
+    import_summary = ResearchImportRunSummary(
+        input_path=tmp_path / "research-results.json",
+        imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+        provider_imported_counts={"public_web": 2},
+        provider_topic_imported_counts={
+            "public_web": {"market": 1, "industry": 1}
+        },
+        provider_names={"public_web": "Public web and press search"},
+        deals=[
+            ResearchImportDealSummary(
+                deal_id="deal-1",
+                company_name="TopicResearchCo",
+                evidence_store_path=tmp_path / "evidence.json",
+                imported_count=2,
+            )
+        ],
+    )
+    research_run = evaluation.EvaluationResearchRun(
+        workflow=workflow,
+        imports=[import_summary],
+    )
+
+    exported = evaluation._research_export(research_run)
+    statuses = {
+        (status["provider_id"], status["research_topic"]): status
+        for status in exported["provider_statuses"]
+    }
+    assert statuses[("public_web", "market")]["imported_count"] == 1
+    assert statuses[("public_web", "industry")]["imported_count"] == 1
+
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="TopicResearchCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=50,
+        one_line_reason="Synthetic PASS.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Synthetic PASS.",
+        evidence=[],
+    )
+    final_output = AgentReviewOutput(
+        deal_id=scored_deal.deal_id,
+        company_name=scored_deal.company_name,
+        agent_role=AgentRole.FINAL_DECISION,
+        recommendation=final_recommendation,
+    )
+    memo_text = evaluation.render_final_evaluation_memo(
+        scored_deal,
+        EvidenceStore(
+            deal_id=scored_deal.deal_id,
+            company_name=scored_deal.company_name,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+        specialist_results=[],
+        final_output=final_output,
+        final_recommendation=final_recommendation,
+        research_run=research_run,
+    )
+
+    assert "Public web and press search / industry: imported" in memo_text
+    assert "Public web and press search / market: imported" in memo_text
+
+
 def test_evaluate_deal_surfaces_stale_only_research_quality(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1218,7 +1295,7 @@ def test_evaluate_deal_warns_incomplete_search_is_not_clean_no_evidence(
     assert "Some external searches were incomplete" in memo_text
     assert "0 failed providers, 1 incomplete search" in memo_text
     assert "Provider statuses:" in memo_text
-    assert "USAspending: incomplete search" in memo_text
+    assert "USAspending / funding: incomplete search" in memo_text
     assert memo_text.index("## External Research") < memo_text.index("## Final Recommendation")
 
 
@@ -2487,6 +2564,46 @@ def test_evaluate_deal_cli_commentary_preserves_uncertainty_labels(
     commentary = evaluation.build_evaluate_deal_cli_commentary(result)
 
     assert commentary.decisive_factor.startswith("Needs diligence:")
+
+
+def test_evaluate_deal_cli_commentary_labels_strict_mode_gaps(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="StrictRiskCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=65,
+        calculated_risk_mode=False,
+        one_line_reason="Passed under strict-risk scoring.",
+        kill_gates=[
+            KillGate(
+                name="Missing external research",
+                triggered=True,
+                reason="External research is missing.",
+                support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+                force_pass=False,
+            )
+        ],
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Strict-risk scoring kept the deal at PASS.",
+        evidence=[],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+    )
+
+    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+    risks = " ".join(commentary.risks)
+
+    assert "strict-risk gap" in risks
+    assert "calculated-risk gap" not in risks
 
 
 def test_evaluate_deal_cli_commentary_separates_check_size_caps_from_overrides(

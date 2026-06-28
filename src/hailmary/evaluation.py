@@ -415,11 +415,16 @@ def _cli_risk_points(result: DealEvaluationResult) -> list[str]:
                 f"{_operator_factor_name(gate.name)}."
             ),
         )
+    risk_gap_label = (
+        "calculated-risk gap"
+        if result.deterministic_score.calculated_risk_mode
+        else "strict-risk gap"
+    )
     for gate in result.deterministic_score.triggered_risk_gaps:
         _add_cli_point(
             points,
             (
-                "A calculated-risk gap remains: "
+                f"A {risk_gap_label} remains: "
                 f"{_operator_factor_name(gate.name)}."
             ),
         )
@@ -1965,6 +1970,7 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
             {
                 "provider_id": status.provider_id,
                 "provider_name": status.provider_name,
+                "research_topic": status.research_topic,
                 "status": status.status.value,
                 "planned_count": status.planned_count,
                 "collected_count": status.collected_count,
@@ -3402,7 +3408,11 @@ def _research_provider_status_memo_lines(
 ) -> list[str]:
     statuses = sorted(
         _evaluation_research_provider_statuses(research_run),
-        key=lambda status: (status.provider_name.casefold(), status.provider_id),
+        key=lambda status: (
+            status.provider_name.casefold(),
+            status.provider_id,
+            status.research_topic,
+        ),
     )
     if not statuses:
         return []
@@ -3425,8 +3435,11 @@ def _research_provider_status_memo_lines(
         if status.failure:
             details.append(f"failure: {_memo_text(status.failure)}")
         detail_text = f" ({'; '.join(details)})" if details else ""
+        provider_label = _memo_text(status.provider_name)
+        if status.research_topic != "company":
+            provider_label = f"{provider_label} / {_memo_text(status.research_topic)}"
         lines.append(
-            f"  - {_memo_text(status.provider_name)}: "
+            f"  - {provider_label}: "
             f"{status.status.value.replace('_', ' ')}{detail_text}."
         )
     return lines
@@ -3436,38 +3449,80 @@ def _evaluation_research_provider_statuses(
     research_run: EvaluationResearchRun,
 ) -> list[ResearchProviderStatusSummary]:
     statuses = {
-        status.provider_id: status
+        _research_provider_topic_key(status.provider_id, status.research_topic): status
         for status in research_run.workflow.summary.provider_statuses
     }
     for import_summary in research_run.imports:
-        for provider_id, imported_count in import_summary.provider_imported_counts.items():
-            if imported_count <= 0:
-                continue
-            existing = statuses.get(provider_id)
-            provider_name = (
-                import_summary.provider_names.get(provider_id)
-                or (existing.provider_name if existing is not None else provider_id)
-            )
-            statuses[provider_id] = ResearchProviderStatusSummary(
+        topic_import_counts = _provider_topic_import_counts(import_summary)
+        for (provider_id, research_topic), imported_count in topic_import_counts.items():
+            _merge_imported_research_status(
+                statuses,
+                import_summary=import_summary,
                 provider_id=provider_id,
-                provider_name=provider_name,
-                status=_provider_status_after_import(existing),
-                planned_count=existing.planned_count if existing is not None else 0,
-                collected_count=0,
-                imported_count=(
-                    (existing.imported_count if existing is not None else 0)
-                    + imported_count
-                ),
-                warning_count=existing.warning_count if existing is not None else 0,
-                no_exact_result_companies=(
-                    existing.no_exact_result_companies if existing is not None else []
-                ),
-                incomplete_search=(
-                    existing.incomplete_search if existing is not None else False
-                ),
-                failure=existing.failure if existing is not None else None,
+                research_topic=research_topic,
+                imported_count=imported_count,
             )
     return list(statuses.values())
+
+
+def _provider_topic_import_counts(
+    import_summary: ResearchImportRunSummary,
+) -> dict[tuple[str, str], int]:
+    topic_counts: dict[tuple[str, str], int] = {}
+    providers_with_topic_counts: set[str] = set()
+    for provider_id, topic_counts_by_topic in (
+        import_summary.provider_topic_imported_counts.items()
+    ):
+        for research_topic, imported_count in topic_counts_by_topic.items():
+            if imported_count > 0:
+                providers_with_topic_counts.add(provider_id.strip())
+                topic_counts[
+                    _research_provider_topic_key(provider_id, research_topic)
+                ] = imported_count
+    for provider_id, imported_count in import_summary.provider_imported_counts.items():
+        if imported_count <= 0 or provider_id.strip() in providers_with_topic_counts:
+            continue
+        topic_counts[_research_provider_topic_key(provider_id, "company")] = imported_count
+    return topic_counts
+
+
+def _merge_imported_research_status(
+    statuses: dict[tuple[str, str], ResearchProviderStatusSummary],
+    *,
+    import_summary: ResearchImportRunSummary,
+    provider_id: str,
+    research_topic: str,
+    imported_count: int,
+) -> None:
+    existing = statuses.get((provider_id, research_topic))
+    provider_name = (
+        import_summary.provider_names.get(provider_id)
+        or (existing.provider_name if existing is not None else provider_id)
+    )
+    statuses[(provider_id, research_topic)] = ResearchProviderStatusSummary(
+        provider_id=provider_id,
+        provider_name=provider_name,
+        research_topic=research_topic,
+        status=_provider_status_after_import(existing),
+        planned_count=existing.planned_count if existing is not None else 0,
+        collected_count=0,
+        imported_count=(
+            (existing.imported_count if existing is not None else 0) + imported_count
+        ),
+        warning_count=existing.warning_count if existing is not None else 0,
+        no_exact_result_companies=(
+            existing.no_exact_result_companies if existing is not None else []
+        ),
+        incomplete_search=existing.incomplete_search if existing is not None else False,
+        failure=existing.failure if existing is not None else None,
+    )
+
+
+def _research_provider_topic_key(
+    provider_id: str,
+    research_topic: str,
+) -> tuple[str, str]:
+    return (provider_id.strip(), research_topic.strip().casefold() or "company")
 
 
 def _provider_status_after_import(

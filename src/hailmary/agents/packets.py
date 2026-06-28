@@ -607,7 +607,7 @@ def _triggered_kill_gate_items(
             support_status=gate.support_status,
         )
         for gate in scored_deal.kill_gates
-        if gate.triggered
+        if gate.triggered and gate.force_pass
     ]
 
 
@@ -702,7 +702,7 @@ def _scoring_support_context(
                 ),
             )
             for gate in scored_deal.kill_gates
-            if gate.triggered
+            if gate.triggered and gate.force_pass
         ],
         net_return_support_status=packet_net_return.support_status,
         net_return_missing_inputs=packet_net_return.missing_inputs,

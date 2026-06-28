@@ -1595,7 +1595,11 @@ def _resolved_research_result_topics(
     research_topic: str,
 ) -> set[str]:
     topics = {research_topic}
-    if research_topic.strip().casefold() != "company":
+    normalized_topic = research_topic.strip().casefold()
+    if provider_id == "public_web" and normalized_topic == "company":
+        topics.update({"market", "competition", "industry"})
+        return topics
+    if normalized_topic != "company":
         return topics
     default_topic = _single_provider_default_research_topic(provider_id)
     if default_topic != "company":

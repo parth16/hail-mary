@@ -315,6 +315,10 @@ class ResearchImportRunSummary(BaseModel):
     evaluate_deal_command: str | None = None
     provider_imported_counts: dict[str, int] = Field(default_factory=dict)
     provider_stale_counts: dict[str, int] = Field(default_factory=dict)
+    provider_topic_imported_counts: dict[str, dict[str, int]] = Field(
+        default_factory=dict
+    )
+    provider_topic_stale_counts: dict[str, dict[str, int]] = Field(default_factory=dict)
     provider_names: dict[str, str] = Field(default_factory=dict)
     deals: list[ResearchImportDealSummary] = Field(default_factory=list)
 
