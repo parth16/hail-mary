@@ -357,7 +357,8 @@ def _eval_definitions() -> list[EvalDefinition]:
                 category=EvalCategory.SCORE_CALIBRATION,
                 name="Borderline deal score calibration",
                 description=(
-                    "Checks that a synthetic 65-74 score stays PASS with a $0 check."
+                    "Checks that a synthetic 65-74 score becomes a capped "
+                    "calculated-risk INVEST."
                 ),
             ),
             run=lambda _: fixtures.run_borderline_score_fixture(),
@@ -368,8 +369,8 @@ def _eval_definitions() -> list[EvalDefinition]:
                 category=EvalCategory.SCORE_CALIBRATION,
                 name="Missing terms PASS calibration",
                 description=(
-                    "Checks that missing valuation or valuation-cap evidence forces "
-                    "PASS with a $0 check."
+                    "Checks that missing valuation or valuation-cap evidence remains "
+                    "a calculated-risk gap instead of a hard PASS."
                 ),
             ),
             run=lambda _: fixtures.run_missing_terms_score_fixture(),
@@ -392,8 +393,8 @@ def _eval_definitions() -> list[EvalDefinition]:
                 category=EvalCategory.SCORE_CALIBRATION,
                 name="Stale and conflicting evidence PASS calibration",
                 description=(
-                    "Checks that stale-only support and valid conflicting terms produce "
-                    "PASS with explainable gates or missing-input status."
+                    "Checks that stale-only support is capped as calculated risk while "
+                    "valid conflicting terms still force PASS."
                 ),
             ),
             run=lambda _: fixtures.run_stale_conflicting_score_fixture(),
@@ -452,8 +453,8 @@ def _eval_definitions() -> list[EvalDefinition]:
                 category=EvalCategory.SCORE_CALIBRATION,
                 name="High traction overvalued PASS calibration",
                 description=(
-                    "Checks that strong traction does not override a valuation that is "
-                    "far ahead of current stage evidence."
+                    "Checks that strong traction with high valuation risk is capped as "
+                    "calculated risk and keeps valuation evidence visible."
                 ),
             ),
             run=lambda _: fixtures.run_high_traction_overvalued_score_fixture(),
@@ -464,8 +465,8 @@ def _eval_definitions() -> list[EvalDefinition]:
                 category=EvalCategory.SCORE_CALIBRATION,
                 name="Missing deal terms v3 PASS calibration",
                 description=(
-                    "Checks that strong traction and funding still PASS when verified "
-                    "pricing terms are missing."
+                    "Checks that strong traction and funding can support capped "
+                    "calculated-risk INVEST when verified pricing terms are missing."
                 ),
             ),
             run=lambda _: fixtures.run_missing_deal_terms_v3_score_fixture(),

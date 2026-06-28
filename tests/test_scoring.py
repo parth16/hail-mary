@@ -237,12 +237,37 @@ def test_score_evidence_store_keeps_65_to_74_as_pass() -> None:
 
     scored = score_evidence_store(
         _store(evidence=evidence, claims=claims),
-        config=AppConfig(data_dir=Path("data")),
+        config=AppConfig(data_dir=Path("data"), calculated_risk_mode=False),
     )
 
     assert 65 <= scored.total_score <= 74
     assert scored.recommendation == Recommendation.PASS
     assert scored.check_size == 0
+
+
+def test_score_evidence_store_invests_calculated_risk_with_borderline_evidence() -> None:
+    evidence = [
+        _evidence(
+            "ev_all",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        )
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_all"),
+        _claim("discount", "20%", "ev_all"),
+        _claim("round size", "$1M", "ev_all"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert 65 <= scored.total_score <= 74
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.check_size == 1_000
+    assert scored.calculated_risk is True
+    assert "calculated_risk_target" in scored.check_sizing.reason_codes
 
 
 def test_stage_aware_score_changes_are_deterministic_and_evidence_linked() -> None:
@@ -1397,8 +1422,10 @@ def test_non_positive_entry_valuation_does_not_clear_pricing_gate() -> None:
         if gate.name == "Missing key investment terms"
     )
     assert missing_terms_gate.support_status == ScoreSupportStatus.NEEDS_DILIGENCE
-    assert scored.recommendation == Recommendation.PASS
-    assert scored.check_size == 0
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.check_size == 1_000
+    assert scored.calculated_risk is True
+    assert missing_terms_gate in scored.triggered_risk_gaps
     assert scored.net_return.entry_valuation is None
 
 
@@ -1622,7 +1649,7 @@ def test_portfolio_report_explains_score_below_threshold_skip() -> None:
         _claim("discount", "20%", "ev_all"),
         _claim("round size", "$1M", "ev_all"),
     ]
-    config = AppConfig(data_dir=Path("data"))
+    config = AppConfig(data_dir=Path("data"), calculated_risk_mode=False)
     scored = score_evidence_store(_store(evidence=evidence, claims=claims), config=config)
 
     report = render_portfolio_report([scored], config=config)
@@ -2802,8 +2829,9 @@ def test_score_evidence_store_passes_when_support_is_stale_only() -> None:
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert scored.recommendation == Recommendation.PASS
-    assert scored.check_size == 0
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.check_size == 1_000
+    assert scored.calculated_risk is True
     assert scored.fundability_risk == FundabilityRisk.HIGH
     assert _score_factor(scored, "Evidence authority and freshness").evidence_ids[0] == (
         "ev_terms"
@@ -2863,10 +2891,12 @@ def test_score_evidence_store_requires_verified_pricing_terms_to_invest() -> Non
         config=AppConfig(data_dir=Path("data")),
     )
 
-    assert scored.recommendation == Recommendation.PASS
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.check_size == 1_000
+    assert scored.calculated_risk is True
     assert any(
         gate.name == "Missing key investment terms"
-        for gate in scored.triggered_kill_gates
+        for gate in scored.triggered_risk_gaps
     )
     terms_factor = _score_factor(scored, "Deal terms and platform access")
     assert terms_factor.support_status == ScoreSupportStatus.NEEDS_DILIGENCE

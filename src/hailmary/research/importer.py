@@ -83,6 +83,7 @@ RESEARCH_RESULT_FIELDS = {
     "company_name",
     "provider_id",
     "provider_name",
+    "research_topic",
     "title",
     "text",
     "retrieved_at",
@@ -97,6 +98,7 @@ RESEARCH_RESULT_FIELDS = {
     "identity_match_reason",
 }
 LEGACY_RESEARCH_RESULT_FIELDS = RESEARCH_RESULT_FIELDS - {
+    "research_topic",
     "source_reliability",
     "identity_match_kind",
     "identity_match_reason",
@@ -1241,6 +1243,7 @@ def _evidence_record_for_result(
         ),
         provider_id=result.provider_id,
         provider_name=provider_name,
+        research_topic=result.research_topic,
         source_url=result.source_url,
         source_api=result.source_api,
         retrieved_at=_as_utc(result.retrieved_at),

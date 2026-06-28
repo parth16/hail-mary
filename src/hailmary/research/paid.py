@@ -408,6 +408,7 @@ def _research_result_for_fact(
             company_name=requested_company_name,
             provider_id=provider.id,
             provider_name=provider.name,
+            research_topic="company",
             title=fact.title,
             text=fact.text,
             retrieved_at=_as_utc(fact.retrieved_at),

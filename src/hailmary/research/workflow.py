@@ -454,10 +454,7 @@ def run_research_workflow(
             ResearchWorkflowIssue(
                 severity="warning",
                 source="live public collection",
-                message=(
-                    "Live collection was not run because local-only mode is on or web "
-                    "research is disabled."
-                ),
+                message="Live collection was not run for this workflow.",
             )
         )
 
@@ -1500,7 +1497,11 @@ def _unresolved_manual_tasks_from_plan(
         task
         for task in plan.tasks
         if _task_needs_manual_work(task)
-        and _research_result_key(task.company_name, task.provider_id)
+        and _research_result_key(
+            task.company_name,
+            task.provider_id,
+            task.research_topic,
+        )
         not in resolved_result_keys
     ]
 
@@ -1508,12 +1509,12 @@ def _unresolved_manual_tasks_from_plan(
 def _resolved_research_result_keys(
     plan: ResearchPlan,
     import_previews: list[ResearchWorkflowImportPreview],
-) -> set[tuple[str, str]]:
+) -> set[tuple[str, str, str]]:
     deal_company_names = {
         deal.deal_id: deal.company_name
         for deal in plan.deals
     }
-    result_keys: set[tuple[str, str]] = set()
+    result_keys: set[tuple[str, str, str]] = set()
     for preview in import_previews:
         if preview.error is not None:
             continue
@@ -1529,12 +1530,53 @@ def _resolved_research_result_keys(
                 company_name = deal_company_names.get(result.deal_id)
             if company_name is None:
                 continue
-            result_keys.add(_research_result_key(company_name, result.provider_id))
+            for research_topic in _resolved_research_result_topics(
+                result.provider_id,
+                result.research_topic,
+            ):
+                result_keys.add(
+                    _research_result_key(
+                        company_name,
+                        result.provider_id,
+                        research_topic,
+                    )
+                )
     return result_keys
 
 
-def _research_result_key(company_name: str, provider_id: str) -> tuple[str, str]:
-    return (company_name.strip().casefold(), provider_id.strip())
+def _resolved_research_result_topics(
+    provider_id: str,
+    research_topic: str,
+) -> set[str]:
+    topics = {research_topic}
+    if research_topic.strip().casefold() != "company":
+        return topics
+    default_topic = _single_provider_default_research_topic(provider_id)
+    if default_topic != "company":
+        topics.add(default_topic)
+    return topics
+
+
+def _single_provider_default_research_topic(provider_id: str) -> str:
+    if provider_id in {"sec_form_d", "usaspending", "sbir", "sam_gov"}:
+        return "funding"
+    if provider_id == "uspto":
+        return "legal"
+    if provider_id == "github":
+        return "traction"
+    return "company"
+
+
+def _research_result_key(
+    company_name: str,
+    provider_id: str,
+    research_topic: str,
+) -> tuple[str, str, str]:
+    return (
+        company_name.strip().casefold(),
+        provider_id.strip(),
+        research_topic.strip().casefold(),
+    )
 
 
 def _task_needs_manual_work(task: ResearchTask) -> bool:

@@ -151,6 +151,7 @@ def _template_result_for_task(
         "company_name": task.company_name,
         "provider_id": task.provider_id,
         "provider_name": task.provider_name,
+        "research_topic": task.research_topic,
         "title": "",
         "text": "",
         "retrieved_at": "",

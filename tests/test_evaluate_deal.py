@@ -72,6 +72,7 @@ from hailmary.schemas.evidence import (
 from hailmary.schemas.scoring import (
     ConfidenceLevel,
     DiligenceQuestion,
+    KillGate,
     Recommendation,
     ScoredDeal,
     ScoreFactor,
@@ -174,7 +175,7 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "What stood out positively" in result.output
     assert "Key risks" in result.output
     assert "Decisive factor" in result.output
-    assert "The recommendation is INVEST because" in result.output
+    assert "The recommendation is INVEST" in result.output
     assert "Company" in result.output
     assert "Mode" in result.output
     assert "Documents ingested" in result.output
@@ -523,7 +524,7 @@ def test_evaluate_deal_final_memo_v2_sections_keep_decision_first(
     assert "Net return multiple" in memo_text
 
 
-def test_evaluate_deal_borderline_score_stays_pass(
+def test_evaluate_deal_borderline_score_uses_calculated_risk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -541,10 +542,11 @@ def test_evaluate_deal_borderline_score_stays_pass(
     )
 
     assert 65 <= result.deterministic_score.total_score <= 74
-    assert result.deterministic_score.recommendation == Recommendation.PASS
-    assert result.deterministic_score.check_size == 0
-    assert result.final_recommendation.recommendation == Recommendation.PASS
-    assert result.final_recommendation.check_size == 0
+    assert result.deterministic_score.recommendation == Recommendation.INVEST
+    assert result.deterministic_score.check_size == 1_000
+    assert result.deterministic_score.calculated_risk is True
+    assert result.final_recommendation.recommendation == Recommendation.INVEST
+    assert result.final_recommendation.check_size == 1_000
 
 
 def test_evaluate_deal_missing_terms_stays_pass(
@@ -1324,6 +1326,14 @@ def test_local_only_pass_warns_when_citations_are_filtered() -> None:
         check_size=0,
         total_score=40,
         one_line_reason="Missing verified traction.",
+        kill_gates=[
+            KillGate(
+                name="Synthetic unsafe support",
+                triggered=True,
+                reason="Synthetic gate for PASS citation filtering.",
+                evidence_ids=["ev-instruction"],
+            )
+        ],
         score_factors=[
             ScoreFactor(
                 name="Synthetic support",
@@ -1527,7 +1537,7 @@ def test_deterministic_citation_validation_caps_after_filtering() -> None:
             quote="ARR revenue growth with paid customers and retention",
         )
     ]
-    assert selection.filtered_reference_count == 5
+    assert selection.filtered_reference_count == 3
 
 
 def test_local_only_invest_downgrades_when_any_scoring_support_is_unsafe() -> None:
@@ -1946,10 +1956,13 @@ def test_evaluate_deal_deterministic_pass_overrides_model_invest(
     assert result.deterministic_score.recommendation == Recommendation.PASS
     assert result.final_recommendation.recommendation == Recommendation.PASS
     assert result.final_recommendation.check_size == 0
-    assert any("forced final PASS" in warning for warning in result.warnings)
+    assert any(
+        "kept final PASS/$0 because calculated-risk gap" in warning
+        for warning in result.warnings
+    )
     memo_text = result.final_memo_path.read_text(encoding="utf-8")
     assert "**Recommendation:** PASS" in memo_text
-    assert "Rule-based scoring forced PASS" in memo_text
+    assert "Final PASS/$0 because calculated-risk gap" in memo_text
     assert "Model recommendation before guardrails: INVEST" in memo_text
     assert "Guardrail override" in memo_text
     assert "Valuation cap" not in result.final_recommendation.reason
@@ -1968,7 +1981,7 @@ def test_evaluate_deal_evidence_audit_blocker_overrides_model_invest(
     monkeypatch.setattr(
         evaluation,
         "build_evidence_completeness_audit",
-        _blocking_evidence_audit,
+        _unsafe_evidence_audit,
     )
 
     result = evaluate_deal_folder(
@@ -1999,7 +2012,7 @@ def test_evaluate_deal_evidence_audit_blocker_overrides_local_invest(
     monkeypatch.setattr(
         evaluation,
         "build_evidence_completeness_audit",
-        _blocking_evidence_audit,
+        _unsafe_evidence_audit,
     )
 
     result = evaluate_deal_folder(
@@ -2013,7 +2026,32 @@ def test_evaluate_deal_evidence_audit_blocker_overrides_local_invest(
     assert result.final_recommendation.check_size == 0
     commentary = evaluation.build_evaluate_deal_cli_commentary(result)
     assert "evidence completeness found blocking gaps" in commentary.decisive_factor
-    assert any("Missing price or valuation" in risk for risk in commentary.risks)
+    assert any("Unsafe source text" in risk for risk in commentary.risks)
+
+
+def test_evaluate_deal_missing_price_audit_gap_does_not_override_calculated_risk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        evaluation,
+        "build_evidence_completeness_audit",
+        _blocking_evidence_audit,
+    )
+
+    result = evaluate_deal_folder(
+        _write_company_folder(tmp_path),
+        config=AppConfig(data_dir=tmp_path / "data", local_only=True),
+        max_concurrency=1,
+    )
+
+    assert result.deterministic_score.recommendation == Recommendation.INVEST
+    assert result.final_recommendation.recommendation == Recommendation.INVEST
+    assert result.final_recommendation.check_size == result.deterministic_score.check_size
+    assert "Evidence completeness audit forced PASS/$0" not in (
+        result.final_recommendation.reason
+    )
 
 
 def test_evaluate_deal_audit_blocker_does_not_claim_force_when_score_already_passes(
@@ -2244,7 +2282,8 @@ def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(
     assert "guardrails controlled" in normalized_output
     assert "final recommendation" in normalized_output
     assert "could not override" in normalized_output
-    assert "forced final PASS" in normalized_output
+    assert "calculated-risk gap" in normalized_output
+    assert "valuation-cap term" in normalized_output
     assert "Valuation cap" not in result.output
 
 
@@ -2425,6 +2464,14 @@ def test_forced_pass_warns_when_rule_based_citations_are_filtered() -> None:
         check_size=0,
         total_score=40,
         one_line_reason="Missing verified traction.",
+        kill_gates=[
+            KillGate(
+                name="Synthetic unsafe support",
+                triggered=True,
+                reason="Synthetic gate for forced-PASS citation filtering.",
+                evidence_ids=[evidence.id],
+            )
+        ],
         score_factors=[
             ScoreFactor(
                 name="Synthetic support",
@@ -2461,7 +2508,7 @@ def test_forced_pass_warns_when_rule_based_citations_are_filtered() -> None:
     assert guarded.recommendation.evidence == []
     assert guarded.recommendation.reason.startswith("NEEDS_DILIGENCE")
     assert "removed all rule-based recommendation citations" in (guarded.warning or "")
-    assert "forced final PASS" in (guarded.warning or "")
+    assert "kept final PASS/$0 because" in (guarded.warning or "")
     memo_text = evaluation.render_final_evaluation_memo(
         scored_deal,
         store,
@@ -2780,6 +2827,7 @@ def test_evaluate_deal_clamps_final_invest_check_to_deterministic_allocation(
         ),
         model_client=client,
         max_concurrency=1,
+        run_research=False,
     )
 
     assert result.deterministic_score.recommendation == Recommendation.INVEST
@@ -2821,7 +2869,7 @@ def test_evaluate_deal_scores_against_capital_after_reserve(
     assert result.deterministic_score.check_size == 0
     assert result.final_recommendation.recommendation == Recommendation.PASS
     assert result.final_recommendation.check_size == 0
-    assert any("forced final PASS" in warning for warning in result.warnings)
+    assert any("kept final PASS/$0 because" in warning for warning in result.warnings)
 
 
 def test_evaluate_deal_subtracts_recorded_portfolio_investments(
@@ -2859,7 +2907,7 @@ def test_evaluate_deal_subtracts_recorded_portfolio_investments(
     assert result.deterministic_score.check_size == 0
     assert result.final_recommendation.recommendation == Recommendation.PASS
     assert result.final_recommendation.check_size == 0
-    assert any("forced final PASS" in warning for warning in result.warnings)
+    assert any("kept final PASS/$0 because" in warning for warning in result.warnings)
 
 
 def test_evaluate_deal_final_memo_includes_conflict_evidence_for_forced_pass(
@@ -3507,6 +3555,34 @@ def _blocking_evidence_audit(
                     "to rely on an investment decision."
                 ),
                 missing_evidence=True,
+            )
+        ],
+    )
+
+
+def _unsafe_evidence_audit(
+    store: EvidenceStore,
+    *,
+    scored_deal: ScoredDeal | None = None,
+) -> EvidenceCompletenessAudit:
+    del scored_deal
+    evidence_ids = [store.evidence[0].id] if store.evidence else []
+    return EvidenceCompletenessAudit(
+        deal_id=store.deal_id,
+        company_name=store.company_name,
+        readiness=EvidenceAuditReadiness.INSUFFICIENT,
+        findings=[
+            EvidenceAuditFinding(
+                id="finding_unsafe_source_text",
+                kind=EvidenceAuditFindingKind.UNSAFE_SOURCE,
+                severity=EvidenceAuditSeverity.BLOCKING,
+                title="Unsafe source text",
+                explanation=(
+                    "A cited source contains source-document instructions and cannot "
+                    "support an investment decision."
+                ),
+                evidence_ids=evidence_ids,
+                missing_evidence=not evidence_ids,
             )
         ],
     )

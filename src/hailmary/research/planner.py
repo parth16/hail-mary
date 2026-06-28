@@ -220,28 +220,42 @@ def _build_tasks(
                 if provider.id == "meridian"
                 else adapter.build_url(deal.company_name, deal.website_url)
             )
-            tasks.append(
-                ResearchTask(
-                    id=f"task_{deal.deal_id}_{provider.id}",
-                    deal_id=deal.deal_id,
-                    company_name=deal.company_name,
-                    provider_id=provider.id,
-                    provider_name=provider.name,
-                    provider_category=provider.category,
-                    source_kind=provider.source_kind,
-                    status=_task_status(provider.category, task_url),
-                    query=_task_query(deal.company_name, provider.id),
-                    url=task_url,
-                    created_at=created_at,
-                    licensing_notes=provider.licensing_notes,
-                    evidence_policy=EVIDENCE_POLICY,
-                    operator_note=_task_operator_note(provider.operator_note, task_url),
-                    what_to_look_for=_task_look_for(provider.id),
-                    do_not_copy=_task_do_not_copy(provider.category),
-                    required_metadata=list(REQUIRED_METADATA),
+            for topic in _provider_topics(provider.id):
+                tasks.append(
+                    ResearchTask(
+                        id=f"task_{deal.deal_id}_{provider.id}_{topic}",
+                        deal_id=deal.deal_id,
+                        company_name=deal.company_name,
+                        provider_id=provider.id,
+                        provider_name=provider.name,
+                        research_topic=topic,
+                        provider_category=provider.category,
+                        source_kind=provider.source_kind,
+                        status=_task_status(provider.category, task_url),
+                        query=_task_query(deal.company_name, provider.id, topic),
+                        url=task_url,
+                        created_at=created_at,
+                        licensing_notes=provider.licensing_notes,
+                        evidence_policy=EVIDENCE_POLICY,
+                        operator_note=_task_operator_note(provider.operator_note, task_url),
+                        what_to_look_for=_task_look_for(provider.id, topic),
+                        do_not_copy=_task_do_not_copy(provider.category),
+                        required_metadata=list(REQUIRED_METADATA),
+                    )
                 )
-            )
     return tasks
+
+
+def _provider_topics(provider_id: str) -> tuple[str, ...]:
+    if provider_id == "public_web":
+        return ("market", "competition", "industry")
+    if provider_id in {"sec_form_d", "usaspending", "sbir", "sam_gov"}:
+        return ("funding",)
+    if provider_id == "uspto":
+        return ("legal",)
+    if provider_id == "github":
+        return ("traction",)
+    return ("company",)
 
 
 def _task_status(
@@ -258,9 +272,14 @@ def _task_status(
     return ResearchTaskStatus.PLANNED
 
 
-def _task_query(company_name: str, provider_id: str) -> str:
+def _task_query(company_name: str, provider_id: str, topic: str) -> str:
     if provider_id == "public_web":
-        return f"{company_name} official site press customers funding"
+        topic_terms = {
+            "market": "market size category growth customer demand",
+            "competition": "competitors alternatives competitive landscape",
+            "industry": "industry trends benchmarks regulation adoption",
+        }.get(topic, "official site press customers funding")
+        return f"{company_name} {topic_terms}"
     return company_name
 
 
@@ -270,7 +289,7 @@ def _task_operator_note(operator_note: str, task_url: str | None) -> str:
     return f"{operator_note} Hail Mary did not generate a direct URL for this task."
 
 
-def _task_look_for(provider_id: str) -> list[str]:
+def _task_look_for(provider_id: str, topic: str = "company") -> list[str]:
     if provider_id == "company_website":
         return [
             "official company pages that support traction, customers, pricing, product, "
@@ -308,6 +327,21 @@ def _task_look_for(provider_id: str) -> list[str]:
             "repository metadata such as activity, language, stars, license, and public URL",
         ]
     if provider_id == "public_web":
+        if topic == "market":
+            return [
+                "primary public sources about market size, growth, buyer urgency, and adoption",
+                "facts that can be tied to one exact source URL",
+            ]
+        if topic == "competition":
+            return [
+                "primary public sources naming competitors, substitutes, pricing, or positioning",
+                "facts that can be tied to one exact source URL",
+            ]
+        if topic == "industry":
+            return [
+                "industry benchmarks, regulatory context, customer budgets, and category risks",
+                "facts that can be tied to one exact source URL",
+            ]
         return [
             "primary public pages, press releases, customer pages, and benchmark reports",
             "facts that can be tied to one exact source URL",

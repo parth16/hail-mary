@@ -84,6 +84,7 @@ class ResearchTask(BaseModel):
     company_name: str
     provider_id: str
     provider_name: str
+    research_topic: str = "company"
     provider_category: ResearchProviderCategory
     source_kind: SourceKind
     status: ResearchTaskStatus
@@ -137,6 +138,7 @@ class ResearchResultInput(BaseModel):
     company_name: str | None = None
     provider_id: str
     provider_name: str | None = None
+    research_topic: str = "company"
     title: str
     text: str
     retrieved_at: datetime
@@ -193,6 +195,7 @@ class ResearchResultInput(BaseModel):
         "deal_id",
         "company_name",
         "provider_name",
+        "research_topic",
         "source_url",
         "source_api",
         "source_reliability",
@@ -209,6 +212,7 @@ class ResearchResultInput(BaseModel):
     @field_validator(
         "provider_id",
         "provider_name",
+        "research_topic",
         "title",
         "text",
         "source_url",
@@ -221,7 +225,14 @@ class ResearchResultInput(BaseModel):
     def strip_text(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
 
-    @field_validator("provider_id", "title", "text", "confidence", "licensing_notes")
+    @field_validator(
+        "provider_id",
+        "research_topic",
+        "title",
+        "text",
+        "confidence",
+        "licensing_notes",
+    )
     @classmethod
     def require_nonblank_text(cls, value: str) -> str:
         if not value:

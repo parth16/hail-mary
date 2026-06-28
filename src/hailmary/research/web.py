@@ -76,6 +76,7 @@ class WebResearchTaskSummary(BaseModel):
     company_name: str
     provider_id: str
     provider_name: str
+    research_topic: str = "company"
     url: str | None = None
     status: str
     reason: str
@@ -497,6 +498,7 @@ def _research_result_for_task(
         company_name=task.company_name,
         provider_id=task.provider_id,
         provider_name=task.provider_name,
+        research_topic=task.research_topic,
         title=page.title,
         text=page.text,
         retrieved_at=collected_at,
@@ -610,6 +612,7 @@ def _task_summary(task: ResearchTask, *, status: str, reason: str) -> WebResearc
         company_name=task.company_name,
         provider_id=task.provider_id,
         provider_name=task.provider_name,
+        research_topic=task.research_topic,
         url=task.url,
         status=status,
         reason=reason,

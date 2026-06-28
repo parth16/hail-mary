@@ -240,7 +240,7 @@ def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> Non
     )
 
     assert result.deal_count == 1
-    assert result.task_count == 8
+    assert result.task_count == 10
     assert result.output_path.exists()
     assert result.output_path.parent == tmp_path / "data" / "research-plans"
     assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
@@ -256,6 +256,7 @@ def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> Non
     saved = json.loads(result.output_path.read_text(encoding="utf-8"))
     assert saved["deals"][0]["company_name"] == "Acme AI"
     assert saved["tasks"][0]["confidence"] == "not_collected"
+    assert saved["tasks"][0]["research_topic"]
     assert "provider, timestamp, exact URL" in saved["tasks"][0]["evidence_policy"]
     assert any(
         "source_url or source_api" in item
@@ -1432,7 +1433,8 @@ def test_run_research_workflow_local_public_manual_provider_is_ready_to_import(
     )
     assert sam_status.status == ResearchProviderRunStatus.PLANNED
     assert sam_status.collected_count == 1
-    assert result.summary.manual_needed_provider_count == result.manual_task_count - 1
+    assert result.unresolved_manual_task_count == result.manual_task_count - 1
+    assert result.summary.manual_needed_provider_count < result.manual_task_count
 
 
 def test_prepare_research_plan_rejects_meridian_url_for_multiple_companies(
@@ -4850,6 +4852,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
         "company_name",
         "provider_id",
         "provider_name",
+        "research_topic",
         "title",
         "text",
         "retrieved_at",
@@ -4866,6 +4869,7 @@ def test_prepare_meridian_workflow_writes_private_workflow_and_template(
     assert row["company_name"] == "Acme AI"
     assert row["provider_id"] == "meridian"
     assert row["provider_name"] == "Meridian deal page"
+    assert row["research_topic"] == "company"
     assert row["title"].startswith("Meridian: ")
     assert row["text"] == ""
     assert row["source_url"] == "https://portal.angellist.com/m/acme-ai/invest"
@@ -5174,6 +5178,7 @@ def test_prepare_research_results_template_writes_private_fillable_file(
         "company_name": "Acme AI",
         "provider_id": "company_website",
         "provider_name": "Company website",
+        "research_topic": "company",
         "title": "",
         "text": "",
         "retrieved_at": "",
@@ -8447,7 +8452,7 @@ def test_import_research_results_command_reports_untouched_template_rows(
     )
 
     assert result.exit_code == 0, result.output
-    assert "Skipped 7 untouched template rows." in result.output
+    assert "Skipped 9 untouched template rows." in result.output
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
