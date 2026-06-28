@@ -379,6 +379,15 @@ CALCULATED_RISK_CURRENT_FUNDING_PATTERNS = (
         rf"(?:\S+\s+){{0,4}}{CALCULATED_RISK_FUNDING_SIGNAL}\b",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"\bled\s+(?:a\s+|an\s+|the\s+)?{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:is|are|was|were)\s+(?:a\s+|an\s+|the\s+)?"
+        r"(?:lead\s+investor|institutional(?:\s+investors?)?)\b",
+        re.IGNORECASE,
+    ),
 )
 PRICING_TERM_LABELS = {
     "post-money valuation",
@@ -2367,16 +2376,17 @@ def _calculated_risk_check_cap(
     has_pricing_term: bool,
     research_context: DiligenceResearchContext | None,
 ) -> int:
-    has_external_research = (
+    has_current_external_research = (
         research_context is not None
         and research_context.imported_record_count > 0
+        and not research_context.stale_only_research
     )
     if (
         total_score < 70
         or confidence == ConfidenceLevel.LOW
         or valuation_risk == ValuationRisk.HIGH
         or not has_pricing_term
-        or not has_external_research
+        or not has_current_external_research
     ):
         return 1_000
     return 2_500

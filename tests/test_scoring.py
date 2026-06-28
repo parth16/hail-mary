@@ -271,6 +271,38 @@ def test_score_evidence_store_invests_calculated_risk_with_borderline_evidence()
     assert "calculated_risk_target" in scored.check_sizing.reason_codes
 
 
+def test_score_evidence_store_caps_stale_only_research_at_small_check() -> None:
+    current_research_score = score_evidence_store(
+        _strong_store(deal_id="deal_current_research", company_name="CurrentResearchCo"),
+        config=AppConfig(data_dir=Path("data")),
+        research_context=DiligenceResearchContext(
+            planned_task_count=1,
+            imported_record_count=1,
+        ),
+    )
+    stale_research_score = score_evidence_store(
+        _strong_store(deal_id="deal_stale_research", company_name="StaleResearchCo"),
+        config=AppConfig(data_dir=Path("data")),
+        research_context=DiligenceResearchContext(
+            planned_task_count=1,
+            imported_record_count=1,
+            stale_record_count=1,
+            stale_only_research=True,
+        ),
+    )
+
+    assert current_research_score.total_score == stale_research_score.total_score
+    assert current_research_score.check_size == 2_500
+    assert stale_research_score.recommendation == Recommendation.INVEST
+    assert stale_research_score.check_size == 1_000
+    assert stale_research_score.calculated_risk is True
+    assert any(
+        gate.name == "External research incomplete"
+        and "all imported external research was stale" in gate.reason
+        for gate in stale_research_score.triggered_risk_gaps
+    )
+
+
 def test_score_evidence_store_requires_business_signal_for_calculated_risk() -> None:
     evidence = [
         _evidence(
@@ -308,6 +340,43 @@ def test_score_evidence_store_requires_business_signal_for_calculated_risk() -> 
     assert "customer, revenue, retention, usage, pilot, or design-partner proof" in (
         pmf_factor.missing_inputs
     )
+
+
+@pytest.mark.parametrize(
+    "funding_text",
+    [
+        "Sequoia led the seed round.",
+        "Sequoia is the lead investor.",
+    ],
+)
+def test_score_evidence_store_accepts_led_current_funding_for_calculated_risk(
+    funding_text: str,
+) -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. Pre-seed company. "
+            "Investor ownership target 1%. Estimated dilution 20%. Platform fee 5%. "
+            "Carry 20%. Gross exit value $1B.",
+        ),
+        _evidence("ev_category", "Category: synthetic software."),
+        _evidence("ev_current_funding", funding_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert 60 <= scored.total_score < 75
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.check_size == 1_000
+    assert scored.calculated_risk is True
 
 
 @pytest.mark.parametrize(

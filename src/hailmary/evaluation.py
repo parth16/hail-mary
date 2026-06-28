@@ -62,6 +62,7 @@ from hailmary.research import (
     ResearchQualityMetric,
     ResearchQualityStatus,
     ResearchWorkflowError,
+    ResearchWorkflowIssue,
     ResearchWorkflowRunSummary,
     SbirAwardsClient,
     SecFormDFilingsClient,
@@ -123,6 +124,7 @@ MAX_CLI_COMMENTARY_CHARS = 220
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3
 DEFAULT_RESPONSE_TOKEN_ESTIMATE = 2_000
 MIN_PRIVACY_SOURCE_FRAGMENT_CHARS = 40
+MERIDIAN_MANUAL_WORKFLOW_WARNING_PREFIX = "Meridian is a manual authenticated workflow."
 SPECIALIST_AGENT_ROLES: tuple[AgentRole, ...] = tuple(
     role for role in DEFAULT_AGENT_ROLES if role != AgentRole.FINAL_DECISION
 )
@@ -275,8 +277,23 @@ def _diligence_research_context(
         identity_mismatch_count=quality.identity_mismatch_count
         if quality is not None
         else 0,
-        warning_count=summary.warning_count,
+        warning_count=_actionable_research_warning_count(workflow),
         no_prepared_result_companies=workflow.no_prepared_result_companies,
+    )
+
+
+def _actionable_research_warning_count(workflow: ResearchWorkflowRunSummary) -> int:
+    return sum(
+        1
+        for issue in workflow.issues
+        if issue.severity == "warning" and not _is_advisory_research_warning(issue)
+    ) + sum(len(collection.warnings) for collection in workflow.collections)
+
+
+def _is_advisory_research_warning(issue: ResearchWorkflowIssue) -> bool:
+    return (
+        issue.source == "meridian"
+        and issue.message.startswith(MERIDIAN_MANUAL_WORKFLOW_WARNING_PREFIX)
     )
 
 

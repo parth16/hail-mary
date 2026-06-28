@@ -809,6 +809,61 @@ def test_diligence_research_context_counts_existing_quality_records(
     assert context.imported_record_count == 1
 
 
+def test_diligence_research_context_excludes_meridian_advisory_warning(
+    tmp_path: Path,
+) -> None:
+    workflow = _research_workflow_summary(
+        tmp_path,
+        company_name="MeridianCompleteCo",
+        live_collection_enabled=False,
+        issues=[
+            ResearchWorkflowIssue(
+                severity="warning",
+                source="meridian",
+                message=(
+                    "Meridian is a manual authenticated workflow. Complete the "
+                    "Meridian results template with short source-backed facts and "
+                    "run the import dry run before relying on Meridian evidence."
+                ),
+            )
+        ],
+    )
+    research_run = evaluation.EvaluationResearchRun(
+        workflow=workflow,
+        imports=[
+            ResearchImportRunSummary(
+                input_path=tmp_path / "meridian-results.json",
+                imported_at=datetime(2026, 1, 2, tzinfo=UTC),
+                deals=[
+                    ResearchImportDealSummary(
+                        deal_id="deal-1",
+                        company_name="MeridianCompleteCo",
+                        evidence_store_path=tmp_path / "evidence.json",
+                        imported_count=1,
+                    )
+                ],
+            )
+        ],
+        quality_status=ResearchQualityStatus(
+            status="usable",
+            imported_record_count=1,
+            current_record_count=1,
+            stale_record_count=0,
+            unknown_freshness_record_count=0,
+            unknown_reliability_record_count=0,
+            ambiguous_or_related_match_count=0,
+            identity_mismatch_count=0,
+        ),
+    )
+
+    context = evaluation._diligence_research_context(research_run)
+
+    assert workflow.summary.warning_count == 1
+    assert context is not None
+    assert context.imported_record_count == 1
+    assert context.warning_count == 0
+
+
 def test_evaluate_deal_skip_research_adds_soft_research_gap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
