@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from hailmary.config import AppConfig
 
 from .collection import (
+    SEC_FORM_D_USER_AGENT_ENV_VAR,
     GitHubRepositorySearchClient,
     SbirAwardsClient,
     SecFormDFilingsClient,
@@ -414,7 +415,7 @@ def run_research_workflow(
                     )
                 )
 
-    live_collection_enabled = not config.local_only and config.enable_web_research
+    live_collection_enabled = True
     if live_collection_enabled:
         live_summaries = _run_live_collectors(
             config=config,
@@ -711,10 +712,12 @@ def _run_live_collectors(
             client=web_client,
         )
     ]
-    live_collectors: list[tuple[str, str, Callable[[], object]]] = [
+    live_collectors: list[tuple[str, str, bool, Callable[[], object]]] = [
         (
             "sec_form_d",
             "SEC Form D",
+            sec_form_d_client is not None
+            or bool(os.environ.get(SEC_FORM_D_USER_AGENT_ENV_VAR, "").strip()),
             lambda: collect_sec_form_d_filings(
                 config=config,
                 company_names=company_names,
@@ -725,6 +728,7 @@ def _run_live_collectors(
         (
             "usaspending",
             "USAspending",
+            usaspending_client is not None,
             lambda: collect_usaspending_awards(
                 config=config,
                 company_names=company_names,
@@ -735,6 +739,7 @@ def _run_live_collectors(
         (
             "sbir",
             "SBIR/STTR",
+            sbir_client is not None,
             lambda: collect_sbir_awards(
                 config=config,
                 company_names=company_names,
@@ -745,6 +750,7 @@ def _run_live_collectors(
         (
             "github",
             "GitHub",
+            github_client is not None,
             lambda: collect_github_repositories(
                 config=config,
                 company_names=company_names,
@@ -753,7 +759,17 @@ def _run_live_collectors(
             ),
         ),
     ]
-    for source_id, source_name, collector in live_collectors:
+    for source_id, source_name, should_run, collector in live_collectors:
+        if not should_run:
+            summaries.append(
+                ResearchWorkflowCollectionSummary(
+                    kind="live_public",
+                    source_id=source_id,
+                    source_name=source_name,
+                    status=ResearchProviderRunStatus.NOT_RUN,
+                )
+            )
+            continue
         try:
             result = collector()
         except Exception as exc:
@@ -1337,8 +1353,8 @@ def _merge_provider_status(
         ResearchProviderRunStatus.IMPORTED: 2,
         ResearchProviderRunStatus.NO_EXACT_RESULTS: 3,
         ResearchProviderRunStatus.MANUAL_NEEDED: 4,
-        ResearchProviderRunStatus.PLANNED: 5,
-        ResearchProviderRunStatus.NOT_RUN: 6,
+        ResearchProviderRunStatus.NOT_RUN: 5,
+        ResearchProviderRunStatus.PLANNED: 6,
     }
     return existing if rank[existing] <= rank[incoming] else incoming
 

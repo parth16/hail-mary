@@ -726,6 +726,7 @@ def test_init_force_recovers_invalid_saved_config(
     config_text = (config_dir / "config.yaml").read_text(encoding="utf-8")
     assert 'data_dir: "local-data"' in config_text
     assert "local_only: true" in config_text
+    assert "enable_web_research: false" in config_text
 
 
 def test_ingest_folder_unsafe_data_dir_has_plain_english_error(

@@ -352,8 +352,8 @@ def _plan_notes(
     ]
     if config.local_only:
         notes.append(
-            "Local-only mode is on, so Hail Mary prepared a checklist but will "
-            "not run web research."
+            "Local-only mode is on for model review and paid providers; public web "
+            "research still runs by default."
         )
     elif not config.enable_web_research:
         notes.append(
