@@ -1357,7 +1357,13 @@ def diligence_questions_list_command(
     else:
         renderables.append(_plain("Use --show-all to print every raw question."))
     if show_answers:
-        renderables.extend(_diligence_answer_lines(context.queue, answers_by_question_id))
+        renderables.extend(
+            _diligence_answer_lines(
+                context.queue,
+                answers_by_question_id,
+                show_question_ids=show_all,
+            )
+        )
     _print_panel("Diligence questions", renderables, border_style="green")
 
 
@@ -1547,6 +1553,8 @@ def _diligence_question_table(
 def _diligence_answer_lines(
     queue: DiligenceQuestionQueue,
     answers_by_question_id: Mapping[str, object],
+    *,
+    show_question_ids: bool,
 ) -> list[Text]:
     lines: list[Text] = []
     for question in queue.questions:
@@ -1554,7 +1562,10 @@ def _diligence_answer_lines(
         if answer is None:
             continue
         answer_text = getattr(answer, "answer", "")
-        lines.append(_plain(f"Answer for {question.question_id}: {answer_text}"))
+        if show_question_ids:
+            lines.append(_plain(f"Answer for {question.question_id}: {answer_text}"))
+        else:
+            lines.append(_plain(f"Answer for saved question: {answer_text}"))
     if not lines:
         lines.append(_plain("No operator answers are saved for these questions."))
     return lines

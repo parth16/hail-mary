@@ -185,6 +185,7 @@ class DiligenceTriageItem(BaseModel):
     priority: int = Field(ge=1)
     unresolved_question_count: int = Field(ge=0)
     representative_question: str
+    question_texts: list[str] = Field(default_factory=list)
     why_it_matters: str
     next_step: str
     question_ids: list[str] = Field(default_factory=list)
@@ -204,7 +205,7 @@ class DiligenceTriageItem(BaseModel):
             raise ValueError("must not be blank")
         return stripped
 
-    @field_validator("question_ids", "evidence_ids")
+    @field_validator("question_texts", "question_ids", "evidence_ids")
     @classmethod
     def _dedupe_text_ids(cls, value: list[str]) -> list[str]:
         cleaned: list[str] = []
@@ -798,6 +799,8 @@ def _triage_theme_key(question: DiligenceQuestionItem) -> str:
     category_text = (question.category or "").casefold()
     if _contains_any(category_text, ("financing terms",)):
         return "deal_terms"
+    if category_text in {"team", "use_of_funds"}:
+        return "team_and_runway"
     text = f"{category_text} {question.question} {question.reason}".casefold()
     if _contains_any(
         text,
@@ -903,12 +906,20 @@ def _triage_theme_key(question: DiligenceQuestionItem) -> str:
         text,
         (
             "org chart",
+            "team",
+            "founder",
+            "founders",
+            "founders and team",
             "headcount",
             "hiring",
             "critical hires",
             "burn",
             "runway",
+            "use_of_funds",
+            "use of funds",
             "use of proceeds",
+            "use the investment proceeds",
+            "investment proceeds",
         ),
     ):
         return "team_and_runway"
@@ -960,6 +971,7 @@ def _triage_item(
         priority=priority,
         unresolved_question_count=len(sorted_questions),
         representative_question=sorted_questions[0].question,
+        question_texts=_dedupe_strings(question.question for question in sorted_questions),
         why_it_matters=theme["why_it_matters"],
         next_step=_next_step(resolution_path, theme_key),
         question_ids=question_ids[:MAX_TRIAGE_QUESTION_IDS],
@@ -1113,8 +1125,9 @@ def _meridian_email_draft(
         return None
     subject = f"Follow-up diligence questions for {company_name}"
     bullets = [
-        f"- {item.title}: {item.representative_question}"
+        f"- {item.title}: {question_text}"
         for item in email_items
+        for question_text in (item.question_texts or [item.representative_question])
     ]
     body_lines = [
         "Hi AngelList Meridian team,",

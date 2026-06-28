@@ -2046,6 +2046,7 @@ def _diligence_triage_export(queue: DiligenceQuestionQueue) -> dict[str, object]
                 "priority": item.priority,
                 "unresolved_question_count": item.unresolved_question_count,
                 "representative_question": item.representative_question,
+                "question_texts": list(item.question_texts),
                 "why_it_matters": item.why_it_matters,
                 "next_step": item.next_step,
                 "question_ids": list(item.question_ids),

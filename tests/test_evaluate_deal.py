@@ -2137,6 +2137,8 @@ def test_evaluate_deal_writes_diligence_question_queue_and_applies_answers(
     )
     assert shown_list.exit_code == 0, shown_list.output
     assert "Synthetic operator checked this item" in shown_list.output
+    assert first_question.question_id not in shown_list.output
+    assert "dq_" not in shown_list.output
 
     rerun = evaluate_deal_folder(
         company_dir,

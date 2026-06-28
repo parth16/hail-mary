@@ -227,6 +227,42 @@ def test_diligence_triage_includes_follow_up_meridian_items_in_email() -> None:
     assert triage.meridian_email_draft.question_ids == ["dq_meridian_traction"]
 
 
+def test_diligence_triage_email_lists_every_grouped_meridian_question() -> None:
+    queue = _queue(
+        [
+            _question(
+                "dq_meridian_round_size",
+                priority=21,
+                source=DiligenceQuestionSource.MERIDIAN_WORKFLOW,
+                question="Resolve the Meridian field: Round size.",
+                reason="The Meridian manual workflow still needs this portal field.",
+                category="meridian:round_size",
+            ),
+            _question(
+                "dq_meridian_minimum_check",
+                priority=22,
+                source=DiligenceQuestionSource.MERIDIAN_WORKFLOW,
+                question="Resolve the Meridian field: Minimum check.",
+                reason="The Meridian manual workflow still needs this portal field.",
+                category="meridian:minimum_check",
+            ),
+        ]
+    )
+
+    triage = build_diligence_triage(queue)
+
+    assert len(triage.items) == 1
+    item = triage.items[0]
+    assert item.title == "Investment terms"
+    assert item.question_texts == [
+        "Resolve the Meridian field: Round size.",
+        "Resolve the Meridian field: Minimum check.",
+    ]
+    assert triage.meridian_email_draft is not None
+    assert "Resolve the Meridian field: Round size." in triage.meridian_email_draft.body
+    assert "Resolve the Meridian field: Minimum check." in triage.meridian_email_draft.body
+
+
 def test_diligence_triage_financing_category_beats_valuation_keywords() -> None:
     queue = _queue(
         [
@@ -247,6 +283,39 @@ def test_diligence_triage_financing_category_beats_valuation_keywords() -> None:
     item = triage.items[0]
     assert item.title == "Investment terms"
     assert item.resolution_path == DiligenceResolutionPath.MERIDIAN_EMAIL
+
+
+def test_diligence_triage_routes_team_and_use_of_funds_to_meridian_email() -> None:
+    queue = _queue(
+        [
+            _question(
+                "dq_team",
+                priority=10,
+                source=DiligenceQuestionSource.EVIDENCE_AUDIT,
+                question="Verify founders and team before relying on the deal.",
+                reason="The evidence audit did not find current founders and team support.",
+                category="team",
+            ),
+            _question(
+                "dq_use_of_funds",
+                priority=11,
+                source=DiligenceQuestionSource.EVIDENCE_AUDIT,
+                question="Verify how the company will use the investment proceeds.",
+                reason="The evidence audit did not find use-of-funds support.",
+                category="use_of_funds",
+            ),
+        ]
+    )
+
+    triage = build_diligence_triage(queue)
+
+    assert len(triage.items) == 1
+    item = triage.items[0]
+    assert item.title == "Team, runway, and use of funds"
+    assert item.resolution_path == DiligenceResolutionPath.MERIDIAN_EMAIL
+    assert triage.meridian_email_draft is not None
+    assert "Verify founders and team" in triage.meridian_email_draft.body
+    assert "use the investment proceeds" in triage.meridian_email_draft.body
 
 
 def _queue(questions: list[DiligenceQuestionItem]) -> DiligenceQuestionQueue:
