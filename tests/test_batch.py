@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from hailmary.batch import batch_evaluate_folder
+from hailmary.batch import BatchEvaluationError, batch_evaluate_folder
 from hailmary.cli import app
 from hailmary.config import AppConfig
 from hailmary.schemas.scoring import Recommendation
@@ -133,6 +133,97 @@ def test_batch_evaluate_cli_prints_safe_summary(
     assert PRIVATE_MARKER not in result.output
     assert "Valuation cap $8M" not in result.output
     assert "\x1b[" not in result.output
+
+
+def test_batch_evaluate_accepts_private_raw_batch_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data"
+    raw_root = data_dir / "raw"
+    _write_deal(raw_root, "RawStrongCo", _strong_investable_text())
+
+    result = batch_evaluate_folder(
+        raw_root,
+        config=AppConfig(
+            data_dir=data_dir,
+            local_only=True,
+            capital_budget=1_000,
+        ),
+        max_concurrency=1,
+        run_research=False,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert result.deal_count == 1
+    assert result.evaluated_count == 1
+    assert result.allocated_count == 1
+    assert result.allocation_rows[0].company_name == "RawStrongCo"
+
+
+def test_batch_ranks_before_applying_scarce_capital_skips(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "ranked-deals"
+    _write_deal(
+        root,
+        "HighMinimumCo",
+        (
+            f"{_strong_investable_text()} Investor ownership 100%. "
+            "Estimated dilution 20%. SPV expenses 5%. Carry 20%. "
+            "Exit value $1B. Minimum investment $5,000."
+        ),
+    )
+    _write_deal(root, "LowerMinimumCo", _strong_investable_text())
+
+    result = batch_evaluate_folder(
+        root,
+        config=AppConfig(
+            data_dir=tmp_path / "private-data",
+            local_only=True,
+            capital_budget=1_000,
+        ),
+        max_concurrency=1,
+        run_research=False,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    rows = {row.company_name: row for row in result.allocation_rows}
+    assert rows["HighMinimumCo"].portfolio_rank == 1
+    assert rows["HighMinimumCo"].evaluation_status == "skipped"
+    assert rows["HighMinimumCo"].batch_check_size == 0
+    assert rows["HighMinimumCo"].skipped_reason is not None
+    assert "budget" in rows["HighMinimumCo"].skipped_reason.casefold()
+    assert rows["LowerMinimumCo"].portfolio_rank == 2
+    assert rows["LowerMinimumCo"].evaluation_status == "allocated"
+    assert rows["LowerMinimumCo"].batch_check_size == 1_000
+
+
+def test_batch_evaluate_fails_when_no_child_deal_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "all-broken"
+    for company_name in ("BrokenOne", "BrokenTwo"):
+        broken_dir = root / company_name
+        broken_dir.mkdir(parents=True)
+        (broken_dir / "malformed.bin").write_bytes(b"\x00synthetic unsupported input")
+
+    with pytest.raises(BatchEvaluationError, match="No deal could be evaluated"):
+        batch_evaluate_folder(
+            root,
+            config=AppConfig(
+                data_dir=tmp_path / "private-data",
+                local_only=True,
+            ),
+            max_concurrency=1,
+            run_research=False,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
 
 
 def _write_deal(root: Path, company_name: str, body: str) -> Path:

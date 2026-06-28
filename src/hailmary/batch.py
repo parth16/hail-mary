@@ -211,6 +211,11 @@ def batch_evaluate_folder(
                 result=deal_result,
             )
         )
+    if not any(outcome.succeeded for outcome in outcomes):
+        raise BatchEvaluationError(
+            "No deal could be evaluated successfully. Fix the per-deal failures "
+            "and run batch-evaluate again."
+        )
 
     rows, constraints = _allocate_batch(outcomes, config=config)
     report_dir = config.data_dir / "reports"
@@ -435,35 +440,22 @@ def _allocate_batch(
         ) from exc
 
     remaining_capital = status.available_capital
-    exposure_state = portfolio_exposure_state_from_ledger(status.ledger, config=config)
+    base_exposure_state = portfolio_exposure_state_from_ledger(status.ledger, config=config)
+    exposure_state = base_exposure_state
     rows_by_folder: dict[Path, BatchAllocationRow] = {}
     successful_outcomes = [outcome for outcome in outcomes if outcome.result is not None]
-    ranked_successes = sorted(
-        successful_outcomes,
-        key=lambda outcome: portfolio_rank_key(outcome.result.deterministic_score)
-        if outcome.result is not None
-        else (1, 0, 0, 0, outcome.company_name.casefold(), ""),
-    )
-    portfolio_ranks = {
-        outcome.folder: rank for rank, outcome in enumerate(ranked_successes, start=1)
-    }
-
-    allocation_sequence = 0
-    for outcome in ranked_successes:
+    ranking_scores: dict[Path, ScoredDeal] = {}
+    stores_by_folder: dict[Path, EvidenceStore] = {}
+    failed_success_rows: dict[Path, BatchAllocationRow] = {}
+    ranking_capital = max(status.available_capital, config.max_check)
+    for outcome in successful_outcomes:
         result = outcome.result
         if result is None:
-            continue
-        base_row = _row_from_success(
-            outcome,
-            portfolio_rank=portfolio_ranks[outcome.folder],
-        )
-        if not _eligible_for_batch_allocation(result):
-            rows_by_folder[outcome.folder] = base_row
             continue
         try:
             store = _load_actioned_store_for_result(result, config=config)
         except BatchEvaluationError as exc:
-            rows_by_folder[outcome.folder] = BatchAllocationRow(
+            failed_success_rows[outcome.folder] = BatchAllocationRow(
                 company_name=result.company_name,
                 deal_id=result.deal_id,
                 folder=outcome.folder,
@@ -477,11 +469,41 @@ def _allocate_batch(
                 key_blockers=[str(exc)],
                 memo_path=result.final_memo_path,
                 json_path=result.final_json_path,
-                portfolio_rank=portfolio_ranks[outcome.folder],
                 skipped_reason=None,
                 failure_reason=str(exc),
             )
             continue
+        stores_by_folder[outcome.folder] = store
+        ranking_scores[outcome.folder] = score_evidence_store(
+            store,
+            config=config,
+            capital_remaining=ranking_capital,
+            exposure_state=base_exposure_state,
+        )
+    ranked_successes = sorted(
+        [outcome for outcome in successful_outcomes if outcome.folder in ranking_scores],
+        key=lambda outcome: portfolio_rank_key(ranking_scores[outcome.folder]),
+    )
+    portfolio_ranks = {
+        outcome.folder: rank for rank, outcome in enumerate(ranked_successes, start=1)
+    }
+    for folder, row in failed_success_rows.items():
+        rows_by_folder[folder] = row
+
+    allocation_sequence = 0
+    for outcome in ranked_successes:
+        result = outcome.result
+        if result is None:
+            continue
+        base_row = _row_from_success(
+            outcome,
+            portfolio_rank=portfolio_ranks[outcome.folder],
+            ranking_score=ranking_scores[outcome.folder],
+        )
+        if not _eligible_for_batch_allocation(result):
+            rows_by_folder[outcome.folder] = base_row
+            continue
+        store = stores_by_folder[outcome.folder]
 
         reallocated_score = score_evidence_store(
             store,
@@ -592,16 +614,17 @@ def _row_from_success(
     outcome: BatchDealOutcome,
     *,
     portfolio_rank: int,
+    ranking_score: ScoredDeal,
 ) -> BatchAllocationRow:
     result = outcome.result
     if result is None:
         raise BatchEvaluationError("Internal error: successful row was missing a result.")
     scored = result.deterministic_score
     skipped_reason = None
-    if result.final_recommendation.recommendation == Recommendation.PASS:
-        skipped_reason = "Final recommendation was PASS."
-    elif scored.recommendation == Recommendation.PASS:
+    if scored.recommendation == Recommendation.PASS:
         skipped_reason = skip_reason(scored)
+    elif result.final_recommendation.recommendation == Recommendation.PASS:
+        skipped_reason = "Final recommendation was PASS."
     elif result.final_recommendation.check_size <= 0:
         skipped_reason = "Final recommendation did not include a nonzero check."
     return BatchAllocationRow(
@@ -612,9 +635,9 @@ def _row_from_success(
         final_recommendation=result.final_recommendation.recommendation,
         single_deal_check_size=result.final_recommendation.check_size,
         batch_check_size=0,
-        score=scored.total_score,
-        max_score=scored.max_score,
-        confidence=scored.confidence.value,
+        score=ranking_score.total_score,
+        max_score=ranking_score.max_score,
+        confidence=ranking_score.confidence.value,
         key_blockers=_key_blockers(scored),
         memo_path=result.final_memo_path,
         json_path=result.final_json_path,
@@ -690,6 +713,7 @@ def _resolve_batch_root(root_folder: Path) -> Path:
 
 def _discover_deal_folders(root: Path, *, config: AppConfig) -> list[Path]:
     resolved_data_dir = _absolute_path(config.data_dir).resolve(strict=False)
+    resolved_raw_dir = (resolved_data_dir / "raw").resolve(strict=False)
     try:
         children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
     except OSError as exc:
@@ -699,7 +723,12 @@ def _discover_deal_folders(root: Path, *, config: AppConfig) -> list[Path]:
         if child.name.startswith("."):
             continue
         resolved_child = child.resolve(strict=False)
-        if _is_relative_to(resolved_child, resolved_data_dir):
+        under_data_dir = _is_relative_to(resolved_child, resolved_data_dir)
+        under_raw_child = (
+            _is_relative_to(resolved_child, resolved_raw_dir)
+            and resolved_child != resolved_raw_dir
+        )
+        if under_data_dir and not under_raw_child:
             continue
         if child.is_symlink():
             deal_folders.append(child)
