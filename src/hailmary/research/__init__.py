@@ -70,6 +70,15 @@ from hailmary.research.providers import (
     builtin_provider_adapters,
     builtin_research_providers,
 )
+from hailmary.research.public_web import (
+    BravePublicWebSearchClient,
+    PublicWebResearchRunSummary,
+    PublicWebSearchClient,
+    PublicWebSearchError,
+    PublicWebSearchResult,
+    PublicWebSearchTaskSummary,
+    collect_public_web_research,
+)
 from hailmary.research.quality import (
     ResearchQualityMetric,
     ResearchQualityStatus,
@@ -134,7 +143,13 @@ __all__ = [
     "PaidProviderFact",
     "PaidProviderSearchRequest",
     "PaidProviderSearchResponse",
+    "BravePublicWebSearchClient",
     "LocalPublicSourceSearchClient",
+    "PublicWebResearchRunSummary",
+    "PublicWebSearchClient",
+    "PublicWebSearchError",
+    "PublicWebSearchResult",
+    "PublicWebSearchTaskSummary",
     "PublicSourceFileAdapter",
     "PublicSourceSearchResult",
     "PublicSourceSearchResultsFile",
@@ -206,6 +221,7 @@ __all__ = [
     "classify_company_match",
     "collect_github_repositories",
     "collect_paid_research_results",
+    "collect_public_web_research",
     "collect_sbir_awards",
     "collect_sec_form_d_filings",
     "collect_usaspending_awards",

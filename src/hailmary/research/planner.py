@@ -232,7 +232,7 @@ def _build_tasks(
                         research_topic=topic,
                         provider_category=provider.category,
                         source_kind=provider.source_kind,
-                        status=_task_status(provider.category, task_url),
+                        status=_task_status(provider.id, provider.category, task_url),
                         query=_task_query(deal.company_name, provider.id, topic),
                         url=task_url,
                         created_at=created_at,
@@ -252,6 +252,7 @@ def _provider_topics(provider_id: str) -> tuple[str, ...]:
 
 
 def _task_status(
+    provider_id: str,
     category: ResearchProviderCategory,
     task_url: str | None,
 ) -> ResearchTaskStatus:
@@ -260,7 +261,7 @@ def _task_status(
         ResearchProviderCategory.AUTHENTICATED_PORTAL,
     }:
         return ResearchTaskStatus.NEEDS_OPERATOR
-    if task_url is None:
+    if task_url is None and provider_id != "public_web":
         return ResearchTaskStatus.NEEDS_OPERATOR
     return ResearchTaskStatus.PLANNED
 

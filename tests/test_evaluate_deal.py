@@ -29,6 +29,8 @@ from hailmary.evidence.actions import EvidenceActionStatus, record_evidence_acti
 from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
 from hailmary.portfolio import add_portfolio_investment
 from hailmary.research import (
+    GitHubRepositorySearchResponse,
+    PublicWebSearchResult,
     ResearchDealInput,
     ResearchImportDealSummary,
     ResearchImportRunSummary,
@@ -38,7 +40,11 @@ from hailmary.research import (
     ResearchWorkflowCollectionSummary,
     ResearchWorkflowIssue,
     ResearchWorkflowRunSummary,
+    SbirAwardsResponse,
+    SecFormDFilingsResponse,
+    UsaspendingAwardsResponse,
 )
+from hailmary.research.web import WebFetchResponse, WebResearchFetchError
 from hailmary.schemas.agents import (
     AgentDiligenceQuestion,
     AgentEvidenceReference,
@@ -140,6 +146,116 @@ class FakeOpenAIReviewClient(RecordingReviewClient):
         self.model = model
         self.api_key = api_key
         self.instances.append(self)
+
+
+class _EvaluationFakeWebResearchClient:
+    def __init__(self, responses: dict[str, WebFetchResponse]) -> None:
+        self.responses = responses
+        self.calls: list[str] = []
+
+    def fetch(
+        self,
+        url: str,
+        *,
+        provider_id: str,
+        timeout_seconds: float,
+        max_bytes: int,
+    ) -> WebFetchResponse:
+        _ = (provider_id, timeout_seconds, max_bytes)
+        self.calls.append(url)
+        try:
+            return self.responses[url]
+        except KeyError as exc:
+            raise WebResearchFetchError(f"No fake web response for {url}.") from exc
+
+
+class _EvaluationFakePublicWebSearchClient:
+    provider_name = "fake-search"
+
+    def __init__(self, responses: dict[str, list[PublicWebSearchResult]]) -> None:
+        self.responses = responses
+        self.calls: list[str] = []
+
+    def search(
+        self,
+        query: str,
+        *,
+        count: int,
+        timeout_seconds: float,
+    ) -> list[PublicWebSearchResult]:
+        _ = (count, timeout_seconds)
+        self.calls.append(query)
+        return self.responses.get(query, [])
+
+
+class _EvaluationEmptyUsaspendingClient:
+    def search_awards(
+        self,
+        company_name: str,
+        *,
+        limit: int,
+        page: int,
+        timeout_seconds: float,
+    ) -> UsaspendingAwardsResponse:
+        _ = (company_name, limit, page, timeout_seconds)
+        return UsaspendingAwardsResponse.model_validate(
+            {"results": [], "page_metadata": {"page": page, "hasNext": False}}
+        )
+
+
+class _EvaluationEmptySbirClient:
+    def search_awards(
+        self,
+        company_name: str,
+        *,
+        rows: int,
+        start: int,
+        timeout_seconds: float,
+    ) -> SbirAwardsResponse:
+        _ = (company_name, rows, start, timeout_seconds)
+        return SbirAwardsResponse(results=[])
+
+
+class _EvaluationEmptySecClient:
+    def search_filings(
+        self,
+        company_name: str,
+        *,
+        count: int,
+        start: int,
+        timeout_seconds: float,
+    ) -> SecFormDFilingsResponse:
+        _ = (company_name, count, start, timeout_seconds)
+        return SecFormDFilingsResponse(results=[])
+
+
+class _EvaluationEmptyGitHubClient:
+    def search_repositories(
+        self,
+        company_name: str,
+        *,
+        per_page: int,
+        page: int,
+        timeout_seconds: float,
+    ) -> GitHubRepositorySearchResponse:
+        _ = (company_name, per_page, page, timeout_seconds)
+        return GitHubRepositorySearchResponse.model_validate(
+            {
+                "items": [],
+                "incomplete_results": False,
+                "total_count": 0,
+                "has_next": False,
+            }
+        )
+
+
+def _empty_live_public_clients() -> dict[str, object]:
+    return {
+        "sec_form_d_client": _EvaluationEmptySecClient(),
+        "usaspending_client": _EvaluationEmptyUsaspendingClient(),
+        "sbir_client": _EvaluationEmptySbirClient(),
+        "github_client": _EvaluationEmptyGitHubClient(),
+    }
 
 
 def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
@@ -682,6 +798,245 @@ def test_evaluate_deal_imports_research_results_before_scoring_and_model_review(
     assert "ResearchCo public site reports" not in result.final_json_path.read_text(
         encoding="utf-8"
     )
+
+
+def test_evaluate_deal_autodiscovers_safe_website_and_imports_before_scoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="AutoSiteCo",
+        body=(
+            "Valuation cap $8M. Round size $1M. Lead investor committed. "
+            "Official website: https://example.com/autositeco"
+        ),
+    )
+    web_client = _EvaluationFakeWebResearchClient(
+        {
+            "https://example.com/autositeco": WebFetchResponse(
+                final_url="https://example.com/autositeco",
+                content_type="text/html",
+                text=(
+                    "<html><title>AutoSiteCo</title><body>"
+                    "AutoSiteCo public site reports ARR revenue growth, paid customers, "
+                    "weekly usage, and retention."
+                    "</body></html>"
+                ),
+            )
+        }
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            enable_web_research=True,
+            mock_llm=True,
+        ),
+        max_concurrency=1,
+        web_client=web_client,
+        public_web_search_client=_EvaluationFakePublicWebSearchClient({}),
+        **_empty_live_public_clients(),
+    )
+
+    assert web_client.calls == ["https://example.com/autositeco"]
+    assert result.research_run is not None
+    assert result.research_imported_count == 1
+    assert result.evidence_count == 2
+    assert result.research_run.quality_status is not None
+    assert result.research_run.quality_status.imported_record_count == 1
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Company website: imported" in memo_text
+    assert "AutoSiteCo public site reports ARR revenue growth" in memo_text
+    exported = json.loads(result.final_json_path.read_text(encoding="utf-8"))
+    company_status = next(
+        status
+        for status in exported["research"]["provider_statuses"]
+        if status["provider_id"] == "company_website"
+    )
+    assert company_status["status"] == "imported"
+    assert company_status["fetched_count"] == 1
+    assert company_status["imported_count"] == 1
+
+
+def test_evaluate_deal_applies_evidence_actions_before_website_autodiscovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="ActionedSiteCo",
+        body="Valuation cap $8M. Round size $1M. Lead investor committed.",
+    )
+    (company_dir / "excluded-website.txt").write_text(
+        "EXCLUDED_SITE_MARKER Official website: https://example.com/actioned-site",
+        encoding="utf-8",
+    )
+    config = AppConfig(data_dir=tmp_path / "data", local_only=True)
+    initial = evaluate_deal_folder(
+        company_dir,
+        config=config,
+        max_concurrency=1,
+        run_research=False,
+    )
+    store_path = config.data_dir / "processed" / "deals" / initial.deal_id / "evidence_store.json"
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+    excluded_evidence = next(
+        evidence for evidence in store.evidence if "EXCLUDED_SITE_MARKER" in evidence.text
+    )
+    record_evidence_action(
+        config=config,
+        deal_id=initial.deal_id,
+        evidence_id=excluded_evidence.id,
+        status=EvidenceActionStatus.EXCLUDED,
+        note="Synthetic website exclusion.",
+    )
+    web_client = _EvaluationFakeWebResearchClient({})
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=config.model_copy(
+            update={
+                "local_only": False,
+                "enable_web_research": True,
+                "mock_llm": True,
+            }
+        ),
+        max_concurrency=1,
+        web_client=web_client,
+        public_web_search_client=_EvaluationFakePublicWebSearchClient({}),
+        **_empty_live_public_clients(),
+    )
+
+    assert web_client.calls == []
+    assert result.research_imported_count == 0
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "EXCLUDED_SITE_MARKER" not in memo_text
+    assert "https://example.com/actioned-site" not in memo_text
+
+
+def test_evaluate_deal_rejects_unsafe_autodiscovered_website_urls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="UnsafeLinkCo",
+        body="Valuation cap $8M. Round size $1M. Lead investor committed.",
+    )
+    (company_dir / "links.txt").write_text(
+        (
+            "Official website: http://127.0.0.1:8000/internal\n"
+            "Company website: https://portal.angellist.com/m/unsafe/invest\n"
+            "Website: https://example.com/unsafe?token=secret-token\n"
+        ),
+        encoding="utf-8",
+    )
+    web_client = _EvaluationFakeWebResearchClient({})
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            enable_web_research=True,
+            mock_llm=True,
+        ),
+        max_concurrency=1,
+        web_client=web_client,
+        public_web_search_client=_EvaluationFakePublicWebSearchClient({}),
+        **_empty_live_public_clients(),
+    )
+
+    assert web_client.calls == []
+    warning_text = "\n".join(result.warnings)
+    assert "Ignored one or more unsafe website URLs" in warning_text
+    assert "token=secret-token" not in warning_text
+    assert "127.0.0.1" not in warning_text
+    assert "portal.angellist.com" not in warning_text
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    research_section = memo_text.split("## External Research", 1)[1].split(
+        "## Evidence Completeness Audit",
+        1,
+    )[0]
+    assert "Ignored one or more unsafe website URLs" in research_section
+    assert "secret-token" not in research_section
+
+
+def test_evaluate_deal_imports_public_web_search_results_before_scoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="AutoWebCo",
+        body="Valuation cap $8M. Round size $1M. Lead investor committed.",
+    )
+    search_query = "AutoWebCo market size category growth customer demand"
+    search_client = _EvaluationFakePublicWebSearchClient(
+        {
+            search_query: [
+                PublicWebSearchResult(
+                    title="AutoWebCo",
+                    url="https://primary.example.com/autowebco-market",
+                    snippet="AutoWebCo public market source.",
+                )
+            ]
+        }
+    )
+    web_client = _EvaluationFakeWebResearchClient(
+        {
+            "https://primary.example.com/autowebco-market": WebFetchResponse(
+                final_url="https://primary.example.com/autowebco-market",
+                content_type="text/html",
+                text=(
+                    "<html><title>AutoWebCo</title><body>"
+                    "AutoWebCo public market source reports ARR revenue growth, "
+                    "paid customers, weekly usage, and retention."
+                    "</body></html>"
+                ),
+            )
+        }
+    )
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            enable_web_research=True,
+            mock_llm=True,
+        ),
+        max_concurrency=1,
+        web_client=web_client,
+        public_web_search_client=search_client,
+        **_empty_live_public_clients(),
+    )
+
+    assert search_query in search_client.calls
+    assert web_client.calls == ["https://primary.example.com/autowebco-market"]
+    assert result.research_imported_count == 1
+    assert result.evidence_count == 2
+    memo_text = result.final_memo_path.read_text(encoding="utf-8")
+    assert "Public web and press search / market: imported" in memo_text
+    exported = json.loads(result.final_json_path.read_text(encoding="utf-8"))
+    public_web_market = next(
+        status
+        for status in exported["research"]["provider_statuses"]
+        if status["provider_id"] == "public_web" and status["research_topic"] == "market"
+    )
+    assert public_web_market["status"] == "imported"
+    assert public_web_market["discovered_count"] == 1
+    assert public_web_market["fetched_count"] == 1
+    assert public_web_market["imported_count"] == 1
+    export_text = json.dumps(exported, sort_keys=True)
+    assert "AutoWebCo public market source reports" not in export_text
 
 
 def test_evaluate_deal_research_statuses_preserve_provider_topics(

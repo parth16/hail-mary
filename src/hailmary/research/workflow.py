@@ -37,6 +37,12 @@ from .meridian import clean_meridian_url, prepare_meridian_workflow
 from .paid import PaidProviderClient, collect_paid_research_results
 from .planner import prepare_research_plan
 from .providers import builtin_research_providers
+from .public_web import (
+    PublicWebResearchRunSummary,
+    PublicWebSearchClient,
+    PublicWebSearchTaskSummary,
+    collect_public_web_research,
+)
 from .schemas import (
     MeridianImportPreview,
     MeridianUnresolvedField,
@@ -61,8 +67,15 @@ class ResearchWorkflowError(RuntimeError):
 IssueSeverity = Literal["warning", "error"]
 CollectionKind = Literal["local_public", "live_public", "web", "paid_optional"]
 
-LIVE_PROVIDER_IDS = {"company_website", "sec_form_d", "usaspending", "sbir", "github"}
-MANUAL_OR_LOCAL_PROVIDER_IDS = {"sam_gov", "uspto", "public_web"}
+LIVE_PROVIDER_IDS = {
+    "company_website",
+    "sec_form_d",
+    "usaspending",
+    "sbir",
+    "github",
+    "public_web",
+}
+MANUAL_OR_LOCAL_PROVIDER_IDS = {"sam_gov", "uspto"}
 NO_PAID_OUTPUTS_PRIVACY_NOTE = (
     "No screenshots, cookies, browser profiles, raw portal HTML, hidden authenticated data, "
     "signed URLs, or paid-source outputs are saved by this workflow."
@@ -94,6 +107,8 @@ class ResearchWorkflowArtifact(BaseModel):
 class ResearchProviderRunStatus(StrEnum):
     NOT_RUN = "not_run"
     PLANNED = "planned"
+    DISCOVERED = "discovered"
+    FETCHED = "fetched"
     MANUAL_NEEDED = "manual_needed"
     IMPORTED = "imported"
     NO_EXACT_RESULTS = "no_exact_results"
@@ -136,6 +151,8 @@ class ResearchProviderStatusSummary(BaseModel):
     research_topic: str = "company"
     status: ResearchProviderRunStatus
     planned_count: int = 0
+    discovered_count: int = 0
+    fetched_count: int = 0
     collected_count: int = 0
     imported_count: int = 0
     warning_count: int = 0
@@ -313,6 +330,7 @@ def run_research_workflow(
     sbir_client: SbirAwardsClient | None = None,
     sec_form_d_client: SecFormDFilingsClient | None = None,
     github_client: GitHubRepositorySearchClient | None = None,
+    public_web_search_client: PublicWebSearchClient | None = None,
     paid_clients: Mapping[str, PaidProviderClient] | None = None,
 ) -> ResearchWorkflowRunSummary:
     created_at = _as_utc(created_at or datetime.now(UTC))
@@ -419,7 +437,7 @@ def run_research_workflow(
                     )
                 )
 
-    live_collection_enabled = True
+    live_collection_enabled = _live_collection_enabled(config)
     if live_collection_enabled:
         live_summaries = _run_live_collectors(
             config=config,
@@ -431,6 +449,7 @@ def run_research_workflow(
             sbir_client=sbir_client,
             sec_form_d_client=sec_form_d_client,
             github_client=github_client,
+            public_web_search_client=public_web_search_client,
         )
         collections.extend(live_summaries)
         for collection in live_summaries:
@@ -704,6 +723,7 @@ def _run_live_collectors(
     sbir_client: SbirAwardsClient | None,
     sec_form_d_client: SecFormDFilingsClient | None,
     github_client: GitHubRepositorySearchClient | None,
+    public_web_search_client: PublicWebSearchClient | None,
 ) -> list[ResearchWorkflowCollectionSummary]:
     summaries = [
         _run_web_collection(
@@ -711,7 +731,14 @@ def _run_live_collectors(
             plan_path=plan_path,
             collected_at=collected_at,
             client=web_client,
-        )
+        ),
+        _run_public_web_collection(
+            config=config,
+            plan_path=plan_path,
+            collected_at=collected_at,
+            search_client=public_web_search_client,
+            web_client=web_client,
+        ),
     ]
     live_collectors: list[tuple[str, str, bool, Callable[[], object]]] = [
         (
@@ -729,7 +756,7 @@ def _run_live_collectors(
         (
             "usaspending",
             "USAspending",
-            usaspending_client is not None,
+            True,
             lambda: collect_usaspending_awards(
                 config=config,
                 company_names=company_names,
@@ -740,7 +767,7 @@ def _run_live_collectors(
         (
             "sbir",
             "SBIR/STTR",
-            sbir_client is not None,
+            True,
             lambda: collect_sbir_awards(
                 config=config,
                 company_names=company_names,
@@ -751,7 +778,7 @@ def _run_live_collectors(
         (
             "github",
             "GitHub",
-            github_client is not None,
+            True,
             lambda: collect_github_repositories(
                 config=config,
                 company_names=company_names,
@@ -795,6 +822,10 @@ def _run_live_collectors(
     return summaries
 
 
+def _live_collection_enabled(config: AppConfig) -> bool:
+    return not config.local_only and config.enable_web_research
+
+
 def _run_web_collection(
     *,
     config: AppConfig,
@@ -836,16 +867,17 @@ def _run_web_collection(
         if fetched_by_company
         else []
     )
-    status = (
-        ResearchProviderRunStatus.FAILED
-        if warnings
-        else _collection_status(
+    if warnings:
+        status = ResearchProviderRunStatus.FAILED
+    elif result.fetched_count:
+        status = ResearchProviderRunStatus.FETCHED
+    else:
+        status = _collection_status(
             result_count=result.fetched_count,
             no_result_companies=no_result_companies,
             warnings=warnings,
             error=None,
         )
-    )
     return ResearchWorkflowCollectionSummary(
         kind="web",
         source_id="public_web_pages",
@@ -859,6 +891,158 @@ def _run_web_collection(
         incomplete_search=_warnings_indicate_incomplete_search(warnings),
         warnings=warnings,
     )
+
+
+def _run_public_web_collection(
+    *,
+    config: AppConfig,
+    plan_path: Path,
+    collected_at: datetime,
+    search_client: PublicWebSearchClient | None,
+    web_client: WebResearchClient | None,
+) -> ResearchWorkflowCollectionSummary:
+    try:
+        result = collect_public_web_research(
+            config=config,
+            plan_path=plan_path,
+            search_client=search_client,
+            web_client=web_client,
+            collected_at=collected_at,
+        )
+    except Exception as exc:
+        return ResearchWorkflowCollectionSummary(
+            kind="live_public",
+            source_id="public_web",
+            source_name="Public web and press search",
+            status=ResearchProviderRunStatus.FAILED,
+            error=str(exc),
+        )
+    return _public_web_collection_summary(result)
+
+
+def _public_web_collection_summary(
+    result: PublicWebResearchRunSummary,
+) -> ResearchWorkflowCollectionSummary:
+    no_result_companies = result.no_exact_result_companies
+    warnings = list(result.warnings)
+    failed_reasons = [
+        f"{task.company_name} / {task.research_topic}: {task.reason}"
+        for task in result.tasks
+        if task.status == "failed"
+    ]
+    warnings.extend(failed_reasons)
+    status = _public_web_collection_status(result, warnings=warnings)
+    error = "; ".join(failed_reasons) if result.failed_count else None
+    return ResearchWorkflowCollectionSummary(
+        kind="live_public",
+        source_id="public_web",
+        source_name="Public web and press search",
+        status=status,
+        output_path=result.output_path,
+        result_count=result.fetched_count,
+        deal_count=len({task.company_name for task in result.tasks}),
+        no_result_companies=no_result_companies,
+        match_details=result.match_details,
+        provider_ids=["public_web"] if result.tasks else [],
+        provider_result_counts={"public_web": result.fetched_count},
+        provider_company_result_counts=_public_web_company_result_counts(result),
+        provider_statuses=_public_web_provider_statuses(result, warnings=warnings),
+        incomplete_search=result.incomplete_count > 0
+        or _warnings_indicate_incomplete_search(warnings),
+        warnings=warnings,
+        error=error,
+    )
+
+
+def _public_web_collection_status(
+    result: PublicWebResearchRunSummary,
+    *,
+    warnings: list[str],
+) -> ResearchProviderRunStatus:
+    if result.failed_count:
+        return ResearchProviderRunStatus.FAILED
+    if _warnings_indicate_incomplete_search(warnings):
+        return ResearchProviderRunStatus.INCOMPLETE_SEARCH
+    if result.incomplete_count:
+        return ResearchProviderRunStatus.INCOMPLETE_SEARCH
+    if result.fetched_count:
+        return ResearchProviderRunStatus.FETCHED
+    if result.discovered_count:
+        return ResearchProviderRunStatus.NO_EXACT_RESULTS
+    if result.not_run_count:
+        return ResearchProviderRunStatus.NOT_RUN
+    if result.tasks:
+        return ResearchProviderRunStatus.NO_EXACT_RESULTS
+    return ResearchProviderRunStatus.NOT_RUN
+
+
+def _public_web_company_result_counts(
+    result: PublicWebResearchRunSummary,
+) -> dict[str, dict[str, int]]:
+    company_counts: dict[str, int] = {}
+    for task in result.tasks:
+        company_counts[task.company_name] = company_counts.get(task.company_name, 0)
+        company_counts[task.company_name] += task.fetched_count
+    return {"public_web": company_counts}
+
+
+def _public_web_provider_statuses(
+    result: PublicWebResearchRunSummary,
+    *,
+    warnings: list[str],
+) -> list[ResearchProviderStatusSummary]:
+    statuses: list[ResearchProviderStatusSummary] = []
+    by_topic: dict[str, list[PublicWebSearchTaskSummary]] = {}
+    for task in result.tasks:
+        by_topic.setdefault(task.research_topic, []).append(task)
+    for research_topic, tasks in by_topic.items():
+        discovered_count = sum(task.discovered_count for task in tasks)
+        fetched_count = sum(task.fetched_count for task in tasks)
+        failed_tasks = [task for task in tasks if task.status == "failed"]
+        incomplete_tasks = [task for task in tasks if task.status == "incomplete_search"]
+        not_run_tasks = [task for task in tasks if task.status == "not_run"]
+        no_exact_companies = sorted(
+            {
+                task.company_name
+                for task in tasks
+                if task.fetched_count == 0
+                and task.status in {"no_exact_results", "incomplete_search", "fetched"}
+            }
+        )
+        topic_warnings = [
+            warning
+            for warning in warnings
+            if f"/ {research_topic}:" in warning or "did not run" in warning
+        ]
+        if failed_tasks:
+            status = ResearchProviderRunStatus.FAILED
+        elif incomplete_tasks:
+            status = ResearchProviderRunStatus.INCOMPLETE_SEARCH
+        elif fetched_count:
+            status = ResearchProviderRunStatus.FETCHED
+        elif discovered_count:
+            status = ResearchProviderRunStatus.NO_EXACT_RESULTS
+        elif not_run_tasks:
+            status = ResearchProviderRunStatus.NOT_RUN
+        else:
+            status = ResearchProviderRunStatus.NO_EXACT_RESULTS
+        statuses.append(
+            ResearchProviderStatusSummary(
+                provider_id="public_web",
+                provider_name="Public web and press search",
+                research_topic=research_topic,
+                status=status,
+                discovered_count=discovered_count,
+                fetched_count=fetched_count,
+                collected_count=fetched_count,
+                warning_count=len(topic_warnings),
+                no_exact_result_companies=no_exact_companies,
+                incomplete_search=bool(incomplete_tasks)
+                or _warnings_indicate_incomplete_search(topic_warnings),
+                failure="; ".join(task.reason for task in failed_tasks) or None,
+            )
+        )
+    return statuses
 
 
 def _collection_summary_from_result(
@@ -1105,7 +1289,9 @@ def _web_provider_statuses(
         no_result_companies: list[str] = []
         if warnings:
             status = ResearchProviderRunStatus.FAILED
-        elif fetched_count > 0 or planned_count > 0:
+        elif fetched_count > 0:
+            status = ResearchProviderRunStatus.FETCHED
+        elif planned_count > 0:
             status = ResearchProviderRunStatus.PLANNED
         elif skipped_count > 0:
             status = (
@@ -1121,6 +1307,7 @@ def _web_provider_statuses(
                 provider_name=provider_name,
                 research_topic=research_topic,
                 status=status,
+                fetched_count=fetched_count,
                 collected_count=fetched_count,
                 warning_count=len(warnings),
                 no_exact_result_companies=no_result_companies,
@@ -1245,6 +1432,13 @@ def _research_workflow_summary(
                         existing=existing_status,
                         incoming=provider_status,
                     ),
+                    "discovered_count": (
+                        existing_status.discovered_count
+                        + provider_status.discovered_count
+                    ),
+                    "fetched_count": (
+                        existing_status.fetched_count + provider_status.fetched_count
+                    ),
                     "collected_count": (
                         existing_status.collected_count
                         + provider_status.collected_count
@@ -1286,8 +1480,19 @@ def _research_workflow_summary(
                         provider_name=collection.source_name,
                         research_topic=collection_topic,
                         status=collection.status,
+                        fetched_count=(
+                            collection.result_count
+                            if collection.status == ResearchProviderRunStatus.FETCHED
+                            else 0
+                        ),
                         collected_count=collection.result_count,
                     ),
+                ),
+                "fetched_count": status.fetched_count
+                + (
+                    collection.result_count
+                    if collection.status == ResearchProviderRunStatus.FETCHED
+                    else 0
                 ),
                 "collected_count": status.collected_count + collection.result_count,
                 "warning_count": status.warning_count + len(collection.warnings),
@@ -1328,6 +1533,13 @@ def _research_workflow_summary(
                     "status": _merge_provider_status_summary(
                         existing=existing_status,
                         incoming=provider_status,
+                    ),
+                    "discovered_count": (
+                        existing_status.discovered_count
+                        + provider_status.discovered_count
+                    ),
+                    "fetched_count": (
+                        existing_status.fetched_count + provider_status.fetched_count
                     ),
                     "collected_count": (
                         existing_status.collected_count
@@ -1385,10 +1597,12 @@ def _merge_provider_status(
         ResearchProviderRunStatus.FAILED: 0,
         ResearchProviderRunStatus.INCOMPLETE_SEARCH: 1,
         ResearchProviderRunStatus.IMPORTED: 2,
-        ResearchProviderRunStatus.NO_EXACT_RESULTS: 3,
-        ResearchProviderRunStatus.MANUAL_NEEDED: 4,
-        ResearchProviderRunStatus.NOT_RUN: 5,
-        ResearchProviderRunStatus.PLANNED: 6,
+        ResearchProviderRunStatus.FETCHED: 3,
+        ResearchProviderRunStatus.DISCOVERED: 4,
+        ResearchProviderRunStatus.NO_EXACT_RESULTS: 5,
+        ResearchProviderRunStatus.MANUAL_NEEDED: 6,
+        ResearchProviderRunStatus.NOT_RUN: 7,
+        ResearchProviderRunStatus.PLANNED: 8,
     }
     return existing if rank[existing] <= rank[incoming] else incoming
 
@@ -1399,12 +1613,15 @@ def _merge_provider_status_summary(
     incoming: ResearchProviderStatusSummary,
 ) -> ResearchProviderRunStatus:
     if _ready_result_clears_manual_needed(existing=existing, incoming=incoming):
+        if ResearchProviderRunStatus.FETCHED in {existing.status, incoming.status}:
+            return ResearchProviderRunStatus.FETCHED
         return ResearchProviderRunStatus.PLANNED
     if _has_ready_results(existing) or _has_ready_results(incoming):
         higher_priority_statuses = {
             ResearchProviderRunStatus.FAILED,
             ResearchProviderRunStatus.INCOMPLETE_SEARCH,
             ResearchProviderRunStatus.IMPORTED,
+            ResearchProviderRunStatus.FETCHED,
         }
         if (
             existing.status not in higher_priority_statuses
@@ -1437,7 +1654,11 @@ def _ready_result_clears_manual_needed(
 
 def _has_ready_results(status: ResearchProviderStatusSummary) -> bool:
     return (
-        status.status == ResearchProviderRunStatus.PLANNED
+        status.status
+        in {
+            ResearchProviderRunStatus.PLANNED,
+            ResearchProviderRunStatus.FETCHED,
+        }
         and status.collected_count > 0
     )
 
@@ -1623,6 +1844,8 @@ def _provider_topic_key(provider_id: str, research_topic: str) -> tuple[str, str
 
 
 def _task_needs_manual_work(task: ResearchTask) -> bool:
+    if task.provider_id == "public_web":
+        return False
     if task.status == ResearchTaskStatus.NEEDS_OPERATOR:
         return True
     if task.provider_category in {
@@ -1638,6 +1861,8 @@ def _task_can_collect_live(task: ResearchTask) -> bool:
         return False
     if task.provider_id == "company_website":
         return task.url is not None and task.status == ResearchTaskStatus.PLANNED
+    if task.provider_id == "public_web":
+        return bool(task.query.strip())
     return True
 
 
