@@ -26,6 +26,7 @@ STALE_SOURCE_DAYS = 365
 MONEY_PATTERN = (
     r"\$\s?\d+(?:,\d{3})*(?:\.\d+)?"
     r"(?:\s?(?:thousand|million|billion|k|m|b))?"
+    r"(?:\s?USD)?"
 )
 PERCENT_PATTERN = r"\d+(?:\.\d+)?\s?%"
 TERM_SEPARATOR = r"\s*(?:(?:is|of|at|:|\|)\s*)?"
@@ -38,6 +39,7 @@ class DealTermPattern:
     label: str
     unit: str
     regex: re.Pattern[str]
+    requires_financing_context: bool = False
 
 
 DEAL_TERM_PATTERNS = (
@@ -45,9 +47,19 @@ DEAL_TERM_PATTERNS = (
         label="valuation cap",
         unit="usd",
         regex=re.compile(
-            rf"\bvaluation cap\b{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
+            rf"\b(?:valuation cap|post[-\s]?money cap)\b"
+            rf"{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
             re.IGNORECASE,
         ),
+    ),
+    DealTermPattern(
+        label="valuation cap",
+        unit="usd",
+        regex=re.compile(
+            rf"(?m)^[\s|:-]*cap\b{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
+            re.IGNORECASE,
+        ),
+        requires_financing_context=True,
     ),
     DealTermPattern(
         label="post-money valuation",
@@ -92,6 +104,21 @@ DEAL_TERM_PATTERNS = (
             re.IGNORECASE,
         ),
     ),
+)
+
+FINANCING_CONTEXT_PATTERN = re.compile(
+    r"\b(?:"
+    r"instrument\s+(?:safe|simple agreement for future equity|convertible note)|"
+    r"convertible note|"
+    r"priced round|"
+    r"round|"
+    r"discount|"
+    r"estimated round size|"
+    r"minimum investment|"
+    r"minimum check|"
+    r"target raise"
+    r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -372,6 +399,11 @@ def _extract_deal_term_claims(
     for evidence in evidence_records:
         for pattern in DEAL_TERM_PATTERNS:
             for match in pattern.regex.finditer(evidence.text):
+                if (
+                    pattern.requires_financing_context
+                    and not _has_financing_context(evidence.text)
+                ):
+                    continue
                 raw_value = match.groupdict().get("value") or match.groupdict().get(
                     "value_before"
                 )
@@ -427,6 +459,10 @@ def _extract_deal_term_claims(
                 )
 
     return claims
+
+
+def _has_financing_context(text: str) -> bool:
+    return FINANCING_CONTEXT_PATTERN.search(text) is not None
 
 
 def _citation_from_match(
@@ -518,6 +554,8 @@ def _normalize_value(raw_value: str, *, unit: str) -> str:
 
 def _money_to_cents(raw_value: str) -> int | None:
     normalized = raw_value.lower().replace("$", "").replace(",", "").strip()
+    if normalized.endswith("usd"):
+        normalized = normalized[: -len("usd")].strip()
     multiplier = Decimal("1")
     suffixes = {
         "thousand": Decimal("1000"),

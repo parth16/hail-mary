@@ -114,6 +114,120 @@ def test_deal_terms_parse_table_separators_and_full_money_suffixes(
     assert claims_by_label["discount"]["verification_status"] == VerificationStatus.VERIFIED
 
 
+def test_deal_terms_parse_post_money_cap_with_usd_suffix(tmp_path: Path) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "PostMoneyCapCo"
+    company.mkdir(parents=True)
+    (company / "terms.txt").write_text(
+        "Round Seed\n"
+        "Instrument SAFE\n"
+        "Estimated round size $4M USD\n"
+        "Post-money cap $20M USD\n"
+        "Discount 0%\n"
+        "Minimum investment $1,000 USD\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    claims_by_label = {claim["label"]: claim for claim in saved_store["claims"]}
+
+    assert set(claims_by_label) == {
+        "discount",
+        "minimum investment",
+        "round size",
+        "valuation cap",
+    }
+    valuation_cap = claims_by_label["valuation cap"]
+    assert valuation_cap["value"] == "$20M USD"
+    assert valuation_cap["normalized_value"] == "usd_cents:2000000000"
+    assert valuation_cap["raw_text"] == "Post-money cap $20M USD"
+    assert valuation_cap["verification_status"] == VerificationStatus.VERIFIED
+    assert claims_by_label["round size"]["normalized_value"] == "usd_cents:400000000"
+    assert claims_by_label["discount"]["normalized_value"] == "basis_points:0"
+    citation = valuation_cap["citations"][0]
+    evidence = next(
+        evidence
+        for evidence in saved_store["evidence"]
+        if evidence["id"] == citation["evidence_id"]
+    )
+    assert (
+        evidence["text"][citation["source_span_start"] : citation["source_span_end"]]
+        == "Post-money cap $20M USD"
+    )
+
+
+def test_deal_terms_parse_standalone_cap_only_in_financing_context(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "StandaloneCapCo"
+    company.mkdir(parents=True)
+    (company / "terms.txt").write_text(
+        "Instrument SAFE\nRound Seed\nCap | $150M\nDiscount 15%\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    claims_by_label = {claim["label"]: claim for claim in saved_store["claims"]}
+
+    assert claims_by_label["valuation cap"]["value"] == "$150M"
+    assert claims_by_label["valuation cap"]["normalized_value"] == "usd_cents:15000000000"
+    assert claims_by_label["valuation cap"]["raw_text"] == "Cap | $150M"
+
+
+def test_deal_terms_do_not_parse_unrelated_caps_as_valuation_caps(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "UnrelatedCapCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Round Seed\n"
+        "Discount 15%\n"
+        "Market cap $150M.\n"
+        "Expense cap $2M.\n"
+        "Exposure cap $5M.\n"
+        "Budget cap $8M.\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+
+    assert "valuation cap" not in {claim["label"] for claim in saved_store["claims"]}
+
+
+def test_deal_terms_do_not_parse_standalone_cap_without_financing_context(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "NoContextCapCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Cap $150M\nGeneral market commentary without financing terms.\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+
+    assert saved_store["claims"] == []
+
+
 def test_evidence_store_flags_conflicting_deal_terms(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "ConflictCo"

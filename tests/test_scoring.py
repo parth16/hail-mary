@@ -223,6 +223,51 @@ def test_score_evidence_store_invests_when_verified_evidence_is_strong() -> None
     assert not scored.triggered_kill_gates
 
 
+def test_score_evidence_store_uses_extracted_post_money_cap(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "PostMoneyScoreCo"
+    company.mkdir(parents=True)
+    (company / "terms.txt").write_text(
+        "Round Seed\n"
+        "Instrument SAFE\n"
+        "Estimated round size $4M USD\n"
+        "Post-money cap $20M USD\n"
+        "Discount 0%\n"
+        "Minimum investment $1,000 USD\n"
+        "ARR revenue growth with paid customers and retention.\n"
+        "Lead investor committed and seed round is active.\n",
+        encoding="utf-8",
+    )
+    config = AppConfig(data_dir=tmp_path / "data")
+    summary = ingest_folder(root, config=config)
+    store_path = summary.deals[0].evidence_store_path
+    assert store_path is not None
+    store = EvidenceStore.model_validate_json(store_path.read_text(encoding="utf-8"))
+
+    scored = score_evidence_store(store, config=config)
+    memo = render_markdown_memo(scored, store)
+
+    assert any(
+        claim.label == "valuation cap"
+        and claim.value == "$20M USD"
+        and claim.normalized_value == "usd_cents:2000000000"
+        for claim in store.claims
+    )
+    assert not any(
+        gate.name == "Missing key investment terms"
+        for gate in scored.triggered_risk_gaps
+    )
+    terms_factor = _score_factor(scored, "Deal terms and platform access")
+    assert "verified valuation or valuation cap" not in terms_factor.missing_inputs
+    valuation_factor = _score_factor(scored, "Valuation and net return")
+    assert valuation_factor.score > 0
+    assert "verified entry valuation or valuation cap" not in valuation_factor.missing_inputs
+    assert scored.net_return.entry_valuation == 20_000_000
+    assert "**Valuation / Cap:** valuation cap $20M USD" in memo
+
+
 def test_score_evidence_store_keeps_65_to_74_as_pass() -> None:
     evidence = [
         _evidence(

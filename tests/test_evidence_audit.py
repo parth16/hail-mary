@@ -209,6 +209,28 @@ def test_audit_does_not_use_prompt_injection_text_as_support() -> None:
     assert unsafe.evidence_ids == ["ev_unsafe_valuation"]
 
 
+def test_audit_flags_pricing_like_text_without_verified_claim_as_weak_support() -> None:
+    evidence = _evidence("ev_post_money_cap", "Post-money cap to be confirmed.")
+    store = _store(evidence=[evidence])
+
+    audit = build_evidence_completeness_audit(store)
+
+    valuation = _term_status(audit, EvidenceAuditTerm.PRICE_VALUATION)
+    assert valuation.status == EvidenceAuditCoverageStatus.WEAK
+    assert valuation.evidence_ids == ["ev_post_money_cap"]
+    assert valuation.missing_evidence is False
+    assert "could not convert" in valuation.explanation
+    finding = next(
+        finding
+        for finding in audit.findings
+        if finding.term == EvidenceAuditTerm.PRICE_VALUATION
+    )
+    assert finding.title == "Weak price or valuation"
+    assert finding.evidence_ids == ["ev_post_money_cap"]
+    assert finding.missing_evidence is False
+    assert "could not convert" in finding.explanation
+
+
 def _term_status(
     audit: EvidenceCompletenessAudit,
     term: EvidenceAuditTerm,

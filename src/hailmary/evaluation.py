@@ -1986,7 +1986,7 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
         "ran": True,
         "planned_task_count": workflow.plan.task_count,
         "planned_topics": _research_topic_counts(
-            task.research_topic for task in workflow.plan.tasks
+            [task.research_topic for task in workflow.plan.tasks]
         ),
         "imported_count": research_run.imported_count,
         "stale_count": research_run.stale_count,
