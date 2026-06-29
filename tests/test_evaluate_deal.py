@@ -286,35 +286,36 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert "Checking evidence completeness..." in result.output
     assert "Writing the final memo..." in result.output
     assert "Deal evaluation complete" in result.output
-    assert "Final decision: INVEST" in result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Recommendation INVEST" in normalized_output
     assert any(
-        f"Recommended check: {check_size}" in result.output
+        f"Check size {check_size}" in normalized_output
         for check_size in ("$1K", "$2.5K", "$5K", "$7.5K", "$10K")
     )
+    assert "Bottom line Final guarded recommendation is INVEST" in normalized_output
     assert "What stood out positively" in result.output
-    assert "Key risks" in result.output
+    assert "Main concerns" in result.output
     assert "Decisive factor" in result.output
+    assert "Could not verify" in result.output
+    assert "Suggested next action" in result.output
+    assert "Model committee read" in result.output
+    assert "Data caveats" in result.output
+    assert "Artifacts" in result.output
     assert "The recommendation is INVEST" in result.output
     assert "Company" in result.output
-    assert "Mode" in result.output
-    assert "Documents ingested" in result.output
-    assert "Evidence records" in result.output
-    assert "Claims found" in result.output
-    assert "Conflicts found" in result.output
-    assert "Evidence completeness" in result.output
-    assert "Rule-based recommendation" in result.output
-    assert "Final recommendation" in result.output
     assert "Check size" in result.output
+    assert "Evidence completeness" in result.output
+    assert "Evidence health" in result.output
     assert "Final memo" in result.output
-    assert "Stage" in result.output
-    assert "Product-market fit" in result.output
-    assert "Fundability risk" in result.output
-    assert "Valuation risk" in result.output
-    assert "Triggered scoring gates" in result.output
-    assert "Scoring missing inputs" in result.output
     assert "Final JSON" in result.output
-    assert "Failed model roles" in result.output
-    assert "OCR means reading text from images" in result.output
+    assert "Failed specialist roles" in result.output
+    assert "OCR means reading" in normalized_output
+    assert "text from images" in normalized_output
+    assert "Documents ingested" not in result.output
+    assert "Evidence records" not in result.output
+    assert result.output.rfind("Artifacts") > result.output.rfind("Data caveats")
+    assert result.output.rfind("Final memo") > result.output.rfind("Artifacts")
+    assert result.output.rfind("Final JSON") > result.output.rfind("Final memo")
     assert "\x1b[" not in result.output
     assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
     assert "Valuation cap $8M" not in result.output
@@ -383,6 +384,48 @@ def test_evaluate_deal_command_succeeds_with_mocked_openai_responses(
     assert local_path_text not in serialized_metadata
     assert "Valuation cap $8M" not in serialized_metadata
     assert "input_file" not in serialized_metadata
+
+
+def test_evaluate_deal_verbose_output_includes_run_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_openai_env(monkeypatch)
+
+    class Client(FakeOpenAIReviewClient):
+        pass
+
+    Client.instances = []
+    monkeypatch.setattr(evaluation, "OpenAIAgentReviewClient", Client)
+    company_dir = _write_company_folder(
+        tmp_path,
+        company_name="VerboseCo",
+        include_long_tail=True,
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-deal",
+            str(company_dir),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--max-concurrency",
+            "1",
+            "--verbose",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Run details" in normalized_output
+    assert "Documents ingested" in normalized_output
+    assert "Evidence records" in normalized_output
+    assert "Failed model roles none" in normalized_output
+    assert normalized_output.rfind("Artifacts") > normalized_output.rfind("Run details")
+    assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
+    assert "Valuation cap $8M" not in result.output
 
 
 @pytest.mark.parametrize(
@@ -2394,7 +2437,7 @@ def test_evaluate_deal_committee_context_excludes_unsupported_findings(
         }
     )
 
-    evaluate_deal_folder(
+    result = evaluate_deal_folder(
         company_dir,
         config=AppConfig(data_dir=tmp_path / "data", local_only=False, mock_llm=False),
         model_client=client,
@@ -2432,6 +2475,13 @@ def test_evaluate_deal_committee_context_excludes_unsupported_findings(
     assert persisted_final_packet.committee_context is not None
     assert "Supported traction" in persisted_final_packet.model_dump_json()
     assert "MODEL_LIMITATION_PRIVATE_TAIL" not in persisted_final_packet.model_dump_json()
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    committee_read = "\n".join(brief.committee_read)
+    assert len(brief.committee_read) <= 3
+    assert "Supported traction" in committee_read
+    assert "Unsupported hype" not in committee_read
+    assert "Unsupported risk" not in committee_read
+    assert "MODEL_LIMITATION_PRIVATE_TAIL" not in committee_read
 
 
 def test_committee_context_preserves_citation_quote_whitespace() -> None:
@@ -2665,9 +2715,9 @@ def test_evaluate_deal_evidence_audit_blocker_overrides_local_invest(
     assert result.deterministic_score.recommendation == Recommendation.INVEST
     assert result.final_recommendation.recommendation == Recommendation.PASS
     assert result.final_recommendation.check_size == 0
-    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
-    assert "evidence completeness found blocking gaps" in commentary.decisive_factor
-    assert any("Unsafe source text" in risk for risk in commentary.risks)
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    assert "evidence completeness found blocking gaps" in brief.decisive_factor
+    assert any("Unsafe source text" in concern for concern in brief.concerns)
 
 
 def test_evaluate_deal_missing_price_audit_gap_does_not_override_calculated_risk(
@@ -2968,8 +3018,9 @@ def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(
 
     assert result.exit_code == 0, result.output
     normalized_output = " ".join(result.output.split())
-    assert "Final decision: PASS" in normalized_output
-    assert "Recommended check: $0" in normalized_output
+    assert "Recommendation PASS" in normalized_output
+    assert "Check size $0" in normalized_output
+    assert "Bottom line Final guarded recommendation is PASS" in normalized_output
     assert "Decisive factor" in normalized_output
     assert "deterministic" in normalized_output
     assert "guardrails controlled" in normalized_output
@@ -2980,7 +3031,128 @@ def test_evaluate_deal_cli_guardrail_override_commentary_is_clear(
     assert "Valuation cap" not in result.output
 
 
-def test_evaluate_deal_cli_commentary_omits_factor_and_model_rationale_details(
+def test_evaluate_deal_operator_brief_pass_includes_analyst_sections(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="PassBriefCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=55,
+        one_line_reason="Passed because the score was below the investment bar.",
+        score_factors=[
+            ScoreFactor(
+                name="Deal terms and platform access",
+                score=18,
+                max_score=20,
+                explanation="Synthetic verified deal-term support.",
+                support_status=ScoreSupportStatus.VERIFIED,
+            ),
+            ScoreFactor(
+                name="Valuation and net return",
+                score=4,
+                max_score=20,
+                explanation="Synthetic missing return inputs.",
+                support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+                missing_inputs=["ownership", "fees or carry"],
+            ),
+        ],
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Rule-based scoring kept the deal at PASS.",
+        evidence=[],
+    )
+    specialist_output = AgentReviewOutput(
+        deal_id=scored_deal.deal_id,
+        company_name=scored_deal.company_name,
+        agent_role=AgentRole.MARKET_COMPETITION,
+        summary=[
+            AgentSummaryPoint(
+                summary="Market specialist saw a cited competitive gap.",
+                evidence=[AgentEvidenceReference(evidence_id="ev-market")],
+            )
+        ],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        specialist_results=[
+            evaluation.RoleReviewResult(
+                role=AgentRole.MARKET_COMPETITION,
+                packet_path=tmp_path / "market-packet.json",
+                output=specialist_output,
+            )
+        ],
+    )
+
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+
+    assert brief.bottom_line.startswith("Final guarded recommendation is PASS")
+    assert any("deal terms" in positive for positive in brief.positives)
+    assert any("valuation and return math" in concern for concern in brief.concerns)
+    assert "The recommendation is PASS" in brief.decisive_factor
+    assert brief.committee_read == [
+        "Market Competition: Market specialist saw a cited competitive gap."
+    ]
+
+
+def test_evaluate_deal_operator_brief_invest_keeps_risks_visible(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="InvestBriefCo",
+        recommendation=Recommendation.INVEST,
+        check_size=5_000,
+        total_score=88,
+        confidence=ConfidenceLevel.HIGH,
+        one_line_reason=(
+            "Recommended because the score was 88/100, confidence was high, "
+            "and no kill gate triggered."
+        ),
+        score_factors=[
+            ScoreFactor(
+                name="Stage and product-market fit",
+                score=20,
+                max_score=20,
+                explanation="Synthetic verified traction support.",
+                support_status=ScoreSupportStatus.VERIFIED,
+            ),
+            ScoreFactor(
+                name="Valuation and net return",
+                score=8,
+                max_score=20,
+                explanation="Synthetic dilution gap.",
+                support_status=ScoreSupportStatus.NEEDS_DILIGENCE,
+                missing_inputs=["dilution"],
+            ),
+        ],
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.INVEST,
+        check_size=5_000,
+        reason="The guarded decision is supported.",
+        evidence=[AgentEvidenceReference(evidence_id="ev-1")],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+    )
+
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+
+    assert brief.bottom_line.startswith("Final guarded recommendation is INVEST")
+    assert "customer and stage evidence" in brief.positives[0]
+    assert any("valuation and return math" in concern for concern in brief.concerns)
+    assert "dilution" in " ".join(brief.unverified_items)
+
+
+def test_evaluate_deal_operator_brief_omits_factor_and_model_rationale_details(
     tmp_path: Path,
 ) -> None:
     scored_deal = ScoredDeal(
@@ -3022,8 +3194,16 @@ def test_evaluate_deal_cli_commentary_omits_factor_and_model_rationale_details(
         ),
     )
 
-    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
-    rendered = "\n".join([*commentary.positives, *commentary.risks, commentary.decisive_factor])
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    rendered = "\n".join(
+        [
+            brief.bottom_line,
+            *brief.positives,
+            *brief.concerns,
+            brief.decisive_factor,
+            *brief.data_caveats,
+        ]
+    )
 
     assert "PRIVATE_FACTOR_DETAIL" not in rendered
     assert "PRIVATE_MODEL_REASON" not in rendered
@@ -3031,7 +3211,7 @@ def test_evaluate_deal_cli_commentary_omits_factor_and_model_rationale_details(
     assert "Review the private memo for the source-linked rationale" in rendered
 
 
-def test_evaluate_deal_cli_commentary_preserves_uncertainty_labels(
+def test_evaluate_deal_operator_brief_preserves_uncertainty_labels(
     tmp_path: Path,
 ) -> None:
     scored_deal = ScoredDeal(
@@ -3054,12 +3234,13 @@ def test_evaluate_deal_cli_commentary_preserves_uncertainty_labels(
         final_recommendation=final_recommendation,
     )
 
-    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
 
-    assert commentary.decisive_factor.startswith("Needs diligence:")
+    assert brief.decisive_factor.startswith("Needs diligence:")
+    assert brief.bottom_line.startswith("Final guarded recommendation is PASS")
 
 
-def test_evaluate_deal_cli_commentary_labels_strict_mode_gaps(
+def test_evaluate_deal_operator_brief_labels_strict_mode_gaps(
     tmp_path: Path,
 ) -> None:
     scored_deal = ScoredDeal(
@@ -3092,11 +3273,11 @@ def test_evaluate_deal_cli_commentary_labels_strict_mode_gaps(
         final_recommendation=final_recommendation,
     )
 
-    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
-    risks = " ".join(commentary.risks)
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    concerns = " ".join(brief.concerns)
 
-    assert "strict-risk gap" in risks
-    assert "calculated-risk gap" not in risks
+    assert "strict-risk gap" in concerns
+    assert "calculated-risk gap" not in concerns
 
 
 def test_final_memo_labels_strict_mode_gaps(
@@ -3197,7 +3378,7 @@ def test_deterministic_pass_explanation_names_missing_calculated_risk_signal() -
     assert "investment bar" not in explanation
 
 
-def test_evaluate_deal_cli_commentary_separates_check_size_caps_from_overrides(
+def test_evaluate_deal_operator_brief_separates_check_size_caps_from_overrides(
     tmp_path: Path,
 ) -> None:
     scored_deal = ScoredDeal(
@@ -3230,13 +3411,13 @@ def test_evaluate_deal_cli_commentary_separates_check_size_caps_from_overrides(
         ),
     )
 
-    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
 
-    assert "deterministic allocation set the final check size" in commentary.decisive_factor
-    assert "controlled the final recommendation" not in commentary.decisive_factor
+    assert "deterministic allocation set the final check size" in brief.decisive_factor
+    assert "controlled the final recommendation" not in brief.decisive_factor
 
 
-def test_evaluate_deal_cli_commentary_explains_local_guarded_pass(
+def test_evaluate_deal_operator_brief_explains_local_guarded_pass(
     tmp_path: Path,
 ) -> None:
     scored_deal = ScoredDeal(
@@ -3266,10 +3447,10 @@ def test_evaluate_deal_cli_commentary_explains_local_guarded_pass(
         evaluation_mode="local-only",
     )
 
-    commentary = evaluation.build_evaluate_deal_cli_commentary(result)
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
 
-    assert "safe source-linked recommendation citations" in commentary.decisive_factor
-    assert "final review did not clear" not in commentary.decisive_factor
+    assert "safe source-linked recommendation citations" in brief.decisive_factor
+    assert "final review did not clear" not in brief.decisive_factor
 
 
 def test_forced_pass_warns_when_rule_based_citations_are_filtered() -> None:
@@ -4341,9 +4522,13 @@ def test_evaluate_deal_cli_reports_specialist_failure_without_evidence_text(
     )
 
     assert result.exit_code == 0, result.output
-    assert "Failed model roles" in result.output
+    assert "Failed specialist roles" in result.output
     assert "Team Execution" in result.output
-    assert "Team Execution model review failed validation" in result.output
+    committee_section = result.output.split("Model committee read", 1)[1].split(
+        "Data caveats",
+        1,
+    )[0]
+    assert "Team Execution" not in committee_section
     assert "PRIVATE_FULL_TEXT_MARKER_AT_END" not in result.output
     assert "Valuation cap $8M" not in result.output
 
@@ -4444,6 +4629,10 @@ def _commentary_result(
     final_recommendation: AgentRecommendationRationale,
     final_output: AgentReviewOutput | None = None,
     evaluation_mode: str = "model-backed",
+    specialist_results: list[evaluation.RoleReviewResult] | None = None,
+    failed_specialist_roles: list[AgentRole] | None = None,
+    warnings: list[str] | None = None,
+    operator_limitations: list[str] | None = None,
 ) -> evaluation.DealEvaluationResult:
     return evaluation.DealEvaluationResult(
         deal_id=scored_deal.deal_id,
@@ -4463,12 +4652,14 @@ def _commentary_result(
             agent_role=AgentRole.FINAL_DECISION,
             recommendation=final_recommendation,
         ),
-        specialist_results=[],
-        failed_specialist_roles=[],
+        specialist_results=specialist_results or [],
+        failed_specialist_roles=failed_specialist_roles or [],
         final_memo_path=root / "final-evaluation.md",
         final_json_path=root / "final-evaluation.json",
         agent_output_dir=root / "agent-outputs",
         ocr_status="OCR was not enabled.",
+        warnings=warnings or [],
+        operator_limitations=operator_limitations or [],
     )
 
 
