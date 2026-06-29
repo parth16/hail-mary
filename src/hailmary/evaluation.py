@@ -722,15 +722,51 @@ def _operator_data_caveats(result: DealEvaluationResult) -> list[str]:
             caveats,
             f"{hidden_warning_count} additional warnings are available with --verbose.",
         )
+    visible_limitations = _operator_visible_limitations(result.operator_limitations)
+    for limitation in visible_limitations:
+        _add_cli_point(caveats, f"Limitation: {limitation}")
     if result.operator_limitations:
-        _add_cli_point(
-            caveats,
-            (
-                f"{len(result.operator_limitations)} run limitations were recorded; "
-                "see the final memo or use --verbose for details."
-            ),
-        )
+        hidden_limitation_count = len(result.operator_limitations) - len(visible_limitations)
+        if hidden_limitation_count > 0:
+            limitation_word = (
+                "limitation" if hidden_limitation_count == 1 else "limitations"
+            )
+            _add_cli_point(
+                caveats,
+                (
+                    f"{hidden_limitation_count} additional run {limitation_word} "
+                    f"{'was' if hidden_limitation_count == 1 else 'were'} recorded; "
+                    "see the final memo or use --verbose for details."
+                ),
+            )
+        elif not visible_limitations:
+            limitation_count = len(result.operator_limitations)
+            limitation_word = "limitation" if limitation_count == 1 else "limitations"
+            _add_cli_point(
+                caveats,
+                (
+                    f"{limitation_count} run {limitation_word} "
+                    f"{'was' if limitation_count == 1 else 'were'} recorded; "
+                    "see the final memo or use --verbose for details."
+                ),
+            )
     return caveats
+
+
+def _operator_visible_limitations(limitations: Sequence[str]) -> list[str]:
+    visible = [
+        limitation
+        for limitation in limitations
+        if _operator_limitation_visible_in_brief(limitation)
+    ]
+    return visible[:MAX_CLI_COMMENTARY_ITEMS]
+
+
+def _operator_limitation_visible_in_brief(limitation: str) -> bool:
+    lowered = limitation.lower()
+    return lowered.startswith("local-only mode was used") or (
+        "model review was skipped" in lowered and "hailmary_mock_llm" in lowered
+    )
 
 
 def _operator_visible_warnings(warnings: Sequence[str]) -> list[str]:
@@ -745,6 +781,7 @@ def _operator_warning_priority(warning: str) -> int:
     lowered = warning.lower()
     final_decision_markers = (
         "forced final pass",
+        "forced pass/$0",
         "kept final pass",
         "final pass/$0",
         "deterministic guardrails",

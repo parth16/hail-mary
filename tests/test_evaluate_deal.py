@@ -3262,6 +3262,82 @@ def test_evaluate_deal_operator_brief_prioritizes_guardrail_warnings(
     assert "1 additional warnings are available with --verbose" in caveats
 
 
+def test_evaluate_deal_operator_brief_prioritizes_local_audit_forced_pass(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="LocalAuditPriorityCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=55,
+        one_line_reason="Passed because the score was below the investment bar.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Evidence completeness audit forced PASS/$0.",
+        evidence=[],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        warnings=[
+            "Ingestion warning one.",
+            "Research warning two.",
+            "Image-based text reading warning three.",
+            (
+                "Evidence completeness audit forced PASS/$0 because blocking "
+                "gaps were found."
+            ),
+        ],
+    )
+
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    caveats = "\n".join(brief.data_caveats)
+
+    assert "Evidence completeness audit forced PASS/$0" in caveats
+    assert "1 additional warnings are available with --verbose" in caveats
+
+
+def test_evaluate_deal_operator_brief_surfaces_model_review_skipped_limitation(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="LocalOnlyCaveatCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=55,
+        one_line_reason="Passed because the score was below the investment bar.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Rule-based scoring kept the deal at PASS.",
+        evidence=[],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        evaluation_mode="local-only",
+        operator_limitations=[
+            (
+                "Local-only mode was used, so model review was skipped. The final "
+                "recommendation comes from rule-based scoring."
+            )
+        ],
+    )
+
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    caveats = "\n".join(brief.data_caveats)
+
+    assert "Limitation: Local-only mode was used, so model review was skipped" in caveats
+    assert "run limitations were recorded" not in caveats
+
+
 def test_evaluate_deal_operator_brief_limits_downgraded_confidence(
     tmp_path: Path,
 ) -> None:
