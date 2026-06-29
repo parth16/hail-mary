@@ -347,6 +347,13 @@ def test_score_evidence_store_requires_business_signal_for_calculated_risk() -> 
     [
         "Sequoia led the seed round.",
         "Sequoia is the lead investor.",
+        "Institutional investors are confirmed.",
+        "The seed round has closed.",
+        "Lead investor - committed.",
+        "Seed round — closed.",
+        "Lead investor committed. Data room is not secured.",
+        "Seed round active. Customer contract is not signed.",
+        "The lead investor had not signed in March but is now committed.",
     ],
 )
 def test_score_evidence_store_accepts_led_current_funding_for_calculated_risk(
@@ -384,6 +391,17 @@ def test_score_evidence_store_accepts_led_current_funding_for_calculated_risk(
     [
         "The company plans to raise a seed round.",
         "The company is not ready for Series A.",
+        "The lead investor is not committed.",
+        "The lead investor has not signed.",
+        "Lead investor not committed.",
+        "Institutional investors are not confirmed.",
+        "Institutional investors not confirmed.",
+        "Lead investor concerns are not confirmed.",
+        "Institutional investor issues are not confirmed.",
+        "The seed round has not closed.",
+        "Seed round not closed.",
+        "Follow-on financing is not secured.",
+        "Not yet committed lead investor.",
     ],
 )
 def test_score_evidence_store_requires_current_funding_for_calculated_risk_signal(
@@ -418,6 +436,170 @@ def test_score_evidence_store_requires_current_funding_for_calculated_risk_signa
         "source-linked traction, customer, usage, pilot, or funding support"
         in scored.one_line_reason
     )
+
+
+def test_score_evidence_store_keeps_resolved_historical_funding_out_of_risk() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        ),
+        _evidence(
+            "ev_funding",
+            "The lead investor had not signed in March but is now committed.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.fundability_risk != FundabilityRisk.HIGH
+
+
+@pytest.mark.parametrize(
+    ("funding_text", "expected_risk"),
+    [
+        ("Lead investor concerns are not confirmed.", FundabilityRisk.LOW),
+        ("Institutional investor issues are not confirmed.", FundabilityRisk.LOW),
+        ("Lead investor committed. Data room is not secured.", FundabilityRisk.LOW),
+    ],
+)
+def test_score_evidence_store_ignores_benign_or_unrelated_funding_status(
+    funding_text: str,
+    expected_risk: FundabilityRisk,
+) -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        ),
+        _evidence("ev_funding", funding_text),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.fundability_risk == expected_risk
+
+
+def test_score_evidence_store_does_not_count_unsigned_customer_contract_as_pmf() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. Pre-seed company. "
+            "Investor ownership target 1%. Estimated dilution 20%. Platform fee 5%. "
+            "Carry 20%. Gross exit value $1B.",
+        ),
+        _evidence(
+            "ev_funding",
+            "Seed round active. Customer contract is not signed.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.UNKNOWN
+    assert 60 <= scored.total_score < 75
+    assert scored.recommendation == Recommendation.INVEST
+    assert scored.calculated_risk is True
+
+
+def test_score_evidence_store_requires_funding_subject_for_resolved_status() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        ),
+        _evidence(
+            "ev_funding",
+            "Lead investor is not committed, but the product is now active.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.fundability_risk == FundabilityRisk.HIGH
+
+
+def test_score_evidence_store_does_not_read_pre_seed_customer_status_as_funding() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M. One paid customer.",
+        ),
+        _evidence(
+            "ev_customer_status",
+            "Pre-seed customer contract is not signed.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.fundability_risk != FundabilityRisk.HIGH
+
+
+def test_score_evidence_store_keeps_resolved_customer_contract_as_pmf() -> None:
+    evidence = [
+        _evidence(
+            "ev_terms",
+            "Valuation cap $8M. Discount 20%. Round size $1M.",
+        ),
+        _evidence(
+            "ev_customer",
+            "Customer contract had not been signed in March but is now signed.",
+        ),
+    ]
+    claims = [
+        _claim("valuation cap", "$8M", "ev_terms"),
+        _claim("discount", "20%", "ev_terms"),
+        _claim("round size", "$1M", "ev_terms"),
+    ]
+
+    scored = score_evidence_store(
+        _store(evidence=evidence, claims=claims),
+        config=AppConfig(data_dir=Path("data")),
+    )
+
+    assert scored.pmf_level == PMFLevel.DEVELOPING
 
 
 def test_score_evidence_store_clears_calculated_risk_when_no_check_tier_fits() -> None:

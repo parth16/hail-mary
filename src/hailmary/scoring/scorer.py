@@ -186,6 +186,15 @@ TRACTION_NEGATED_QUALIFIERS = (
     r"production|live)\s+){0,3}"
 )
 BENIGN_NEGATED_TRACTION_NOUNS = r"(?:issues?|concerns?|problems?|churn|complaints?)"
+TRACTION_STATUS_BRIDGE_TOKEN = r"[A-Za-z0-9][A-Za-z0-9'/-]*"
+TRACTION_STATUS_DELIMITER = r"(?:\s*(?:--|[-:—–])\s*|\s+)"
+TRACTION_RESOLVED_STATUS_WORDS = (
+    r"(?:active|contracted|committed|converted|live|paying|retained|signed)"
+)
+RESOLVED_TRACTION_STATUS_UPDATE = (
+    rf"(?![^.;!?\n]*\b(?:but|however)\b[^.;!?\n]*\b(?:now|currently)\b"
+    rf"[^.;!?\n]*\b{TRACTION_RESOLVED_STATUS_WORDS}\b)"
+)
 TRACTION_NEGATED_TERM_PATTERN = re.compile(
     rf"{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b",
     re.IGNORECASE,
@@ -252,6 +261,16 @@ NEGATED_TRACTION_PATTERNS = (
         rf"(?!\s+{BENIGN_NEGATED_TRACTION_NOUNS}\b)",
         re.IGNORECASE,
     ),
+    re.compile(
+        rf"\b{TRACTION_NEGATED_QUALIFIERS}{TRACTION_NEGATED_SIGNAL}\b"
+        rf"(?:\s+(?!{BENIGN_NEGATED_TRACTION_NOUNS}\b)"
+        rf"{TRACTION_STATUS_BRIDGE_TOKEN}){{0,4}}\s+"
+        rf"(?:is|are|was|were|has|have|had)\s+not\s+"
+        rf"(?:yet\s+)?(?:been\s+)?"
+        rf"{TRACTION_RESOLVED_STATUS_WORDS}\b"
+        rf"{RESOLVED_TRACTION_STATUS_UPDATE}",
+        re.IGNORECASE,
+    ),
 )
 ABSENCE_TRACTION_PATTERNS = (
     NEGATED_TRACTION_PATTERNS[0],
@@ -263,8 +282,38 @@ BENIGN_FUNDING_CONCERN_NOUNS = r"(?:concerns?|issues?|problems?|complaints?)"
 CALCULATED_RISK_FUNDING_SIGNAL = (
     r"(?:lead\s+investor|institutional(?:\s+investors?)?|"
     r"series\s+a(?:\s+investors?)?|"
-    r"seed(?:\s+(?:round|funding|investors?))?|"
+    r"(?<!pre-)(?<!pre\s)seed(?:\s+(?:round|funding|investors?))?|"
     r"follow[-\s]?on(?:\s+financing)?)"
+)
+CURRENT_FUNDING_STATUS_WORDS = (
+    r"(?:active|backed|closed|committed|confirmed|joined|named|"
+    r"participating|secured|signed)"
+)
+RESOLVED_FUNDING_STATUS_WORDS = (
+    r"(?:backed|closed|committed|confirmed|joined|named|participating|signed)"
+)
+FUNDING_STATUS_BRIDGE_TOKEN = r"[A-Za-z0-9][A-Za-z0-9'/-]*"
+FUNDING_STATUS_DELIMITER = r"(?:\s*(?:--|[-:—–])\s*|\s+)"
+FUNDING_STATUS_BRIDGE = (
+    rf"(?:\s+(?!{BENIGN_FUNDING_CONCERN_NOUNS}\b)"
+    rf"{FUNDING_STATUS_BRIDGE_TOKEN}){{0,4}}"
+)
+FUNDING_STATUS_POSITIVE_BRIDGE = (
+    rf"(?:\s+(?!(?:not|no|without|{BENIGN_FUNDING_CONCERN_NOUNS})\b)"
+    rf"{FUNDING_STATUS_BRIDGE_TOKEN}){{0,4}}"
+)
+FUNDING_STATUS_NO_AUX_BRIDGE = (
+    rf"(?:\s+(?!(?:is|are|was|were|has|have|had|"
+    rf"{BENIGN_FUNDING_CONCERN_NOUNS})\b)"
+    rf"{FUNDING_STATUS_BRIDGE_TOKEN}){{0,4}}"
+)
+FUNDING_STATUS_PREFIX_BRIDGE = (
+    rf"(?:\s+(?!{BENIGN_FUNDING_CONCERN_NOUNS}\b)"
+    rf"{FUNDING_STATUS_BRIDGE_TOKEN}){{0,4}}\s+"
+)
+RESOLVED_FUNDING_STATUS_UPDATE = (
+    rf"(?![^.;!?\n]*\b(?:but|however)\b[^.;!?\n]*\b(?:now|currently)\b"
+    rf"[^.;!?\n]*\b{RESOLVED_FUNDING_STATUS_WORDS}\b)"
 )
 NEGATED_FUNDING_PATTERNS = (
     re.compile(
@@ -311,6 +360,36 @@ NEGATED_FUNDING_PATTERNS = (
     re.compile(
         r"\b(?:does|do|did)\s+not\s+have\s+(?:a\s+)?lead\s+investor\b"
         rf"(?!\s+{BENIGN_LEAD_INVESTOR_FOLLOWING_NOUNS}\b)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{CALCULATED_RISK_FUNDING_SIGNAL}\b"
+        rf"{FUNDING_STATUS_BRIDGE}{FUNDING_STATUS_DELIMITER}"
+        rf"(?:is|are|has|have)\s+not\s+"
+        rf"(?:yet\s+)?(?:been\s+)?{CURRENT_FUNDING_STATUS_WORDS}\b"
+        rf"{RESOLVED_FUNDING_STATUS_UPDATE}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{CALCULATED_RISK_FUNDING_SIGNAL}\b"
+        rf"{FUNDING_STATUS_BRIDGE}{FUNDING_STATUS_DELIMITER}"
+        rf"(?:was|were|had)\s+not\s+"
+        rf"(?:yet\s+)?(?:been\s+)?{CURRENT_FUNDING_STATUS_WORDS}\b"
+        rf"{RESOLVED_FUNDING_STATUS_UPDATE}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{CALCULATED_RISK_FUNDING_SIGNAL}\b"
+        rf"{FUNDING_STATUS_NO_AUX_BRIDGE}{FUNDING_STATUS_DELIMITER}not\s+"
+        rf"(?:yet\s+)?(?:been\s+)?{CURRENT_FUNDING_STATUS_WORDS}\b"
+        rf"{RESOLVED_FUNDING_STATUS_UPDATE}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bnot\s+(?:yet\s+)?(?:a\s+|an\s+|the\s+)?"
+        rf"{CURRENT_FUNDING_STATUS_WORDS}"
+        rf"{FUNDING_STATUS_PREFIX_BRIDGE}{CALCULATED_RISK_FUNDING_SIGNAL}\b"
+        rf"{RESOLVED_FUNDING_STATUS_UPDATE}",
         re.IGNORECASE,
     ),
     re.compile(
@@ -368,15 +447,19 @@ CALCULATED_RISK_FUNDING_NEGATED_PATTERNS = (
 CALCULATED_RISK_CURRENT_FUNDING_PATTERNS = (
     re.compile(
         rf"\b{CALCULATED_RISK_FUNDING_SIGNAL}\b"
-        r"(?:\s+\S+){0,4}\s+"
-        r"(?:active|backed|closed|committed|confirmed|joined|named|"
-        r"participating|secured|signed)\b",
+        rf"{FUNDING_STATUS_POSITIVE_BRIDGE}{FUNDING_STATUS_DELIMITER}"
+        rf"{CURRENT_FUNDING_STATUS_WORDS}\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:active|backed|closed|committed|confirmed|named|"
-        r"participating|secured|signed)\s+"
-        rf"(?:\S+\s+){{0,4}}{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        rf"\b{CURRENT_FUNDING_STATUS_WORDS}"
+        rf"{FUNDING_STATUS_PREFIX_BRIDGE}{CALCULATED_RISK_FUNDING_SIGNAL}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{CALCULATED_RISK_FUNDING_SIGNAL}\b[^.;!?\n]{{0,120}}"
+        rf"\b(?:but|however)\b[^.;!?\n]{{0,80}}\b(?:now|currently)\b"
+        rf"[^.;!?\n]{{0,40}}\b{RESOLVED_FUNDING_STATUS_WORDS}\b",
         re.IGNORECASE,
     ),
     re.compile(
