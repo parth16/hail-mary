@@ -228,6 +228,30 @@ def test_deal_terms_do_not_parse_standalone_cap_without_financing_context(
     assert saved_store["claims"] == []
 
 
+def test_deal_terms_do_not_parse_wrapped_market_cap_in_financing_context(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "WrappedMarketCapCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Round Seed\n"
+        "Market\n"
+        "Cap $150M\n"
+        "Discount 15%\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+
+    assert "valuation cap" not in {claim["label"] for claim in saved_store["claims"]}
+    assert {claim["label"] for claim in saved_store["claims"]} == {"discount"}
+
+
 def test_evidence_store_flags_conflicting_deal_terms(tmp_path: Path) -> None:
     root = tmp_path / "pitch-decks"
     company = root / "ConflictCo"

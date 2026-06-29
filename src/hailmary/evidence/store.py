@@ -117,6 +117,20 @@ FINANCING_CONTEXT_PATTERN = re.compile(
     r"minimum investment|"
     r"minimum check|"
     r"target raise"
+    r"|valuation"
+    r")\b",
+    re.IGNORECASE,
+)
+UNRELATED_CAP_CONTEXT_PATTERN = re.compile(
+    r"\b(?:"
+    r"market|"
+    r"expense|expenses|"
+    r"operating|"
+    r"budget|"
+    r"exposure|"
+    r"carry|"
+    r"fees?|"
+    r"costs?"
     r")\b",
     re.IGNORECASE,
 )
@@ -401,7 +415,7 @@ def _extract_deal_term_claims(
             for match in pattern.regex.finditer(evidence.text):
                 if (
                     pattern.requires_financing_context
-                    and not _has_financing_context(evidence.text)
+                    and not _standalone_cap_has_financing_context(evidence.text, match)
                 ):
                     continue
                 raw_value = match.groupdict().get("value") or match.groupdict().get(
@@ -461,8 +475,48 @@ def _extract_deal_term_claims(
     return claims
 
 
-def _has_financing_context(text: str) -> bool:
-    return FINANCING_CONTEXT_PATTERN.search(text) is not None
+def _standalone_cap_has_financing_context(
+    text: str,
+    match: re.Match[str],
+) -> bool:
+    lines = text.splitlines(keepends=True)
+    line_start = 0
+    matched_line_index = 0
+    for index, line in enumerate(lines):
+        line_end = line_start + len(line)
+        if line_start <= match.start() < line_end:
+            matched_line_index = index
+            break
+        line_start = line_end
+    else:
+        return False
+
+    nearby_lines = _nearby_nonempty_lines(lines, matched_line_index)
+    previous_line = _previous_nonempty_line(lines, matched_line_index)
+    if _line_is_cap_qualifier(previous_line, UNRELATED_CAP_CONTEXT_PATTERN):
+        return False
+    return any(FINANCING_CONTEXT_PATTERN.search(line) for line in nearby_lines)
+
+
+def _nearby_nonempty_lines(lines: list[str], matched_line_index: int) -> list[str]:
+    start = max(0, matched_line_index - 2)
+    end = min(len(lines), matched_line_index + 3)
+    return [line.strip() for line in lines[start:end] if line.strip()]
+
+
+def _previous_nonempty_line(lines: list[str], matched_line_index: int) -> str:
+    for index in range(matched_line_index - 1, -1, -1):
+        line = lines[index].strip()
+        if line:
+            return line
+    return ""
+
+
+def _line_is_cap_qualifier(line: str, pattern: re.Pattern[str]) -> bool:
+    if not line:
+        return False
+    words = re.findall(r"[A-Za-z]+", line)
+    return len(words) <= 4 and pattern.search(line) is not None
 
 
 def _citation_from_match(
