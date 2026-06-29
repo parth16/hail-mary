@@ -3238,9 +3238,15 @@ def test_evaluate_deal_operator_brief_prioritizes_guardrail_warnings(
         scored_deal=scored_deal,
         final_recommendation=final_recommendation,
         warnings=[
-            "Ingestion warning one.",
-            "Research warning two.",
-            "Image-based text reading warning three.",
+            "Ignored one or more unsafe website URLs found in stored evidence.",
+            (
+                "A cited source contains source-document instructions and cannot be "
+                "used for scoring."
+            ),
+            (
+                "Hail Mary removed one or more rule-based recommendation citations "
+                "because they looked unsafe."
+            ),
             (
                 "The final model recommended INVEST/$1K, but Hail Mary's deterministic "
                 "guardrails kept final PASS/$0 because score 55/100 was below the "

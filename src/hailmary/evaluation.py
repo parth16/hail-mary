@@ -743,21 +743,28 @@ def _operator_visible_warnings(warnings: Sequence[str]) -> list[str]:
 
 def _operator_warning_priority(warning: str) -> int:
     lowered = warning.lower()
-    critical_markers = (
+    final_decision_markers = (
         "forced final pass",
         "kept final pass",
+        "final pass/$0",
+        "deterministic guardrails",
+        "final model recommended",
+        "final recommendation was changed to pass",
+        "rule-based scoring suggested invest",
+    )
+    safety_markers = (
         "guardrail",
         "citation",
         "source-document instructions",
-        "deterministic guardrails",
-        "final model recommended",
         "unsafe",
         "removed all",
         "removed one or more",
     )
-    if any(marker in lowered for marker in critical_markers):
+    if any(marker in lowered for marker in final_decision_markers):
         return 0
-    return 1
+    if any(marker in lowered for marker in safety_markers):
+        return 1
+    return 2
 
 
 def _operator_research_quality_summary(
