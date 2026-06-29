@@ -55,6 +55,7 @@ from hailmary.research import (
     CompanyMatch,
     GitHubRepositorySearchClient,
     MeridianUnresolvedField,
+    PublicWebSearchClient,
     ResearchImportError,
     ResearchImportRunSummary,
     ResearchProviderRunStatus,
@@ -73,6 +74,7 @@ from hailmary.research import (
 )
 from hailmary.research.schemas import resolved_research_result_topics
 from hailmary.research.web import WebResearchClient
+from hailmary.research.website_discovery import discover_official_website_url
 from hailmary.schemas.agents import (
     AgentCommitteeContext,
     AgentDiligenceQuestion,
@@ -860,6 +862,7 @@ def evaluate_deal_folder(
     sbir_client: SbirAwardsClient | None = None,
     sec_form_d_client: SecFormDFilingsClient | None = None,
     github_client: GitHubRepositorySearchClient | None = None,
+    public_web_search_client: PublicWebSearchClient | None = None,
     stage_callback: Callable[[str], None] | None = None,
     created_at: datetime | None = None,
 ) -> DealEvaluationResult:
@@ -894,6 +897,19 @@ def evaluate_deal_folder(
         raise EvaluationError(str(exc)) from exc
     deal = _single_ingested_deal(ingestion_summary)
     store = _load_evidence_store_for_deal(deal, config=config)
+    discovered_website_url: str | None = None
+    website_discovery_warnings: tuple[str, ...] = ()
+    if website_url is None:
+        try:
+            website_discovery_store = apply_evidence_actions(
+                config=config,
+                store=store,
+            ).store
+        except EvidenceActionError as exc:
+            raise EvaluationError(str(exc)) from exc
+        website_discovery = discover_official_website_url(website_discovery_store)
+        discovered_website_url = website_discovery.selected_url
+        website_discovery_warnings = website_discovery.warnings
 
     research_run: EvaluationResearchRun | None = None
     if run_research:
@@ -901,7 +917,8 @@ def evaluate_deal_folder(
         research_run = _run_and_import_research(
             config=config,
             created_at=created_at or datetime.now(UTC),
-            website_url=website_url,
+            website_url=website_url or discovered_website_url,
+            research_warnings=website_discovery_warnings,
             meridian_url=meridian_url,
             include_paid=include_paid_research,
             sec_form_d_results_path=sec_form_d_results_path,
@@ -916,6 +933,7 @@ def evaluate_deal_folder(
             sbir_client=sbir_client,
             sec_form_d_client=sec_form_d_client,
             github_client=github_client,
+            public_web_search_client=public_web_search_client,
         )
         if research_run.imported_count:
             _stage(stage_callback, "evidence refresh after research import")
@@ -1231,6 +1249,7 @@ def _run_and_import_research(
     config: AppConfig,
     created_at: datetime,
     website_url: str | None,
+    research_warnings: Sequence[str],
     meridian_url: str | None,
     include_paid: bool,
     sec_form_d_results_path: Path | None,
@@ -1245,6 +1264,7 @@ def _run_and_import_research(
     sbir_client: SbirAwardsClient | None,
     sec_form_d_client: SecFormDFilingsClient | None,
     github_client: GitHubRepositorySearchClient | None,
+    public_web_search_client: PublicWebSearchClient | None,
 ) -> EvaluationResearchRun:
     try:
         workflow = run_research_workflow(
@@ -1265,9 +1285,27 @@ def _run_and_import_research(
             sbir_client=sbir_client,
             sec_form_d_client=sec_form_d_client,
             github_client=github_client,
+            public_web_search_client=public_web_search_client,
         )
     except ResearchWorkflowError as exc:
         raise EvaluationError(f"External research workflow failed: {exc}") from exc
+
+    if research_warnings:
+        workflow = workflow.model_copy(
+            update={
+                "issues": [
+                    *workflow.issues,
+                    *[
+                        ResearchWorkflowIssue(
+                            severity="warning",
+                            source="official website autodiscovery",
+                            message=warning,
+                        )
+                        for warning in research_warnings
+                    ],
+                ]
+            }
+        )
 
     local_public_results_requested = any(
         (
@@ -2010,6 +2048,8 @@ def _research_export(research_run: EvaluationResearchRun | None) -> dict[str, ob
                 "research_topic": status.research_topic,
                 "status": status.status.value,
                 "planned_count": status.planned_count,
+                "discovered_count": status.discovered_count,
+                "fetched_count": status.fetched_count,
                 "collected_count": status.collected_count,
                 "imported_count": status.imported_count,
                 "warning_count": status.warning_count,
@@ -3356,7 +3396,8 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
     lines = [
         f"- Planned {workflow.plan.task_count} external source tasks.",
         (
-            "- Live public collection ran for exact public URLs and configured public clients."
+            "- Live public collection ran for exact public URLs, autonomous public web search, "
+            "and configured public APIs."
             if workflow.live_collection_enabled
             else (
                 "- Live public collection did not run for this workflow."
@@ -3372,6 +3413,8 @@ def _research_memo_lines(research_run: EvaluationResearchRun | None) -> list[str
             f"{manual_needed_count}, {not_run_count}, {stale_count}, {warning_count}."
         ),
     ]
+    if research_run.imported_count == 0:
+        lines.append(f"- {_memo_text(_zero_import_research_attempt_text(workflow))}.")
     if workflow.manual_task_queue_path is not None:
         lines.append(
             "- Manual research follow-up queue: "
@@ -3483,6 +3526,12 @@ def _research_provider_status_memo_lines(
     lines = ["- Provider statuses:"]
     for status in statuses:
         details: list[str] = []
+        if status.discovered_count:
+            details.append(
+                _research_count_phrase(status.discovered_count, "discovered URL")
+            )
+        if status.fetched_count:
+            details.append(_research_count_phrase(status.fetched_count, "fetched source"))
         if status.collected_count:
             details.append(
                 _research_count_phrase(status.collected_count, "ready-to-import result")
@@ -3507,6 +3556,37 @@ def _research_provider_status_memo_lines(
             f"{status.status.value.replace('_', ' ')}{detail_text}."
         )
     return lines
+
+
+def _zero_import_research_attempt_text(workflow: ResearchWorkflowRunSummary) -> str:
+    statuses = workflow.summary.provider_statuses
+    discovered = sum(status.discovered_count for status in statuses)
+    fetched = sum(status.fetched_count for status in statuses)
+    no_exact = sum(
+        1 for status in statuses if status.status == ResearchProviderRunStatus.NO_EXACT_RESULTS
+    )
+    failed = sum(
+        1 for status in statuses if status.status == ResearchProviderRunStatus.FAILED
+    )
+    not_run = sum(
+        1 for status in statuses if status.status == ResearchProviderRunStatus.NOT_RUN
+    )
+    parts = [
+        "No external research records were imported before scoring",
+        f"discovered {discovered} public URL{'' if discovered == 1 else 's'}",
+        f"fetched {fetched} source page{'' if fetched == 1 else 's'}",
+    ]
+    if no_exact:
+        parts.append(
+            f"{no_exact} provider topic{'' if no_exact == 1 else 's'} had no exact results"
+        )
+    if failed:
+        parts.append(f"{failed} provider{'' if failed == 1 else 's'} failed")
+    if not_run:
+        parts.append(
+            f"{not_run} provider topic{'' if not_run == 1 else 's'} did not run"
+        )
+    return "; ".join(parts)
 
 
 def _evaluation_research_provider_statuses(
@@ -3580,6 +3660,8 @@ def _merge_imported_research_status(
         research_topic=research_topic,
         status=_provider_status_after_import(existing),
         planned_count=existing.planned_count if existing is not None else 0,
+        discovered_count=existing.discovered_count if existing is not None else 0,
+        fetched_count=existing.fetched_count if existing is not None else 0,
         collected_count=0,
         imported_count=(
             (existing.imported_count if existing is not None else 0) + imported_count

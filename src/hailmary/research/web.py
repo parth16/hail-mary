@@ -48,6 +48,8 @@ class WebResearchFetchError(RuntimeError):
 
 MAX_FETCH_BYTES = 2_000_000
 MAX_TEXT_CHARS = 40_000
+MAX_SAVED_SOURCE_TEXT_CHARS = 1_500
+MAX_SNIPPET_CHARS = 360
 DEFAULT_TIMEOUT_SECONDS = 10.0
 GENERATED_SEARCH_PAGE_PREFIXES: dict[str, tuple[str, ...]] = {
     "sec_form_d": ("https://www.sec.gov/edgar/search/",),
@@ -493,6 +495,15 @@ def _research_result_for_task(
     collected_at: datetime,
     ingested_deal_ids: set[str],
 ) -> ResearchResultInput:
+    snippet_text = source_backed_snippet_text(
+        page.text,
+        company_name=task.company_name,
+        topic=task.research_topic,
+    )
+    if not snippet_text:
+        raise WebResearchFetchError(
+            "The page did not contain a short source-backed snippet safe to save."
+        )
     return ResearchResultInput(
         deal_id=task.deal_id if task.deal_id in ingested_deal_ids else None,
         company_name=task.company_name,
@@ -500,16 +511,17 @@ def _research_result_for_task(
         provider_name=task.provider_name,
         research_topic=task.research_topic,
         title=page.title,
-        text=page.text,
+        text=snippet_text,
         retrieved_at=collected_at,
         source_url=page.source_url,
         confidence=(
-            "medium: fetched from a planned public web URL; Hail Mary did not "
-            "verify individual claims"
+            "medium: fetched from a planned public web URL; Hail Mary saved short "
+            "source-backed snippets and did not verify individual claims"
         ),
         licensing_notes=(
             f"{task.licensing_notes} Automatically fetched from a public URL in the "
-            "research plan. Respect the source website's terms before relying on it."
+            "research plan. Hail Mary saved only short snippets, not the full page. "
+            "Respect the source website's terms before relying on it."
         ),
         source_kind=SourceKind.WEB,
         document_type=DocumentType.WEB_PAGE,
@@ -521,6 +533,154 @@ def _research_result_for_task(
         identity_match_kind=CompanyMatchKind.EXACT,
         identity_match_reason="The page was fetched for the exact requested company in the plan.",
     )
+
+
+def source_backed_snippet_text(
+    text: str,
+    *,
+    company_name: str,
+    topic: str = "company",
+    max_chars: int = MAX_SAVED_SOURCE_TEXT_CHARS,
+) -> str:
+    cleaned_text = _collapse_text(text)
+    if not cleaned_text:
+        return ""
+    company_terms = [
+        term.casefold()
+        for term in re.findall(r"[A-Za-z0-9]+", company_name)
+        if len(term) >= 3
+    ]
+    topic_terms = _snippet_topic_terms(topic)
+    scored_snippets: list[tuple[int, int, str]] = []
+    for index, candidate in enumerate(_snippet_candidates(cleaned_text)):
+        if _snippet_has_private_artifact(candidate):
+            continue
+        score = _snippet_score(
+            candidate,
+            company_terms=company_terms,
+            topic_terms=topic_terms,
+        )
+        if score <= 0:
+            continue
+        scored_snippets.append((score, index, _truncate_snippet(candidate)))
+    if not scored_snippets:
+        fallback = _truncate_snippet(cleaned_text)
+        return "" if _snippet_has_private_artifact(fallback) else fallback
+    selected: list[str] = []
+    total_chars = 0
+    for _score, _index, snippet in sorted(
+        scored_snippets,
+        key=lambda item: (-item[0], item[1]),
+    ):
+        if snippet in selected:
+            continue
+        next_total = total_chars + len(snippet) + (2 if selected else 0)
+        if next_total > max_chars and selected:
+            continue
+        if next_total > max_chars:
+            snippet = snippet[: max_chars - 4].rstrip() + " ..."
+            next_total = len(snippet)
+        selected.append(snippet)
+        total_chars = next_total
+        if len(selected) >= 4:
+            break
+    return "\n\n".join(selected)
+
+
+def _snippet_candidates(text: str) -> list[str]:
+    paragraph_candidates = [
+        candidate.strip()
+        for candidate in re.split(r"(?:\n{2,}|\s{2,})", text)
+        if candidate.strip()
+    ]
+    if len(paragraph_candidates) <= 1:
+        paragraph_candidates = [
+            candidate.strip()
+            for candidate in re.split(r"(?<=[.!?])\s+", text)
+            if candidate.strip()
+        ]
+    return paragraph_candidates[:80]
+
+
+def _snippet_score(
+    candidate: str,
+    *,
+    company_terms: list[str],
+    topic_terms: set[str],
+) -> int:
+    normalized = candidate.casefold()
+    score = 0
+    if company_terms and all(term in normalized for term in company_terms[:3]):
+        score += 8
+    elif company_terms and any(term in normalized for term in company_terms):
+        score += 3
+    topic_hits = sum(1 for term in topic_terms if term in normalized)
+    score += min(topic_hits, 4)
+    if len(candidate) < 40:
+        score -= 2
+    return score
+
+
+def _snippet_topic_terms(topic: str) -> set[str]:
+    base_terms = {
+        "customer",
+        "customers",
+        "revenue",
+        "arr",
+        "growth",
+        "usage",
+        "retention",
+        "team",
+        "funding",
+        "pricing",
+        "product",
+        "launch",
+        "market",
+        "competition",
+        "competitors",
+        "industry",
+        "benchmark",
+        "report",
+        "press",
+        "case study",
+    }
+    topic_specific = {
+        "market": {"market", "category", "demand", "growth", "customer"},
+        "competition": {"competitor", "competitors", "alternative", "landscape"},
+        "industry": {"industry", "benchmark", "report", "regulation", "adoption"},
+        "funding": {"funding", "financing", "round", "investor", "grant", "award"},
+        "traction": {"repository", "release", "stars", "developer", "activity"},
+        "legal": {"trademark", "filing", "status", "owner"},
+    }.get(topic.strip().casefold(), set())
+    return base_terms | topic_specific
+
+
+def _snippet_has_private_artifact(value: str) -> bool:
+    normalized = value.casefold()
+    forbidden_markers = (
+        "cookie",
+        "set-cookie",
+        "authorization:",
+        "bearer ",
+        "api_key",
+        "api-key",
+        "access_token",
+        "secret",
+        "private_full_text",
+        "confidential extracted",
+        "confidential_extracted",
+        "private/confidential",
+        "/users/",
+        "c:\\users\\",
+    )
+    return any(marker in normalized for marker in forbidden_markers)
+
+
+def _truncate_snippet(value: str) -> str:
+    cleaned = _collapse_text(value)
+    if len(cleaned) <= MAX_SNIPPET_CHARS:
+        return cleaned
+    return cleaned[: MAX_SNIPPET_CHARS - 4].rstrip() + " ..."
 
 
 def _validate_public_fetch_url(url: str, *, provider_id: str) -> None:

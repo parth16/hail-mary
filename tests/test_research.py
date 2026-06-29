@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 import hailmary.cli as cli_module
 import hailmary.research.collection as collection_module
+import hailmary.research.public_web as public_web_module
 import hailmary.research.workflow as workflow_module
 from hailmary.agents.packets import build_agent_input_packet
 from hailmary.cli import app
@@ -32,6 +33,8 @@ from hailmary.research import (
     PaidProviderFact,
     PaidProviderSearchRequest,
     PaidProviderSearchResponse,
+    PublicWebSearchError,
+    PublicWebSearchResult,
     ResearchCollectionDealSummary,
     ResearchCollectionError,
     ResearchImportError,
@@ -92,9 +95,16 @@ from hailmary.research.web import (
     _BoundHTTPConnection,
     _build_guarded_opener,
 )
+from hailmary.research.website_discovery import discover_official_website_url
 from hailmary.schemas.agents import AgentRole
-from hailmary.schemas.documents import DocumentType, IngestedDeal, SourceKind
-from hailmary.schemas.evidence import EvidenceStore, SourceFreshness, SourceReliability
+from hailmary.schemas.documents import DocumentType, FileType, IngestedDeal, SourceKind
+from hailmary.schemas.evidence import (
+    EvidenceKind,
+    EvidenceRecord,
+    EvidenceStore,
+    SourceFreshness,
+    SourceReliability,
+)
 from hailmary.scoring.memo import render_markdown_memo
 from hailmary.scoring.scorer import score_evidence_store
 
@@ -855,7 +865,7 @@ def test_research_workflow_command_creates_artifacts_and_reports_status(
     assert "Meridian is a manual authenticated workflow" in result.output
     assert "need manual or local-file work" in result.output
     assert "Provider statuses" in result.output
-    assert "Live public collection ran because web research is enabled" in result.output
+    assert "Live public collection did not run" in result.output
     assert "Import dry-run previews" in result.output
     assert "Meridian preview:" in result.output
     assert "Unresolved Meridian fields:" in result.output
@@ -892,7 +902,7 @@ def test_research_workflow_command_json_includes_summary(
     assert payload["summary"]["planned_task_count"] == len(payload["plan"]["tasks"])
     assert payload["summary"]["failed_provider_count"] == 0
     assert payload["summary"]["incomplete_search_count"] == 0
-    assert payload["summary"]["manual_needed_provider_count"] >= 3
+    assert payload["summary"]["manual_needed_provider_count"] >= 2
     assert payload["manual_task_queue_path"]
     assert payload["summary"]["provider_statuses"]
     assert any(
@@ -904,7 +914,7 @@ def test_research_workflow_command_json_includes_summary(
         for status in payload["summary"]["provider_statuses"]
         if status["provider_id"] == "sec_form_d"
     )
-    assert sec_status["status"] == ResearchProviderRunStatus.PLANNED
+    assert sec_status["status"] == ResearchProviderRunStatus.NOT_RUN
 
 
 def test_research_workflow_rejects_unsafe_meridian_url_before_writing_plan(
@@ -1061,7 +1071,8 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
         for status in result.summary.provider_statuses
         if status.provider_id == "company_website"
     )
-    assert company_website_status.status == ResearchProviderRunStatus.PLANNED
+    assert company_website_status.status == ResearchProviderRunStatus.FETCHED
+    assert company_website_status.fetched_count == 1
     assert company_website_status.collected_count == 1
     assert company_website_status.imported_count == 0
     sam_status = next(
@@ -1083,11 +1094,11 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
         for status in result.summary.provider_statuses
         if status.provider_id == "public_web"
     )
-    assert public_web_status.status == ResearchProviderRunStatus.MANUAL_NEEDED
+    assert public_web_status.status == ResearchProviderRunStatus.NOT_RUN
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 
-def test_run_research_workflow_counts_skipped_live_api_collectors_as_not_run(
+def test_run_research_workflow_does_not_run_live_collectors_when_web_gate_is_disabled(
     tmp_path: Path,
 ) -> None:
     config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
@@ -1109,20 +1120,516 @@ def test_run_research_workflow_counts_skipped_live_api_collectors_as_not_run(
         web_client=web_client,
     )
 
-    assert result.live_collection_enabled is True
-    assert web_client.calls == ["https://example.com/acme"]
+    assert result.live_collection_enabled is False
+    assert web_client.calls == []
     live_api_statuses = {
         status.provider_id: status.status
         for status in result.summary.provider_statuses
-        if status.provider_id in {"sec_form_d", "usaspending", "sbir", "github"}
+        if status.provider_id
+        in {"company_website", "sec_form_d", "usaspending", "sbir", "github", "public_web"}
     }
     assert live_api_statuses == {
+        "company_website": ResearchProviderRunStatus.NOT_RUN,
         "sec_form_d": ResearchProviderRunStatus.NOT_RUN,
         "usaspending": ResearchProviderRunStatus.NOT_RUN,
         "sbir": ResearchProviderRunStatus.NOT_RUN,
         "github": ResearchProviderRunStatus.NOT_RUN,
+        "public_web": ResearchProviderRunStatus.NOT_RUN,
     }
-    assert result.summary.not_run_provider_count == 4
+    assert result.summary.not_run_provider_count >= 6
+
+
+def test_run_research_workflow_discovers_fetches_and_previews_public_web_results(
+    tmp_path: Path,
+) -> None:
+    config, _deal, _results_path = _ingest_deal_and_write_results(tmp_path)
+    config = config.model_copy(
+        update={
+            "local_only": False,
+            "enable_web_research": True,
+        }
+    )
+    market_query = "Acme AI market size category growth customer demand"
+    search_client = _FakePublicWebSearchClient(
+        {
+            market_query: [
+                PublicWebSearchResult(
+                    title="Acme AI",
+                    url="https://primary.example.com/acme-ai-market",
+                    snippet="Acme AI market page with public customer traction.",
+                ),
+                PublicWebSearchResult(
+                    title="Acme AI Federal",
+                    url="https://primary.example.com/acme-ai-federal",
+                    snippet="Related entity that must not be imported.",
+                ),
+                PublicWebSearchResult(
+                    title="Search results",
+                    url="https://www.google.com/search?q=Acme+AI",
+                    snippet="Search result pages are not evidence.",
+                ),
+            ]
+        },
+        default=[],
+    )
+    web_client = _FakeWebResearchClient(
+        {
+            "https://primary.example.com/acme-ai-market": WebFetchResponse(
+                final_url="https://primary.example.com/acme-ai-market",
+                content_type="text/html",
+                text=(
+                    "<html><title>Acme AI</title><body>"
+                    "<p>Acme AI market report says paid customers, ARR revenue growth, "
+                    "weekly usage, and retention are visible in public materials.</p>"
+                    "<p>COOKIE=secret; /Users/parth/private; confidential extracted text; "
+                    "PRIVATE_FULL_TEXT_MARKER_AT_END</p>"
+                    "</body></html>"
+                ),
+            )
+        }
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=web_client,
+        public_web_search_client=search_client,
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    assert [query for query, _count in search_client.calls] == [
+        market_query,
+        "Acme AI competitors alternatives competitive landscape",
+        "Acme AI industry trends benchmarks regulation adoption",
+    ]
+    assert web_client.calls == ["https://primary.example.com/acme-ai-market"]
+    public_web = next(
+        collection for collection in result.collections if collection.source_id == "public_web"
+    )
+    assert public_web.status == ResearchProviderRunStatus.FETCHED
+    assert public_web.result_count == 1
+    assert result.ready_to_import_count == 1
+    market_status = next(
+        status
+        for status in result.summary.provider_statuses
+        if status.provider_id == "public_web" and status.research_topic == "market"
+    )
+    assert market_status.status == ResearchProviderRunStatus.FETCHED
+    assert market_status.discovered_count == 1
+    assert market_status.fetched_count == 1
+    assert market_status.collected_count == 1
+    assert public_web.output_path is not None
+    payload = json.loads(public_web.output_path.read_text(encoding="utf-8"))
+    saved_text = payload["results"][0]["text"]
+    assert "Acme AI market report says paid customers" in saved_text
+    forbidden = json.dumps(payload, sort_keys=True).casefold()
+    assert "cookie=secret" not in forbidden
+    assert "/users/parth" not in forbidden
+    assert "confidential extracted" not in forbidden
+    assert "private_full_text_marker_at_end" not in forbidden
+    assert payload["results"][0]["source_url"] == "https://primary.example.com/acme-ai-market"
+    assert payload["results"][0]["provider_id"] == "public_web"
+    assert payload["results"][0]["research_topic"] == "market"
+    assert payload["results"][0]["identity_match_kind"] == "exact"
+
+
+def test_run_research_workflow_public_web_no_exact_results_is_not_manual_needed(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    search_client = _FakePublicWebSearchClient(
+        {},
+        default=[
+            PublicWebSearchResult(
+                title="Acme AI Federal",
+                url="https://primary.example.com/acme-ai-federal",
+                snippet="Related public page.",
+            )
+        ],
+    )
+    web_client = _FakeWebResearchClient({})
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=web_client,
+        public_web_search_client=search_client,
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    public_web_statuses = [
+        status for status in result.summary.provider_statuses if status.provider_id == "public_web"
+    ]
+    assert public_web_statuses
+    assert all(
+        status.status == ResearchProviderRunStatus.NO_EXACT_RESULTS
+        for status in public_web_statuses
+    )
+    assert all(
+        status.status != ResearchProviderRunStatus.MANUAL_NEEDED
+        for status in public_web_statuses
+    )
+    assert result.summary.manual_needed_provider_count == 3
+    assert web_client.calls == []
+
+
+def test_run_research_workflow_public_web_fetch_failure_is_clear_warning(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    search_client = _FakePublicWebSearchClient(
+        {},
+        default=[
+            PublicWebSearchResult(
+                title="Acme AI",
+                url="https://primary.example.com/acme-ai",
+                snippet="Exact public page.",
+            )
+        ],
+    )
+    web_client = _FailingWebResearchClient("The public page timed out.")
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=web_client,
+        public_web_search_client=search_client,
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    public_web = next(
+        collection for collection in result.collections if collection.source_id == "public_web"
+    )
+    assert public_web.status == ResearchProviderRunStatus.INCOMPLETE_SEARCH
+    assert public_web.incomplete_search is True
+    assert public_web.result_count == 0
+    assert any("The public page timed out" in warning for warning in public_web.warnings)
+    public_web_statuses = [
+        status for status in result.summary.provider_statuses if status.provider_id == "public_web"
+    ]
+    assert public_web_statuses
+    assert all(
+        status.status == ResearchProviderRunStatus.INCOMPLETE_SEARCH
+        for status in public_web_statuses
+    )
+    assert result.summary.incomplete_search_count >= 1
+    assert not any(
+        issue.severity == "error" and issue.source == "Public web and press search"
+        for issue in result.issues
+    )
+
+
+def test_run_research_workflow_public_web_search_failure_blocks(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=_FakeWebResearchClient({}),
+        public_web_search_client=_FailingPublicWebSearchClient(
+            "Brave Search rejected the request."
+        ),
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    public_web = next(
+        collection for collection in result.collections if collection.source_id == "public_web"
+    )
+    assert public_web.status == ResearchProviderRunStatus.FAILED
+    assert public_web.error is not None
+    assert "Brave Search rejected the request" in public_web.error
+    assert any(
+        issue.severity == "error"
+        and issue.source == "Public web and press search"
+        and "Brave Search rejected the request" in issue.message
+        for issue in result.issues
+    )
+    assert result.blocking_issue_count >= 1
+
+
+def test_run_research_workflow_public_web_fetched_identity_mismatch_is_skipped(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    search_client = _FakePublicWebSearchClient(
+        {},
+        default=[
+            PublicWebSearchResult(
+                title="Acme AI",
+                url="https://primary.example.com/acme-ai-federal",
+                snippet="Search result looked exact.",
+            )
+        ],
+    )
+    web_client = _FakeWebResearchClient(
+        {
+            "https://primary.example.com/acme-ai-federal": WebFetchResponse(
+                final_url="https://primary.example.com/acme-ai-federal",
+                content_type="text/html",
+                text=(
+                    "<html><title>Acme AI Federal</title><body>"
+                    "Acme AI Federal mentions Acme AI, paid customers, ARR revenue, "
+                    "usage, and retention, but is a related entity.</body></html>"
+                ),
+            )
+        }
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=web_client,
+        public_web_search_client=search_client,
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    assert web_client.calls
+    assert set(web_client.calls) == {"https://primary.example.com/acme-ai-federal"}
+    assert result.ready_to_import_count == 0
+    public_web_statuses = [
+        status for status in result.summary.provider_statuses if status.provider_id == "public_web"
+    ]
+    assert public_web_statuses
+    assert all(
+        status.status == ResearchProviderRunStatus.NO_EXACT_RESULTS
+        for status in public_web_statuses
+    )
+    public_web = next(
+        collection for collection in result.collections if collection.source_id == "public_web"
+    )
+    assert public_web.match_details
+    assert all(match.import_ready is False for match in public_web.match_details)
+    assert all(
+        match.kind == CompanyMatchKind.RELATED for match in public_web.match_details
+    )
+
+
+def test_run_research_workflow_public_web_missing_brave_key_is_not_manual_needed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+
+    result = run_research_workflow(
+        config=config,
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=_FakeWebResearchClient({}),
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+        usaspending_client=_FakeUsaspendingAwardsClient(
+            {("Acme AI", 1): _usaspending_response([])}
+        ),
+        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        github_client=_FakeGitHubRepositorySearchClient(
+            {("Acme AI", 1): _github_repository_response([])}
+        ),
+    )
+
+    public_web_statuses = [
+        status for status in result.summary.provider_statuses if status.provider_id == "public_web"
+    ]
+    assert public_web_statuses
+    assert all(
+        status.status == ResearchProviderRunStatus.NOT_RUN for status in public_web_statuses
+    )
+    assert all(
+        status.status != ResearchProviderRunStatus.MANUAL_NEEDED
+        for status in public_web_statuses
+    )
+    assert any(
+        "BRAVE_SEARCH_API_KEY" in warning
+        for collection in result.collections
+        for warning in collection.warnings
+    )
+
+
+def test_brave_public_web_search_rejects_redirects_before_following() -> None:
+    client = public_web_module.BravePublicWebSearchClient(subscription_token="test-token")
+    request = urllib.request.Request(client._request_url("Acme AI", count=1))
+
+    with pytest.raises(PublicWebSearchError, match="did not follow"):
+        public_web_module._BraveNoRedirectHandler().redirect_request(
+            request,
+            object(),
+            302,
+            "Found",
+            {},
+            "https://evil.example.com/search",
+        )
+
+
+def test_official_website_discovery_ignores_third_party_source_url() -> None:
+    third_party = EvidenceRecord(
+        id="ev-third-party",
+        deal_id="deal-1",
+        document_id="doc-third-party",
+        document_path=Path("public-article.txt"),
+        evidence_kind=EvidenceKind.PAGE_TEXT,
+        source_kind=SourceKind.WEB,
+        document_type=DocumentType.WEB_PAGE,
+        file_type=FileType.TXT,
+        text="A public article says Acme AI has traction.",
+        source_url="https://news.example.com/acme-ai-profile",
+        provider_id="public_web",
+        source_reliability=SourceReliability.PUBLIC_DATABASE,
+        source_freshness=SourceFreshness.CURRENT,
+    )
+    store = EvidenceStore(
+        deal_id="deal-1",
+        company_name="Acme AI",
+        created_at=BUILT_AT,
+        evidence=[third_party],
+        claims=[],
+    )
+
+    result = discover_official_website_url(store)
+
+    assert result.selected_url is None
+
+
+def test_run_research_workflow_default_live_collectors_run_only_when_gate_allows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_collect_usaspending_awards(**kwargs: object) -> UsaspendingCollectionRunSummary:
+        assert kwargs["client"] is None
+        calls.append("usaspending")
+        return UsaspendingCollectionRunSummary(
+            collected_at=BUILT_AT,
+            deals=[ResearchCollectionDealSummary(company_name="Acme AI")],
+        )
+
+    def fake_collect_sbir_awards(**kwargs: object) -> SbirCollectionRunSummary:
+        assert kwargs["client"] is None
+        calls.append("sbir")
+        return SbirCollectionRunSummary(
+            collected_at=BUILT_AT,
+            deals=[ResearchCollectionDealSummary(company_name="Acme AI")],
+        )
+
+    def fake_collect_github_repositories(
+        **kwargs: object,
+    ) -> GitHubRepositoryCollectionRunSummary:
+        assert kwargs["client"] is None
+        calls.append("github")
+        return GitHubRepositoryCollectionRunSummary(
+            collected_at=BUILT_AT,
+            deals=[ResearchCollectionDealSummary(company_name="Acme AI")],
+        )
+
+    monkeypatch.setattr(
+        workflow_module,
+        "collect_usaspending_awards",
+        fake_collect_usaspending_awards,
+    )
+    monkeypatch.setattr(workflow_module, "collect_sbir_awards", fake_collect_sbir_awards)
+    monkeypatch.setattr(
+        workflow_module,
+        "collect_github_repositories",
+        fake_collect_github_repositories,
+    )
+
+    gated_off = run_research_workflow(
+        config=AppConfig(data_dir=tmp_path / "data-off", local_only=True),
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+    )
+    assert gated_off.live_collection_enabled is False
+    assert calls == []
+
+    gated_on = run_research_workflow(
+        config=AppConfig(
+            data_dir=tmp_path / "data-on",
+            local_only=False,
+            enable_web_research=True,
+        ),
+        company_names=["Acme AI"],
+        created_at=BUILT_AT,
+        web_client=_FakeWebResearchClient({}),
+        public_web_search_client=_FakePublicWebSearchClient({}, default=[]),
+        sec_form_d_client=_FakeSecFormDFilingsClient(
+            {("Acme AI", 0): _sec_form_d_response([])}
+        ),
+    )
+    assert gated_on.live_collection_enabled is True
+    assert calls == ["usaspending", "sbir", "github"]
 
 
 def test_run_research_workflow_treats_corrupt_import_state_as_blocking(
@@ -1423,7 +1930,7 @@ def test_run_research_workflow_counts_only_unresolved_manual_tasks(
     assert all(task["provider_id"] != "sam_gov" for task in queue_payload["tasks"])
 
 
-def test_run_research_workflow_keeps_public_web_topics_unresolved_individually(
+def test_run_research_workflow_keeps_public_web_topics_statused_individually(
     tmp_path: Path,
 ) -> None:
     config, _deal, results_path = _ingest_deal_and_write_results(tmp_path)
@@ -1457,12 +1964,13 @@ def test_run_research_workflow_keeps_public_web_topics_unresolved_individually(
     }
     assert public_web_statuses["market"].status == ResearchProviderRunStatus.PLANNED
     assert public_web_statuses["market"].collected_count == 1
-    assert public_web_statuses["competition"].status == (
-        ResearchProviderRunStatus.MANUAL_NEEDED
+    assert public_web_statuses["competition"].status == ResearchProviderRunStatus.NOT_RUN
+    assert public_web_statuses["industry"].status == ResearchProviderRunStatus.NOT_RUN
+    assert not any(
+        task.provider_id == "public_web"
+        for task in result.plan.tasks
+        if task.status == ResearchTaskStatus.NEEDS_OPERATOR
     )
-    assert public_web_statuses["industry"].status == ResearchProviderRunStatus.MANUAL_NEEDED
-    assert result.summary.manual_needed_provider_count >= 2
-    assert result.unresolved_manual_task_count >= 2
 
 
 def test_run_research_workflow_maps_legacy_public_web_results_to_split_topics(
@@ -8780,6 +9288,52 @@ class _FakeWebResearchClient:
         _ = (provider_id, timeout_seconds, max_bytes)
         self.calls.append(url)
         return self.responses[url]
+
+
+class _FakePublicWebSearchClient:
+    provider_name = "fake-search"
+
+    def __init__(
+        self,
+        responses: dict[str, list[PublicWebSearchResult]],
+        *,
+        default: list[PublicWebSearchResult] | None = None,
+    ) -> None:
+        self.responses = responses
+        self.default = default
+        self.calls: list[tuple[str, int]] = []
+
+    def search(
+        self,
+        query: str,
+        *,
+        count: int,
+        timeout_seconds: float,
+    ) -> list[PublicWebSearchResult]:
+        _ = timeout_seconds
+        self.calls.append((query, count))
+        if query in self.responses:
+            return self.responses[query]
+        if self.default is not None:
+            return self.default
+        raise AssertionError(f"No fake public web response for {query}.")
+
+
+class _FailingPublicWebSearchClient:
+    provider_name = "fake-search"
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def search(
+        self,
+        query: str,
+        *,
+        count: int,
+        timeout_seconds: float,
+    ) -> list[PublicWebSearchResult]:
+        _ = (query, count, timeout_seconds)
+        raise PublicWebSearchError(self.message)
 
 
 class _FailingWebResearchClient:

@@ -91,6 +91,7 @@ from hailmary.research import (
     ResearchPlanError,
     ResearchProvider,
     ResearchProviderCategory,
+    ResearchProviderRunStatus,
     ResearchTaskStatus,
     ResearchTemplateError,
     ResearchWorkflowCollectionSummary,
@@ -2569,6 +2570,8 @@ def evaluate_deal(
                 "before scoring."
             )
         )
+        if result.research_imported_count == 0:
+            renderables.append(_plain(_zero_import_research_attempt_text(research_workflow)))
         renderables.append(
             _plain(
                 "Research summary: "
@@ -2595,7 +2598,8 @@ def evaluate_deal(
         if research_workflow.live_collection_enabled:
             renderables.append(
                 _plain(
-                    "Live public research ran for exact public URLs and configured public clients."
+                    "Live public research ran for exact public URLs, autonomous public web "
+                    "search, and configured public APIs."
                 )
             )
         else:
@@ -3320,6 +3324,12 @@ def _research_provider_status_lines(result: ResearchWorkflowRunSummary) -> list[
     lines = [_plain("Provider statuses:")]
     for status in statuses:
         details: list[str] = []
+        if status.discovered_count:
+            details.append(
+                _research_count_phrase(status.discovered_count, "discovered URL")
+            )
+        if status.fetched_count:
+            details.append(_research_count_phrase(status.fetched_count, "fetched source"))
         if status.collected_count:
             details.append(
                 _research_count_phrase(status.collected_count, "ready-to-import result")
@@ -3343,6 +3353,37 @@ def _research_provider_status_lines(result: ResearchWorkflowRunSummary) -> list[
             )
         )
     return lines
+
+
+def _zero_import_research_attempt_text(workflow: ResearchWorkflowRunSummary) -> str:
+    statuses = workflow.summary.provider_statuses
+    discovered = sum(status.discovered_count for status in statuses)
+    fetched = sum(status.fetched_count for status in statuses)
+    no_exact = sum(
+        1 for status in statuses if status.status == ResearchProviderRunStatus.NO_EXACT_RESULTS
+    )
+    failed = sum(
+        1 for status in statuses if status.status == ResearchProviderRunStatus.FAILED
+    )
+    not_run = sum(
+        1 for status in statuses if status.status == ResearchProviderRunStatus.NOT_RUN
+    )
+    parts = [
+        "No external research records were imported before scoring",
+        f"discovered {discovered} public URL{'' if discovered == 1 else 's'}",
+        f"fetched {fetched} source page{'' if fetched == 1 else 's'}",
+    ]
+    if no_exact:
+        parts.append(
+            f"{no_exact} provider topic{'' if no_exact == 1 else 's'} had no exact results"
+        )
+    if failed:
+        parts.append(f"{failed} provider{'' if failed == 1 else 's'} failed")
+    if not_run:
+        parts.append(
+            f"{not_run} provider topic{'' if not_run == 1 else 's'} did not run"
+        )
+    return "; ".join(parts) + "."
 
 
 def _research_summary_counts_text(result: ResearchWorkflowRunSummary) -> str:
