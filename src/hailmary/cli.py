@@ -2617,7 +2617,7 @@ def _evaluate_deal_operator_brief_renderables(
     )
     top_table.add_row(
         _plain("Confidence"),
-        _plain(str(result.deterministic_score.confidence)),
+        _plain(brief.confidence),
     )
     top_table.add_row(_plain("Bottom line"), _plain(brief.bottom_line))
 

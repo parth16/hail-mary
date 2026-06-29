@@ -360,6 +360,7 @@ class EvaluateDealCliCommentary:
 @dataclass(frozen=True)
 class OperatorBrief:
     bottom_line: str
+    confidence: str
     positives: list[str]
     concerns: list[str]
     decisive_factor: str
@@ -419,8 +420,10 @@ def build_evaluate_deal_operator_brief(result: DealEvaluationResult) -> Operator
 
     commentary = build_evaluate_deal_cli_commentary(result)
     decisive_factor = commentary.decisive_factor
+    confidence = _operator_confidence_label(result)
     return OperatorBrief(
-        bottom_line=_operator_bottom_line(result, decisive_factor),
+        bottom_line=_operator_bottom_line(result, decisive_factor, confidence=confidence),
+        confidence=confidence,
         positives=commentary.positives,
         concerns=_operator_concern_points(result),
         decisive_factor=decisive_factor,
@@ -438,10 +441,11 @@ def build_evaluate_deal_operator_brief(result: DealEvaluationResult) -> Operator
 def _operator_bottom_line(
     result: DealEvaluationResult,
     decisive_factor: str,
+    *,
+    confidence: str,
 ) -> str:
     recommendation = result.final_recommendation.recommendation
     check_size = _format_check_size(result.final_recommendation.check_size)
-    confidence = result.deterministic_score.confidence
     return _clean_cli_commentary_text(
         (
             f"Final guarded recommendation is {recommendation} with a {check_size} "
@@ -449,6 +453,20 @@ def _operator_bottom_line(
         ),
         max_chars=420,
     )
+
+
+def _operator_confidence_label(result: DealEvaluationResult) -> str:
+    reason = result.final_recommendation.reason
+    if reason.startswith("NEEDS_DILIGENCE:") or _evidence_audit_controlled_final_pass(result):
+        return "needs diligence"
+    if _final_recommendation_was_overridden(result):
+        return "guardrail-limited"
+    if (
+        result.final_recommendation.recommendation
+        != result.deterministic_score.recommendation
+    ):
+        return "guardrail-limited"
+    return str(result.deterministic_score.confidence)
 
 
 def _operator_concern_points(result: DealEvaluationResult) -> list[str]:
@@ -632,16 +650,18 @@ def _operator_committee_point(result: RoleReviewResult) -> str | None:
     if output is None:
         return None
     role = _role_title(result.role)
-    for summary in output.summary:
-        if summary.unsupported or not summary.evidence:
-            continue
-        return f"{role}: {_clean_cli_commentary_text(summary.summary, max_chars=170)}"
-    for finding in output.findings:
-        if finding.unsupported or not finding.evidence:
-            continue
-        title = _clean_cli_commentary_text(finding.title, max_chars=70)
-        detail = _clean_cli_commentary_text(finding.finding, max_chars=170)
-        return f"{role}: {title} - {detail}"
+    supported_count = sum(
+        1
+        for summary in output.summary
+        if not summary.unsupported and summary.evidence
+    ) + sum(
+        1
+        for finding in output.findings
+        if not finding.unsupported and finding.evidence
+    )
+    if supported_count:
+        point_word = "point" if supported_count == 1 else "points"
+        return f"{role}: {supported_count} cited supported specialist {point_word} available."
     return None
 
 
@@ -693,12 +713,14 @@ def _operator_data_caveats(result: DealEvaluationResult) -> list[str]:
         _add_cli_point(caveats, f"Failed specialist roles: {failed_roles}.")
     else:
         _add_cli_point(caveats, "Failed specialist roles: none.")
-    for warning in result.warnings[:3]:
+    visible_warnings = _operator_visible_warnings(result.warnings)
+    for warning in visible_warnings:
         _add_cli_point(caveats, f"Warning: {warning}")
-    if len(result.warnings) > 3:
+    hidden_warning_count = len(result.warnings) - len(visible_warnings)
+    if hidden_warning_count > 0:
         _add_cli_point(
             caveats,
-            f"{len(result.warnings) - 3} additional warnings are available with --verbose.",
+            f"{hidden_warning_count} additional warnings are available with --verbose.",
         )
     if result.operator_limitations:
         _add_cli_point(
@@ -709,6 +731,33 @@ def _operator_data_caveats(result: DealEvaluationResult) -> list[str]:
             ),
         )
     return caveats
+
+
+def _operator_visible_warnings(warnings: Sequence[str]) -> list[str]:
+    ranked = sorted(
+        enumerate(warnings),
+        key=lambda item: (_operator_warning_priority(item[1]), item[0]),
+    )
+    return [warning for _, warning in ranked[:MAX_CLI_COMMENTARY_ITEMS]]
+
+
+def _operator_warning_priority(warning: str) -> int:
+    lowered = warning.lower()
+    critical_markers = (
+        "forced final pass",
+        "kept final pass",
+        "guardrail",
+        "citation",
+        "source-document instructions",
+        "deterministic guardrails",
+        "final model recommended",
+        "unsafe",
+        "removed all",
+        "removed one or more",
+    )
+    if any(marker in lowered for marker in critical_markers):
+        return 0
+    return 1
 
 
 def _operator_research_quality_summary(

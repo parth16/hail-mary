@@ -2478,7 +2478,10 @@ def test_evaluate_deal_committee_context_excludes_unsupported_findings(
     brief = evaluation.build_evaluate_deal_operator_brief(result)
     committee_read = "\n".join(brief.committee_read)
     assert len(brief.committee_read) <= 3
-    assert "Supported traction" in committee_read
+    assert "Product Customer Traction: 2 cited supported specialist points available." in (
+        committee_read
+    )
+    assert "Supported traction" not in committee_read
     assert "Unsupported hype" not in committee_read
     assert "Unsupported risk" not in committee_read
     assert "MODEL_LIMITATION_PRIVATE_TAIL" not in committee_read
@@ -2718,6 +2721,7 @@ def test_evaluate_deal_evidence_audit_blocker_overrides_local_invest(
     brief = evaluation.build_evaluate_deal_operator_brief(result)
     assert "evidence completeness found blocking gaps" in brief.decisive_factor
     assert any("Unsafe source text" in concern for concern in brief.concerns)
+    assert brief.confidence == "needs diligence"
 
 
 def test_evaluate_deal_missing_price_audit_gap_does_not_override_calculated_risk(
@@ -3096,8 +3100,9 @@ def test_evaluate_deal_operator_brief_pass_includes_analyst_sections(
     assert any("valuation and return math" in concern for concern in brief.concerns)
     assert "The recommendation is PASS" in brief.decisive_factor
     assert brief.committee_read == [
-        "Market Competition: Market specialist saw a cited competitive gap."
+        "Market Competition: 1 cited supported specialist point available."
     ]
+    assert "Market specialist saw" not in "\n".join(brief.committee_read)
 
 
 def test_evaluate_deal_operator_brief_invest_keeps_risks_visible(
@@ -3209,6 +3214,82 @@ def test_evaluate_deal_operator_brief_omits_factor_and_model_rationale_details(
     assert "PRIVATE_MODEL_REASON" not in rendered
     assert "valuation and return math looked strongest" in rendered
     assert "Review the private memo for the source-linked rationale" in rendered
+
+
+def test_evaluate_deal_operator_brief_prioritizes_guardrail_warnings(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="WarningPriorityCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=55,
+        one_line_reason="Passed because the score was below the investment bar.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Rule-based scoring kept the deal at PASS.",
+        evidence=[],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        warnings=[
+            "Ingestion warning one.",
+            "Research warning two.",
+            "Image-based text reading warning three.",
+            (
+                "The final model recommended INVEST/$1K, but Hail Mary's deterministic "
+                "guardrails kept final PASS/$0 because score 55/100 was below the "
+                "investment bar."
+            ),
+        ],
+    )
+
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    caveats = "\n".join(brief.data_caveats)
+
+    assert "deterministic guardrails kept final PASS/$0" in caveats
+    assert "1 additional warnings are available with --verbose" in caveats
+
+
+def test_evaluate_deal_operator_brief_limits_downgraded_confidence(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="DowngradedConfidenceCo",
+        recommendation=Recommendation.INVEST,
+        check_size=5_000,
+        total_score=90,
+        confidence=ConfidenceLevel.HIGH,
+        one_line_reason=(
+            "Recommended because the score was 90/100, confidence was high, "
+            "and no kill gate triggered."
+        ),
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason=(
+            "NEEDS_DILIGENCE: Rule-based scoring suggested INVEST, but citation "
+            "safety removed the support."
+        ),
+        evidence=[],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+    )
+
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+
+    assert brief.confidence == "needs diligence"
+    assert "high confidence" not in brief.bottom_line
 
 
 def test_evaluate_deal_operator_brief_preserves_uncertainty_labels(
