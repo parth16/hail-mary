@@ -37,9 +37,9 @@ from hailmary.config import (
 from hailmary.evals import EvalCategory, EvalHarnessError, run_builtin_evals
 from hailmary.evaluation import (
     DealEvaluationResult,
-    EvaluateDealCliCommentary,
     EvaluationError,
-    build_evaluate_deal_cli_commentary,
+    OperatorBrief,
+    build_evaluate_deal_operator_brief,
     evaluate_deal_folder,
 )
 from hailmary.evidence import (
@@ -2435,6 +2435,13 @@ def evaluate_deal(
             ),
         ),
     ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help="Show diagnostic run tables, warnings, and limitation details.",
+        ),
+    ] = False,
 ) -> None:
     """Evaluate one deal end to end and write a final Markdown memo."""
 
@@ -2467,201 +2474,11 @@ def evaluate_deal(
         _print_error(str(exc))
         raise typer.Exit(1) from None
 
-    commentary = build_evaluate_deal_cli_commentary(result)
-    summary = _two_column_table("Result", "Value")
-    summary.add_row(_plain("Company"), _plain(result.company_name))
-    summary.add_row(_plain("Mode"), _plain(result.evaluation_mode))
-    summary.add_row(
-        _plain("Risk mode"),
-        _plain(
-            "calculated risk"
-            if result.deterministic_score.calculated_risk_mode
-            else "strict risk"
-        ),
-    )
-    summary.add_row(_plain("Documents ingested"), _plain(str(result.document_count)))
-    summary.add_row(_plain("Evidence records"), _plain(str(result.evidence_count)))
-    summary.add_row(_plain("Claims found"), _plain(str(result.claim_count)))
-    summary.add_row(_plain("Conflicts found"), _plain(str(result.conflict_count)))
-    summary.add_row(
-        _plain("Evidence health"),
-        _plain(_evaluate_deal_evidence_health_text(result.evidence_review)),
-    )
-    summary.add_row(
-        _plain("Evidence completeness"),
-        _plain(_evaluate_deal_evidence_audit_text(result.evidence_audit)),
-    )
-    summary.add_row(
-        _plain("Diligence questions"),
-        _plain(_evaluate_deal_diligence_questions_text(result.diligence_question_queue)),
-    )
-    summary.add_row(
-        _plain("Evidence actions"),
-        _plain(_evaluate_deal_evidence_action_text(result.evidence_review)),
-    )
-    summary.add_row(
-        _plain("External research imported"),
-        _plain(str(result.research_imported_count)),
-    )
-    summary.add_row(
-        _plain("External research quality"),
-        _plain(_evaluate_deal_research_quality_text(result)),
-    )
-    summary.add_row(
-        _plain("Rule-based recommendation"),
-        _plain(str(result.deterministic_score.recommendation)),
-    )
-    summary.add_row(
-        _plain("Final recommendation"),
-        _plain(str(result.final_recommendation.recommendation)),
-    )
-    summary.add_row(
-        _plain("Check size"),
-        _plain(_format_check_size(result.final_recommendation.check_size)),
-    )
-    summary.add_row(
-        _plain("Rule-based score"),
-        _plain(f"{result.deterministic_score.total_score}/{result.deterministic_score.max_score}"),
-    )
-    summary.add_row(_plain("Confidence"), _plain(str(result.deterministic_score.confidence)))
-    summary.add_row(_plain("Stage"), _plain(str(result.deterministic_score.company_stage)))
-    summary.add_row(
-        _plain("Product-market fit"),
-        _plain(str(result.deterministic_score.pmf_level)),
-    )
-    summary.add_row(
-        _plain("Fundability risk"),
-        _plain(str(result.deterministic_score.fundability_risk)),
-    )
-    summary.add_row(
-        _plain("Valuation risk"),
-        _plain(str(result.deterministic_score.valuation_risk)),
-    )
-    summary.add_row(
-        _plain("Triggered scoring gates"),
-        _plain(_triggered_scoring_gate_text(result.deterministic_score)),
-    )
-    summary.add_row(
-        _plain("Scoring missing inputs"),
-        _plain(_scoring_missing_inputs_text(result.deterministic_score)),
-    )
-    summary.add_row(_plain("Final memo"), _plain(str(result.final_memo_path)))
-    summary.add_row(_plain("Final JSON"), _plain(str(result.final_json_path)))
-    failed_roles = ", ".join(_role_display(role) for role in result.failed_specialist_roles)
-    summary.add_row(_plain("Failed model roles"), _plain(failed_roles or "none"))
-
-    renderables: list[RenderableType] = [
-        _plain(f"Evaluated {result.company_name}."),
-        _plain(result.mode_explanation),
-        *_evaluate_deal_commentary_renderables(result, commentary),
-        summary,
-        _plain(result.ocr_status),
-    ]
-    if result.research_run is not None:
-        research_workflow = result.research_run.workflow
-        research_record_word = (
-            "record" if result.research_imported_count == 1 else "records"
-        )
-        renderables.append(
-            _plain(
-                "External research planned "
-                f"{research_workflow.plan.task_count} source tasks and imported "
-                f"{result.research_imported_count} evidence {research_record_word} "
-                "before scoring."
-            )
-        )
-        if result.research_imported_count == 0:
-            renderables.append(_plain(_zero_import_research_attempt_text(research_workflow)))
-        renderables.append(
-            _plain(
-                "Research summary: "
-                f"{_research_summary_counts_text(research_workflow)}."
-            )
-        )
-        renderables.append(
-            _plain(f"Research quality: {_evaluate_deal_research_quality_text(result)}.")
-        )
-        if research_workflow.manual_task_queue_path is not None:
-            renderables.append(
-                _plain(
-                    "Manual research follow-up queue: "
-                    f"{research_workflow.manual_task_queue_path}."
-                )
-            )
-        if research_workflow.meridian_unresolved_fields:
-            renderables.append(
-                _plain(
-                    "Meridian unresolved fields: "
-                    f"{_meridian_unresolved_field_text(research_workflow.meridian_unresolved_fields)}."
-                )
-            )
-        if research_workflow.live_collection_enabled:
-            renderables.append(
-                _plain(
-                    "Live public research ran for exact public URLs, autonomous public web "
-                    "search, and configured public APIs."
-                )
-            )
-        else:
-            renderables.append(
-                _plain(
-                    "Live public research did not run for this workflow."
-                )
-            )
-    else:
-        renderables.append(_plain("External research was skipped for this run."))
-    if result.evidence_review is not None:
-        renderables.append(
-            _plain(
-                "Evidence health review found "
-                f"{_evaluate_deal_evidence_health_text(result.evidence_review)}. "
-                "Evidence health means whether saved source records are complete and "
-                "safe enough to rely on."
-            )
-        )
-    if result.evidence_audit is not None:
-        renderables.append(
-            _plain(
-                "Evidence completeness audit found "
-                f"{_evaluate_deal_evidence_audit_text(result.evidence_audit)}. "
-                "Evidence completeness means whether saved source records cover the "
-                "key facts needed for the decision."
-            )
-        )
-    if result.diligence_question_queue is not None:
-        renderables.append(
-            _plain(
-                "Diligence questions saved "
-                f"{_evaluate_deal_diligence_questions_text(result.diligence_question_queue)} "
-                f"at {result.diligence_question_queue_path}. "
-                "Diligence means checking unanswered facts before investing."
-            )
-        )
-        if result.diligence_question_queue.triage is not None:
-            renderables.append(
-                _plain(
-                    "Diligence triage found "
-                    f"{result.diligence_question_queue.triage.decision_blocker_count} "
-                    "decision-blocking groups. Hail Mary should try public web research, "
-                    "paid data, source review, or the generated Meridian email draft "
-                    "before asking for manual answers."
-                )
-            )
-    if result.warnings:
-        warning_table = _two_column_table("Warning", "Detail")
-        for index, warning in enumerate(result.warnings, start=1):
-            warning_table.add_row(_plain(str(index)), _plain(warning))
-        renderables.append(warning_table)
-    else:
-        renderables.append(_plain("Warnings: none."))
-    if result.operator_limitations:
-        limitation_table = _two_column_table("Limitation", "Detail")
-        for index, limitation in enumerate(result.operator_limitations, start=1):
-            limitation_table.add_row(_plain(str(index)), _plain(limitation))
-        renderables.append(limitation_table)
-    else:
-        renderables.append(_plain("Limitations: none beyond the source evidence in the memo."))
-
+    brief = build_evaluate_deal_operator_brief(result)
+    renderables = _evaluate_deal_operator_brief_renderables(result, brief)
+    if verbose:
+        renderables.extend(_evaluate_deal_verbose_renderables(result))
+    renderables.extend(_evaluate_deal_artifact_renderables(brief))
     _print_panel("Deal evaluation complete", renderables, border_style="green")
 
 
@@ -2784,39 +2601,258 @@ def batch_evaluate(
     )
 
 
-def _evaluate_deal_commentary_renderables(
+def _evaluate_deal_operator_brief_renderables(
     result: DealEvaluationResult,
-    commentary: EvaluateDealCliCommentary,
+    brief: OperatorBrief,
 ) -> list[RenderableType]:
+    top_table = _two_column_table("Field", "Value")
+    top_table.add_row(_plain("Company"), _plain(result.company_name))
+    top_table.add_row(
+        _plain("Recommendation"),
+        _plain(str(result.final_recommendation.recommendation), style="bold"),
+    )
+    top_table.add_row(
+        _plain("Check size"),
+        _plain(_format_check_size(result.final_recommendation.check_size), style="bold"),
+    )
+    top_table.add_row(
+        _plain("Confidence"),
+        _plain(brief.confidence),
+    )
+    top_table.add_row(_plain("Bottom line"), _plain(brief.bottom_line))
+
     renderables: list[RenderableType] = [
-        _plain(
-            f"Final decision: {result.final_recommendation.recommendation}",
-            style="bold",
-        ),
-        _plain(
-            f"Recommended check: {_format_check_size(result.final_recommendation.check_size)}"
-        ),
+        top_table,
+        *_brief_bullet_section("What stood out positively", brief.positives),
+        *_brief_bullet_section("Main concerns", brief.concerns),
         _plain(""),
-        _plain("What stood out positively", style="bold"),
+        _plain("Decisive factor", style="bold"),
+        _plain(brief.decisive_factor),
+        *_brief_bullet_section("Could not verify", brief.unverified_items),
+        *_brief_bullet_section("Suggested next action", brief.next_actions),
+        *_brief_bullet_section(
+            "Model committee read",
+            brief.committee_read,
+            empty="No supported specialist committee read was available.",
+        ),
+        *_brief_bullet_section("Data caveats", brief.data_caveats),
     ]
-    for positive in commentary.positives:
-        renderables.append(_plain(f"- {positive}"))
-    renderables.extend(
-        [
-            _plain(""),
-            _plain("Key risks", style="bold"),
-        ]
+    return renderables
+
+
+def _brief_bullet_section(
+    title: str,
+    values: Sequence[str],
+    *,
+    empty: str = "None.",
+) -> list[RenderableType]:
+    renderables: list[RenderableType] = [_plain(""), _plain(title, style="bold")]
+    lines = list(values) or [empty]
+    for line in lines:
+        renderables.append(_plain(f"- {line}"))
+    return renderables
+
+
+def _evaluate_deal_artifact_renderables(brief: OperatorBrief) -> list[RenderableType]:
+    artifact_table = _two_column_table("Artifact", "Path")
+    for label, path in brief.artifact_paths.items():
+        artifact_table.add_row(_plain(label), _plain(str(path)))
+    return [_plain(""), _plain("Artifacts", style="bold"), artifact_table]
+
+
+def _evaluate_deal_verbose_renderables(
+    result: DealEvaluationResult,
+) -> list[RenderableType]:
+    summary = _two_column_table("Run detail", "Value")
+    summary.add_row(_plain("Mode"), _plain(result.evaluation_mode))
+    summary.add_row(
+        _plain("Risk mode"),
+        _plain(
+            "calculated risk"
+            if result.deterministic_score.calculated_risk_mode
+            else "strict risk"
+        ),
     )
-    for risk in commentary.risks:
-        renderables.append(_plain(f"- {risk}"))
-    renderables.extend(
-        [
-            _plain(""),
-            _plain("Decisive factor", style="bold"),
-            _plain(commentary.decisive_factor),
-            _plain(""),
-        ]
+    summary.add_row(_plain("Documents ingested"), _plain(str(result.document_count)))
+    summary.add_row(_plain("Evidence records"), _plain(str(result.evidence_count)))
+    summary.add_row(_plain("Claims found"), _plain(str(result.claim_count)))
+    summary.add_row(_plain("Conflicts found"), _plain(str(result.conflict_count)))
+    summary.add_row(
+        _plain("Evidence health"),
+        _plain(_evaluate_deal_evidence_health_text(result.evidence_review)),
     )
+    summary.add_row(
+        _plain("Evidence completeness"),
+        _plain(_evaluate_deal_evidence_audit_text(result.evidence_audit)),
+    )
+    summary.add_row(
+        _plain("Diligence questions"),
+        _plain(_evaluate_deal_diligence_questions_text(result.diligence_question_queue)),
+    )
+    summary.add_row(
+        _plain("Evidence actions"),
+        _plain(_evaluate_deal_evidence_action_text(result.evidence_review)),
+    )
+    summary.add_row(
+        _plain("External research imported"),
+        _plain(str(result.research_imported_count)),
+    )
+    summary.add_row(
+        _plain("External research quality"),
+        _plain(_evaluate_deal_research_quality_text(result)),
+    )
+    summary.add_row(
+        _plain("Rule-based recommendation"),
+        _plain(str(result.deterministic_score.recommendation)),
+    )
+    summary.add_row(
+        _plain("Final recommendation"),
+        _plain(str(result.final_recommendation.recommendation)),
+    )
+    summary.add_row(
+        _plain("Check size"),
+        _plain(_format_check_size(result.final_recommendation.check_size)),
+    )
+    summary.add_row(
+        _plain("Rule-based score"),
+        _plain(
+            f"{result.deterministic_score.total_score}/{result.deterministic_score.max_score}"
+        ),
+    )
+    summary.add_row(_plain("Confidence"), _plain(str(result.deterministic_score.confidence)))
+    summary.add_row(_plain("Stage"), _plain(str(result.deterministic_score.company_stage)))
+    summary.add_row(
+        _plain("Product-market fit"),
+        _plain(str(result.deterministic_score.pmf_level)),
+    )
+    summary.add_row(
+        _plain("Fundability risk"),
+        _plain(str(result.deterministic_score.fundability_risk)),
+    )
+    summary.add_row(
+        _plain("Valuation risk"),
+        _plain(str(result.deterministic_score.valuation_risk)),
+    )
+    summary.add_row(
+        _plain("Triggered scoring gates"),
+        _plain(_triggered_scoring_gate_text(result.deterministic_score)),
+    )
+    summary.add_row(
+        _plain("Scoring missing inputs"),
+        _plain(_scoring_missing_inputs_text(result.deterministic_score)),
+    )
+    failed_roles = ", ".join(_role_display(role) for role in result.failed_specialist_roles)
+    summary.add_row(_plain("Failed model roles"), _plain(failed_roles or "none"))
+
+    renderables: list[RenderableType] = [
+        _plain(""),
+        _plain("Run details", style="bold"),
+        _plain(result.mode_explanation),
+        summary,
+        _plain(result.ocr_status),
+    ]
+    if result.research_run is not None:
+        research_workflow = result.research_run.workflow
+        research_record_word = (
+            "record" if result.research_imported_count == 1 else "records"
+        )
+        renderables.append(
+            _plain(
+                "External research planned "
+                f"{research_workflow.plan.task_count} source tasks and imported "
+                f"{result.research_imported_count} evidence {research_record_word} "
+                "before scoring."
+            )
+        )
+        if result.research_imported_count == 0:
+            renderables.append(_plain(_zero_import_research_attempt_text(research_workflow)))
+        renderables.append(
+            _plain(
+                "Research summary: "
+                f"{_research_summary_counts_text(research_workflow)}."
+            )
+        )
+        renderables.append(
+            _plain(f"Research quality: {_evaluate_deal_research_quality_text(result)}.")
+        )
+        if research_workflow.manual_task_queue_path is not None:
+            renderables.append(
+                _plain(
+                    "Manual research follow-up queue: "
+                    f"{research_workflow.manual_task_queue_path}."
+                )
+            )
+        if research_workflow.meridian_unresolved_fields:
+            renderables.append(
+                _plain(
+                    "Meridian unresolved fields: "
+                    f"{_meridian_unresolved_field_text(research_workflow.meridian_unresolved_fields)}."
+                )
+            )
+        if research_workflow.live_collection_enabled:
+            renderables.append(
+                _plain(
+                    "Live public research ran for exact public URLs, autonomous public web "
+                    "search, and configured public APIs."
+                )
+            )
+        else:
+            renderables.append(
+                _plain("Live public research did not run for this workflow.")
+            )
+    else:
+        renderables.append(_plain("External research was skipped for this run."))
+    if result.evidence_review is not None:
+        renderables.append(
+            _plain(
+                "Evidence health review found "
+                f"{_evaluate_deal_evidence_health_text(result.evidence_review)}. "
+                "Evidence health means whether saved source records are complete and "
+                "safe enough to rely on."
+            )
+        )
+    if result.evidence_audit is not None:
+        renderables.append(
+            _plain(
+                "Evidence completeness audit found "
+                f"{_evaluate_deal_evidence_audit_text(result.evidence_audit)}. "
+                "Evidence completeness means whether saved source records cover the "
+                "key facts needed for the decision."
+            )
+        )
+    if result.diligence_question_queue is not None:
+        renderables.append(
+            _plain(
+                "Diligence questions saved "
+                f"{_evaluate_deal_diligence_questions_text(result.diligence_question_queue)} "
+                f"at {result.diligence_question_queue_path}. "
+                "Diligence means checking unanswered facts before investing."
+            )
+        )
+        if result.diligence_question_queue.triage is not None:
+            renderables.append(
+                _plain(
+                    "Diligence triage found "
+                    f"{result.diligence_question_queue.triage.decision_blocker_count} "
+                    "decision-blocking groups. Hail Mary should try public web research, "
+                    "paid data, source review, or the generated Meridian email draft "
+                    "before asking for manual answers."
+                )
+            )
+    if result.warnings:
+        warning_table = _two_column_table("Warning", "Detail")
+        for index, warning in enumerate(result.warnings, start=1):
+            warning_table.add_row(_plain(str(index)), _plain(warning))
+        renderables.append(warning_table)
+    else:
+        renderables.append(_plain("Warnings: none."))
+    if result.operator_limitations:
+        limitation_table = _two_column_table("Limitation", "Detail")
+        for index, limitation in enumerate(result.operator_limitations, start=1):
+            limitation_table.add_row(_plain(str(index)), _plain(limitation))
+        renderables.append(limitation_table)
+    else:
+        renderables.append(_plain("Limitations: none beyond the source evidence in the memo."))
     return renderables
 
 

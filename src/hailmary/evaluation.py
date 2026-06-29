@@ -358,6 +358,20 @@ class EvaluateDealCliCommentary:
 
 
 @dataclass(frozen=True)
+class OperatorBrief:
+    bottom_line: str
+    confidence: str
+    positives: list[str]
+    concerns: list[str]
+    decisive_factor: str
+    unverified_items: list[str]
+    next_actions: list[str]
+    committee_read: list[str]
+    data_caveats: list[str]
+    artifact_paths: dict[str, Path]
+
+
+@dataclass(frozen=True)
 class DealEvaluationResult:
     deal_id: str
     company_name: str
@@ -399,6 +413,502 @@ def build_evaluate_deal_cli_commentary(
         decisive_factor=_cli_decisive_factor(result),
         source=_cli_commentary_source(result),
     )
+
+
+def build_evaluate_deal_operator_brief(result: DealEvaluationResult) -> OperatorBrief:
+    """Build the concise default operator brief without raw source excerpts."""
+
+    commentary = build_evaluate_deal_cli_commentary(result)
+    decisive_factor = commentary.decisive_factor
+    confidence = _operator_confidence_label(result)
+    return OperatorBrief(
+        bottom_line=_operator_bottom_line(result, decisive_factor, confidence=confidence),
+        confidence=confidence,
+        positives=commentary.positives,
+        concerns=_operator_concern_points(result),
+        decisive_factor=decisive_factor,
+        unverified_items=_operator_unverified_items(result),
+        next_actions=_operator_next_actions(result),
+        committee_read=_operator_committee_read(result),
+        data_caveats=_operator_data_caveats(result),
+        artifact_paths={
+            "Final memo": result.final_memo_path,
+            "Final JSON": result.final_json_path,
+        },
+    )
+
+
+def _operator_bottom_line(
+    result: DealEvaluationResult,
+    decisive_factor: str,
+    *,
+    confidence: str,
+) -> str:
+    recommendation = result.final_recommendation.recommendation
+    check_size = _format_check_size(result.final_recommendation.check_size)
+    return _clean_cli_commentary_text(
+        (
+            f"Final guarded recommendation is {recommendation} with a {check_size} "
+            f"check and {confidence} confidence. {decisive_factor}"
+        ),
+        max_chars=420,
+    )
+
+
+def _operator_confidence_label(result: DealEvaluationResult) -> str:
+    reason = result.final_recommendation.reason
+    if reason.startswith("NEEDS_DILIGENCE:") or _evidence_audit_controlled_final_pass(result):
+        return "needs diligence"
+    if _final_recommendation_was_overridden(result):
+        return "guardrail-limited"
+    if (
+        result.final_recommendation.recommendation
+        != result.deterministic_score.recommendation
+    ):
+        return "guardrail-limited"
+    return str(result.deterministic_score.confidence)
+
+
+def _operator_concern_points(result: DealEvaluationResult) -> list[str]:
+    points: list[str] = []
+    if result.evidence_count == 0:
+        _add_cli_point(
+            points,
+            "No usable source-linked evidence was available, so the deal needs more diligence.",
+        )
+    for gate in result.deterministic_score.triggered_hard_blockers:
+        _add_cli_point(
+            points,
+            (
+                "A rule-based guardrail, meaning a fixed safety rule, triggered: "
+                f"{_operator_factor_name(gate.name)}."
+            ),
+        )
+    risk_gap_label = (
+        "calculated-risk gap"
+        if result.deterministic_score.calculated_risk_mode
+        else "strict-risk gap"
+    )
+    for gate in result.deterministic_score.triggered_risk_gaps:
+        _add_cli_point(
+            points,
+            (
+                f"A {risk_gap_label} remains: "
+                f"{_operator_factor_name(gate.name)}."
+            ),
+        )
+    if result.evidence_audit is not None:
+        for finding in result.evidence_audit.findings:
+            if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+                break
+            if finding.severity != EvidenceAuditSeverity.BLOCKING:
+                continue
+            _add_cli_point(
+                points,
+                (
+                    "Evidence completeness, meaning coverage of key decision facts, "
+                    f"found a blocking gap: {finding.title}."
+                ),
+            )
+    if result.evidence_review is not None:
+        for issue in _operator_evidence_review_concern_issues(result.evidence_review):
+            if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+                break
+            _add_cli_point(
+                points,
+                (
+                    "Evidence health, meaning source-record completeness and safety, "
+                    f"found {_operator_evidence_review_issue_label(issue)}: "
+                    f"{issue.issue} ({issue.count})."
+                ),
+            )
+    for factor in sorted(
+        result.deterministic_score.score_factors,
+        key=_score_factor_risk_sort_key,
+    ):
+        if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+            break
+        if factor.missing_inputs:
+            _add_cli_point(
+                points,
+                (
+                    f"{_operator_factor_name(factor.name)} still needs diligence: "
+                    f"missing {_human_list(factor.missing_inputs[:3])}."
+                ),
+            )
+        elif _score_factor_ratio(factor) <= 0.50:
+            _add_cli_point(
+                points,
+                (
+                    f"{_operator_factor_name(factor.name)} was one of the weakest "
+                    "rule-based categories."
+                ),
+            )
+    if points:
+        return points[:MAX_CLI_COMMENTARY_ITEMS]
+    return [
+        "No major rule-based concern was identified, but the memo should still be "
+        "checked against cited evidence."
+    ]
+
+
+def _operator_evidence_review_concern_issues(
+    evidence_review: DealEvidenceReview,
+) -> list[ReviewIssueSummary]:
+    active_issues = [
+        issue
+        for issue in _active_evidence_review_issues(evidence_review)
+        if issue.severity in {ReviewIssueSeverity.BLOCKING, ReviewIssueSeverity.WARNING}
+    ]
+    return sorted(active_issues, key=_operator_evidence_review_issue_sort_key)
+
+
+def _operator_evidence_review_issue_sort_key(issue: ReviewIssueSummary) -> tuple[int, str]:
+    severity_rank = 0 if issue.severity == ReviewIssueSeverity.BLOCKING else 1
+    return (severity_rank, issue.issue.casefold())
+
+
+def _operator_evidence_review_issue_label(issue: ReviewIssueSummary) -> str:
+    if issue.severity == ReviewIssueSeverity.BLOCKING:
+        return "a blocking issue"
+    return "a warning"
+
+
+def _operator_unverified_items(result: DealEvaluationResult) -> list[str]:
+    items: list[str] = []
+    if result.evidence_count == 0:
+        _add_cli_point(items, "Readable source-linked evidence for the company.")
+    for factor in sorted(
+        result.deterministic_score.score_factors,
+        key=_score_factor_risk_sort_key,
+    ):
+        if len(items) >= MAX_CLI_COMMENTARY_ITEMS:
+            break
+        if factor.support_status == ScoreSupportStatus.VERIFIED:
+            continue
+        if factor.missing_inputs:
+            _add_cli_point(
+                items,
+                (
+                    f"{_operator_factor_name(factor.name)}: "
+                    f"{_human_list(factor.missing_inputs[:3])}."
+                ),
+            )
+        elif factor.support_status in {
+            ScoreSupportStatus.NEEDS_DILIGENCE,
+            ScoreSupportStatus.UNVERIFIED,
+        }:
+            _add_cli_point(
+                items,
+                f"{_operator_factor_name(factor.name)} needs stronger source support.",
+            )
+    if result.evidence_audit is not None:
+        for finding in result.evidence_audit.findings:
+            if len(items) >= MAX_CLI_COMMENTARY_ITEMS:
+                break
+            if finding.missing_evidence:
+                _add_cli_point(items, finding.title)
+    if (
+        len(items) < MAX_CLI_COMMENTARY_ITEMS
+        and result.diligence_question_queue is not None
+        and result.diligence_question_queue.unresolved_count
+    ):
+        _add_cli_point(
+            items,
+            (
+                f"{result.diligence_question_queue.unresolved_count} diligence "
+                "questions remain open."
+            ),
+        )
+    if items:
+        return items[:MAX_CLI_COMMENTARY_ITEMS]
+    return ["No major unverified item was singled out by the run."]
+
+
+def _operator_next_actions(result: DealEvaluationResult) -> list[str]:
+    actions: list[str] = []
+    if result.final_recommendation.recommendation == Recommendation.INVEST:
+        _add_cli_point(
+            actions,
+            "Review the final memo and confirm cited evidence before acting on the check size.",
+        )
+    elif result.evidence_count == 0:
+        _add_cli_point(
+            actions,
+            "Collect readable source documents and rerun evaluate-deal before investing.",
+        )
+    else:
+        _add_cli_point(
+            actions,
+            "Resolve the highest-impact missing evidence and rerun evaluate-deal.",
+        )
+    if (
+        result.research_run is not None
+        and result.research_run.workflow.unresolved_manual_task_count
+    ):
+        _add_cli_point(
+            actions,
+            "Complete the open external research follow-ups before relying on the memo.",
+        )
+    if (
+        result.diligence_question_queue is not None
+        and result.diligence_question_queue.unresolved_count
+    ):
+        _add_cli_point(
+            actions,
+            "Use the saved diligence question queue to close the remaining decision gaps.",
+        )
+    if result.failed_specialist_roles:
+        _add_cli_point(
+            actions,
+            "Rerun model review after addressing the failed specialist roles listed in caveats.",
+        )
+    return actions[:MAX_CLI_COMMENTARY_ITEMS]
+
+
+def _operator_committee_read(result: DealEvaluationResult) -> list[str]:
+    points: list[str] = []
+    for specialist_result in result.specialist_results:
+        if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+            break
+        if specialist_result.failed or specialist_result.output is None:
+            continue
+        point = _operator_committee_point(specialist_result)
+        if point:
+            _add_cli_point(points, point)
+    return points[:MAX_CLI_COMMENTARY_ITEMS]
+
+
+def _operator_committee_point(result: RoleReviewResult) -> str | None:
+    output = result.output
+    if output is None:
+        return None
+    role = _role_title(result.role)
+    supported_count = sum(
+        1
+        for summary in output.summary
+        if not summary.unsupported and summary.evidence
+    ) + sum(
+        1
+        for finding in output.findings
+        if not finding.unsupported and finding.evidence
+    )
+    if supported_count:
+        point_word = "point" if supported_count == 1 else "points"
+        return f"{role}: {supported_count} cited supported specialist {point_word} available."
+    return None
+
+
+def _operator_data_caveats(result: DealEvaluationResult) -> list[str]:
+    caveats: list[str] = []
+    _add_cli_point(caveats, f"Evaluation mode: {result.evaluation_mode}.")
+    _add_cli_point(
+        caveats,
+        f"Image-based text reading (OCR): {result.ocr_status}",
+    )
+    if result.research_run is None:
+        _add_cli_point(caveats, "External research was skipped for this run.")
+    else:
+        workflow = result.research_run.workflow
+        record_word = "record" if result.research_imported_count == 1 else "records"
+        _add_cli_point(
+            caveats,
+            (
+                f"External research planned {workflow.plan.task_count} source tasks "
+                f"and imported {result.research_imported_count} evidence {record_word}."
+            ),
+        )
+        if result.research_run.quality_status is not None:
+            _add_cli_point(
+                caveats,
+                (
+                    "External research quality: "
+                    f"{_operator_research_quality_summary(result.research_run.quality_status)}."
+                ),
+            )
+    if result.evidence_review is not None:
+        _add_cli_point(
+            caveats,
+            (
+                "Evidence health, meaning saved source-record completeness and safety, "
+                f"found {_evaluate_deal_evidence_review_summary(result.evidence_review)}."
+            ),
+        )
+    if result.evidence_audit is not None:
+        _add_cli_point(
+            caveats,
+            (
+                "Evidence completeness, meaning coverage of key decision facts, "
+                f"found {_evaluate_deal_evidence_audit_summary(result.evidence_audit)}."
+            ),
+        )
+    if result.failed_specialist_roles:
+        failed_roles = ", ".join(_role_title(role) for role in result.failed_specialist_roles)
+        _add_cli_point(caveats, f"Failed specialist roles: {failed_roles}.")
+    else:
+        _add_cli_point(caveats, "Failed specialist roles: none.")
+    visible_warnings = _operator_visible_warnings(result.warnings)
+    for warning in visible_warnings:
+        _add_cli_point(caveats, f"Warning: {warning}")
+    hidden_warning_count = len(result.warnings) - len(visible_warnings)
+    if hidden_warning_count > 0:
+        _add_cli_point(
+            caveats,
+            f"{hidden_warning_count} additional warnings are available with --verbose.",
+        )
+    visible_limitations = [
+        limitation
+        for limitation in _operator_visible_limitations(result.operator_limitations)
+        if limitation not in visible_warnings
+    ]
+    for limitation in visible_limitations:
+        _add_cli_point(caveats, f"Limitation: {limitation}")
+    if result.operator_limitations:
+        hidden_limitation_count = len(
+            [
+                limitation
+                for limitation in result.operator_limitations
+                if limitation not in visible_limitations
+                and limitation not in visible_warnings
+            ]
+        )
+        if hidden_limitation_count > 0:
+            limitation_word = (
+                "limitation" if hidden_limitation_count == 1 else "limitations"
+            )
+            _add_cli_point(
+                caveats,
+                (
+                    f"{hidden_limitation_count} additional run {limitation_word} "
+                    f"{'was' if hidden_limitation_count == 1 else 'were'} recorded; "
+                    "see the final memo or use --verbose for details."
+                ),
+            )
+        elif not visible_limitations:
+            limitation_count = len(result.operator_limitations)
+            limitation_word = "limitation" if limitation_count == 1 else "limitations"
+            _add_cli_point(
+                caveats,
+                (
+                    f"{limitation_count} run {limitation_word} "
+                    f"{'was' if limitation_count == 1 else 'were'} recorded; "
+                    "see the final memo or use --verbose for details."
+                ),
+            )
+    return caveats
+
+
+def _operator_visible_limitations(limitations: Sequence[str]) -> list[str]:
+    visible = [
+        limitation
+        for limitation in limitations
+        if _operator_limitation_visible_in_brief(limitation)
+    ]
+    return visible[:MAX_CLI_COMMENTARY_ITEMS]
+
+
+def _operator_limitation_visible_in_brief(limitation: str) -> bool:
+    lowered = limitation.lower()
+    return lowered.startswith("local-only mode was used") or (
+        "model review was skipped" in lowered and "hailmary_mock_llm" in lowered
+    ) or (
+        "no usable source-linked evidence" in lowered
+        and "skipped model committee review" in lowered
+    )
+
+
+def _operator_visible_warnings(warnings: Sequence[str]) -> list[str]:
+    ranked = sorted(
+        enumerate(warnings),
+        key=lambda item: (_operator_warning_priority(item[1]), item[0]),
+    )
+    return [warning for _, warning in ranked[:MAX_CLI_COMMENTARY_ITEMS]]
+
+
+def _operator_warning_priority(warning: str) -> int:
+    lowered = warning.lower()
+    final_decision_markers = (
+        "forced final pass",
+        "forced pass/$0",
+        "kept final pass",
+        "final pass/$0",
+        "deterministic guardrails",
+        "final model recommended",
+        "final recommendation was changed to pass",
+        "rule-based scoring suggested invest",
+    )
+    safety_markers = (
+        "guardrail",
+        "citation",
+        "source-document instructions",
+        "unsafe",
+        "removed all",
+        "removed one or more",
+    )
+    if any(marker in lowered for marker in final_decision_markers):
+        return 0
+    if any(marker in lowered for marker in safety_markers):
+        return 1
+    return 2
+
+
+def _operator_research_quality_summary(
+    quality_status: ResearchQualityStatus,
+) -> str:
+    return (
+        f"{quality_status.status}; {quality_status.current_record_count} current, "
+        f"{quality_status.stale_record_count} stale, "
+        f"{quality_status.unknown_freshness_record_count} unknown freshness"
+    )
+
+
+def _evaluate_deal_evidence_review_summary(
+    evidence_review: DealEvidenceReview,
+) -> str:
+    blocking_count = sum(
+        1
+        for issue in evidence_review.issues
+        if issue.severity == ReviewIssueSeverity.BLOCKING
+    )
+    warning_count = sum(
+        1
+        for issue in evidence_review.issues
+        if issue.severity == ReviewIssueSeverity.WARNING
+    )
+    info_count = sum(
+        1
+        for issue in evidence_review.issues
+        if issue.severity == ReviewIssueSeverity.INFO
+    )
+    parts: list[str] = []
+    if blocking_count:
+        parts.append(_research_count_phrase(blocking_count, "blocking issue"))
+    if warning_count:
+        parts.append(_research_count_phrase(warning_count, "warning"))
+    if info_count:
+        parts.append(_research_count_phrase(info_count, "note"))
+    return ", ".join(parts) if parts else "no issues"
+
+
+def _evaluate_deal_evidence_audit_summary(
+    evidence_audit: EvidenceCompletenessAudit,
+) -> str:
+    blocking_count = sum(
+        1
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.BLOCKING
+    )
+    warning_count = sum(
+        1
+        for finding in evidence_audit.findings
+        if finding.severity == EvidenceAuditSeverity.WARNING
+    )
+    parts = [evidence_audit.readiness.value.replace("_", " ")]
+    if blocking_count:
+        parts.append(_research_count_phrase(blocking_count, "blocking finding"))
+    if warning_count:
+        parts.append(_research_count_phrase(warning_count, "warning"))
+    return ", ".join(parts)
 
 
 def _cli_positive_points(result: DealEvaluationResult) -> list[str]:
