@@ -26,6 +26,12 @@ from hailmary.evidence import (
     build_diligence_triage,
 )
 from hailmary.evidence.actions import EvidenceActionStatus, record_evidence_action
+from hailmary.evidence.review import (
+    DealEvidenceReview,
+    EvidenceHealthSummary,
+    ReviewIssueSeverity,
+    ReviewIssueSummary,
+)
 from hailmary.ingest.folder_loader import ingest_folder as real_ingest_folder
 from hailmary.portfolio import add_portfolio_investment
 from hailmary.research import (
@@ -3338,6 +3344,92 @@ def test_evaluate_deal_operator_brief_surfaces_model_review_skipped_limitation(
     assert "run limitations were recorded" not in caveats
 
 
+def test_evaluate_deal_operator_brief_surfaces_no_evidence_model_skip_limitation(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="NoEvidenceCaveatCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=0,
+        one_line_reason="Passed because no usable source-linked evidence was available.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="NEEDS_DILIGENCE: No usable source-linked evidence was available.",
+        evidence=[],
+    )
+    no_evidence_limitation = (
+        "No usable source-linked evidence was available, so Hail Mary skipped model "
+        "committee review and wrote a deterministic PASS/$0 memo."
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        warnings=[
+            "Ingestion warning one.",
+            "Research warning two.",
+            "Image-based text reading warning three.",
+            no_evidence_limitation,
+        ],
+        operator_limitations=[no_evidence_limitation],
+    )
+
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    caveats = "\n".join(brief.data_caveats)
+
+    assert "skipped model committee review" in caveats
+    assert "Limitation: No usable source-linked evidence was available" in caveats
+    assert "additional run limitation" not in caveats
+
+
+def test_evaluate_deal_operator_brief_surfaces_evidence_health_blockers(
+    tmp_path: Path,
+) -> None:
+    scored_deal = ScoredDeal(
+        deal_id="deal-1",
+        company_name="EvidenceHealthConcernCo",
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        total_score=80,
+        one_line_reason="Passed until evidence health is repaired.",
+    )
+    final_recommendation = AgentRecommendationRationale(
+        recommendation=Recommendation.PASS,
+        check_size=0,
+        reason="Rule-based scoring kept the deal at PASS.",
+        evidence=[],
+    )
+    result = _commentary_result(
+        tmp_path,
+        scored_deal=scored_deal,
+        final_recommendation=final_recommendation,
+        evidence_review=_evidence_review_with_issues(
+            tmp_path,
+            [
+                ReviewIssueSummary(
+                    code="unsafe_cited",
+                    severity=ReviewIssueSeverity.BLOCKING,
+                    issue="Unsafe source-document instructions in cited evidence",
+                    count=1,
+                    guidance="Remove or replace unsafe cited evidence.",
+                )
+            ],
+        ),
+    )
+
+    brief = evaluation.build_evaluate_deal_operator_brief(result)
+    concerns = "\n".join(brief.concerns)
+
+    assert "Evidence health" in concerns
+    assert "blocking issue" in concerns
+    assert "Unsafe source-document instructions in cited evidence" in concerns
+    assert "No major rule-based concern" not in concerns
+
+
 def test_evaluate_deal_operator_brief_limits_downgraded_confidence(
     tmp_path: Path,
 ) -> None:
@@ -4796,6 +4888,7 @@ def _commentary_result(
     failed_specialist_roles: list[AgentRole] | None = None,
     warnings: list[str] | None = None,
     operator_limitations: list[str] | None = None,
+    evidence_review: DealEvidenceReview | None = None,
 ) -> evaluation.DealEvaluationResult:
     return evaluation.DealEvaluationResult(
         deal_id=scored_deal.deal_id,
@@ -4823,6 +4916,36 @@ def _commentary_result(
         ocr_status="OCR was not enabled.",
         warnings=warnings or [],
         operator_limitations=operator_limitations or [],
+        evidence_review=evidence_review,
+    )
+
+
+def _evidence_review_with_issues(
+    root: Path,
+    issues: list[ReviewIssueSummary],
+) -> DealEvidenceReview:
+    return DealEvidenceReview(
+        deal_id="deal-1",
+        company_name="Synthetic Evidence Review Co",
+        evidence_store_path=root / "evidence_store.json",
+        evidence_count=1,
+        claim_count=0,
+        conflict_count=0,
+        health=EvidenceHealthSummary(
+            source_kinds=[],
+            verification_statuses=[],
+            recency=[],
+            materiality=[],
+            confidence=[],
+            source_lineage=[],
+            issues=issues,
+        ),
+        source_documents=[],
+        claim_statuses=[],
+        claim_records=[],
+        conflicts=[],
+        issues=issues,
+        evidence_records=[],
     )
 
 

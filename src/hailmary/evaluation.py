@@ -510,6 +510,18 @@ def _operator_concern_points(result: DealEvaluationResult) -> list[str]:
                     f"found a blocking gap: {finding.title}."
                 ),
             )
+    if result.evidence_review is not None:
+        for issue in _operator_evidence_review_concern_issues(result.evidence_review):
+            if len(points) >= MAX_CLI_COMMENTARY_ITEMS:
+                break
+            _add_cli_point(
+                points,
+                (
+                    "Evidence health, meaning source-record completeness and safety, "
+                    f"found {_operator_evidence_review_issue_label(issue)}: "
+                    f"{issue.issue} ({issue.count})."
+                ),
+            )
     for factor in sorted(
         result.deterministic_score.score_factors,
         key=_score_factor_risk_sort_key,
@@ -538,6 +550,28 @@ def _operator_concern_points(result: DealEvaluationResult) -> list[str]:
         "No major rule-based concern was identified, but the memo should still be "
         "checked against cited evidence."
     ]
+
+
+def _operator_evidence_review_concern_issues(
+    evidence_review: DealEvidenceReview,
+) -> list[ReviewIssueSummary]:
+    active_issues = [
+        issue
+        for issue in _active_evidence_review_issues(evidence_review)
+        if issue.severity in {ReviewIssueSeverity.BLOCKING, ReviewIssueSeverity.WARNING}
+    ]
+    return sorted(active_issues, key=_operator_evidence_review_issue_sort_key)
+
+
+def _operator_evidence_review_issue_sort_key(issue: ReviewIssueSummary) -> tuple[int, str]:
+    severity_rank = 0 if issue.severity == ReviewIssueSeverity.BLOCKING else 1
+    return (severity_rank, issue.issue.casefold())
+
+
+def _operator_evidence_review_issue_label(issue: ReviewIssueSummary) -> str:
+    if issue.severity == ReviewIssueSeverity.BLOCKING:
+        return "a blocking issue"
+    return "a warning"
 
 
 def _operator_unverified_items(result: DealEvaluationResult) -> list[str]:
@@ -722,11 +756,22 @@ def _operator_data_caveats(result: DealEvaluationResult) -> list[str]:
             caveats,
             f"{hidden_warning_count} additional warnings are available with --verbose.",
         )
-    visible_limitations = _operator_visible_limitations(result.operator_limitations)
+    visible_limitations = [
+        limitation
+        for limitation in _operator_visible_limitations(result.operator_limitations)
+        if limitation not in visible_warnings
+    ]
     for limitation in visible_limitations:
         _add_cli_point(caveats, f"Limitation: {limitation}")
     if result.operator_limitations:
-        hidden_limitation_count = len(result.operator_limitations) - len(visible_limitations)
+        hidden_limitation_count = len(
+            [
+                limitation
+                for limitation in result.operator_limitations
+                if limitation not in visible_limitations
+                and limitation not in visible_warnings
+            ]
+        )
         if hidden_limitation_count > 0:
             limitation_word = (
                 "limitation" if hidden_limitation_count == 1 else "limitations"
@@ -766,6 +811,9 @@ def _operator_limitation_visible_in_brief(limitation: str) -> bool:
     lowered = limitation.lower()
     return lowered.startswith("local-only mode was used") or (
         "model review was skipped" in lowered and "hailmary_mock_llm" in lowered
+    ) or (
+        "no usable source-linked evidence" in lowered
+        and "skipped model committee review" in lowered
     )
 
 
