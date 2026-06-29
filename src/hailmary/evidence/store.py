@@ -25,7 +25,10 @@ from hailmary.utils.text_cleaning import clean_extracted_text_with_metadata
 STALE_SOURCE_DAYS = 365
 MONEY_PATTERN = (
     r"\$\s?\d+(?:,\d{3})*(?:\.\d+)?"
-    r"(?:\s?(?:thousand|million|billion|k|m|b))?"
+    r"(?:\s?(?:thousand|million|billion|k|m|b)\b)?"
+    r"(?:\s?USD\b)?"
+    r"(?![A-Za-z0-9_])"
+    r"(?!\s?USD[A-Za-z0-9_])"
 )
 PERCENT_PATTERN = r"\d+(?:\.\d+)?\s?%"
 TERM_SEPARATOR = r"\s*(?:(?:is|of|at|:|\|)\s*)?"
@@ -38,6 +41,8 @@ class DealTermPattern:
     label: str
     unit: str
     regex: re.Pattern[str]
+    requires_financing_context: bool = False
+    rejects_negated_context: bool = False
 
 
 DEAL_TERM_PATTERNS = (
@@ -45,9 +50,21 @@ DEAL_TERM_PATTERNS = (
         label="valuation cap",
         unit="usd",
         regex=re.compile(
-            rf"\bvaluation cap\b{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
+            rf"\b(?:valuation cap|post[-\s]?money cap)\b"
+            rf"{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
             re.IGNORECASE,
         ),
+        rejects_negated_context=True,
+    ),
+    DealTermPattern(
+        label="valuation cap",
+        unit="usd",
+        regex=re.compile(
+            rf"(?m)^[\s|:-]*cap\b{TERM_SEPARATOR}(?P<value>{MONEY_PATTERN})",
+            re.IGNORECASE,
+        ),
+        requires_financing_context=True,
+        rejects_negated_context=True,
     ),
     DealTermPattern(
         label="post-money valuation",
@@ -92,6 +109,54 @@ DEAL_TERM_PATTERNS = (
             re.IGNORECASE,
         ),
     ),
+)
+
+FINANCING_CONTEXT_PATTERN = re.compile(
+    r"\b(?:"
+    r"instrument\s+(?:safe|simple agreement for future equity|convertible note)|"
+    r"safe|"
+    r"simple agreement for future equity|"
+    r"convertible note|"
+    r"priced round|"
+    r"round|"
+    r"discount|"
+    r"estimated round size|"
+    r"minimum investment|"
+    r"minimum check|"
+    r"target raise"
+    r"|valuation"
+    r")\b",
+    re.IGNORECASE,
+)
+NEGATED_DEAL_TERM_PREFIX_PATTERN = re.compile(
+    r"(?:^|[\s.;:,(])(?:"
+    r"no|"
+    r"without|"
+    r"lacks?|"
+    r"lacking|"
+    r"not|"
+    r"(?:does|do|did)\s+not\s+(?:include|have|list|offer|set)"
+    r")\s+(?:an?\s+|the\s+)?$",
+    re.IGNORECASE,
+)
+NEGATED_DEAL_TERM_SUFFIX_PATTERN = re.compile(
+    r"^\s*(?:is|are|was|were|has been|have been)?\s*"
+    r"(?:not|never)\s+"
+    r"(?:included|available|provided|listed|offered|set|disclosed)\b",
+    re.IGNORECASE,
+)
+UNRELATED_CAP_CONTEXT_PATTERN = re.compile(
+    r"\b(?:"
+    r"market|"
+    r"expense|expenses|"
+    r"operating|"
+    r"budget|"
+    r"exposure|"
+    r"carry|"
+    r"fees?|"
+    r"costs?"
+    r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -372,6 +437,16 @@ def _extract_deal_term_claims(
     for evidence in evidence_records:
         for pattern in DEAL_TERM_PATTERNS:
             for match in pattern.regex.finditer(evidence.text):
+                if (
+                    pattern.requires_financing_context
+                    and not _standalone_cap_has_financing_context(evidence.text, match)
+                ):
+                    continue
+                if pattern.rejects_negated_context and _match_has_negated_context(
+                    evidence.text,
+                    match,
+                ):
+                    continue
                 raw_value = match.groupdict().get("value") or match.groupdict().get(
                     "value_before"
                 )
@@ -427,6 +502,58 @@ def _extract_deal_term_claims(
                 )
 
     return claims
+
+
+def _standalone_cap_has_financing_context(
+    text: str,
+    match: re.Match[str],
+) -> bool:
+    lines = text.splitlines(keepends=True)
+    line_start = 0
+    matched_line_index = 0
+    for index, line in enumerate(lines):
+        line_end = line_start + len(line)
+        if line_start <= match.start() < line_end:
+            matched_line_index = index
+            break
+        line_start = line_end
+    else:
+        return False
+
+    nearby_lines = _nearby_nonempty_lines(lines, matched_line_index)
+    previous_line = _previous_nonempty_line(lines, matched_line_index)
+    if _line_is_cap_qualifier(previous_line, UNRELATED_CAP_CONTEXT_PATTERN):
+        return False
+    return any(FINANCING_CONTEXT_PATTERN.search(line) for line in nearby_lines)
+
+
+def _nearby_nonempty_lines(lines: list[str], matched_line_index: int) -> list[str]:
+    start = max(0, matched_line_index - 2)
+    end = min(len(lines), matched_line_index + 3)
+    return [line.strip() for line in lines[start:end] if line.strip()]
+
+
+def _previous_nonempty_line(lines: list[str], matched_line_index: int) -> str:
+    for index in range(matched_line_index - 1, -1, -1):
+        line = lines[index].strip()
+        if line:
+            return line
+    return ""
+
+
+def _line_is_cap_qualifier(line: str, pattern: re.Pattern[str]) -> bool:
+    if not line:
+        return False
+    words = re.findall(r"[A-Za-z]+", line)
+    return len(words) <= 4 and pattern.search(line) is not None
+
+
+def _match_has_negated_context(text: str, match: re.Match[str]) -> bool:
+    prefix = text[max(0, match.start() - 100) : match.start()]
+    if NEGATED_DEAL_TERM_PREFIX_PATTERN.search(prefix):
+        return True
+    suffix = text[match.end() : match.end() + 100]
+    return NEGATED_DEAL_TERM_SUFFIX_PATTERN.search(suffix) is not None
 
 
 def _citation_from_match(
@@ -518,6 +645,8 @@ def _normalize_value(raw_value: str, *, unit: str) -> str:
 
 def _money_to_cents(raw_value: str) -> int | None:
     normalized = raw_value.lower().replace("$", "").replace(",", "").strip()
+    if normalized.endswith("usd"):
+        normalized = normalized[: -len("usd")].strip()
     multiplier = Decimal("1")
     suffixes = {
         "thousand": Decimal("1000"),

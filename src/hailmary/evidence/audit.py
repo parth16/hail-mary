@@ -241,6 +241,17 @@ _NEGATED_KEYWORD_PREFIX = re.compile(
     r"has\s+not|not\s+yet|pre[-\s]?revenue)\b(?:[\W_]+\w+){0,5}[\W_]*$",
     re.IGNORECASE,
 )
+_PRICING_LIKE_PATTERN = re.compile(
+    r"\b(?:"
+    r"valuation\s+cap|"
+    r"post[-\s]?money\s+cap|"
+    r"post[-\s]?money\s+valuation|"
+    r"pre[-\s]?money\s+valuation|"
+    r"entry\s+valuation|"
+    r"priced[-\s]?round\s+price"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def build_evidence_completeness_audit(
@@ -365,6 +376,24 @@ def _term_statuses(
                 )
             )
             continue
+        if term == EvidenceAuditTerm.PRICE_VALUATION:
+            pricing_like_ids = _pricing_like_evidence_ids(safe_evidence)
+            if pricing_like_ids:
+                statuses.append(
+                    EvidenceAuditTermStatus(
+                        term=term,
+                        label=_TERM_LABELS[term],
+                        status=EvidenceAuditCoverageStatus.WEAK,
+                        explanation=(
+                            "Pricing-like source text is present, but Hail Mary could "
+                            "not convert it into a verified valuation or valuation-cap "
+                            "claim. Review pricing extraction before relying on this term."
+                        ),
+                        evidence_ids=pricing_like_ids,
+                        missing_evidence=False,
+                    )
+                )
+                continue
         statuses.append(
             EvidenceAuditTermStatus(
                 term=term,
@@ -847,6 +876,14 @@ def _claim_citations_are_safe(
 
 def _contains_any_positive_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     return any(_contains_positive_keyword(text, keyword) for keyword in keywords)
+
+
+def _pricing_like_evidence_ids(evidence: list[EvidenceRecord]) -> list[str]:
+    return _dedupe(
+        record.id
+        for record in evidence
+        if _PRICING_LIKE_PATTERN.search(record.text)
+    )
 
 
 def _contains_positive_keyword(text: str, keyword: str) -> bool:
