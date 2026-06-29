@@ -183,6 +183,29 @@ def test_deal_terms_parse_standalone_cap_only_in_financing_context(
     assert claims_by_label["valuation cap"]["raw_text"] == "Cap | $150M"
 
 
+def test_deal_terms_parse_standalone_cap_with_split_safe_context(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "SplitSafeCapCo"
+    company.mkdir(parents=True)
+    (company / "terms.txt").write_text(
+        "Instrument\nSAFE\nCap $20M\nDiscount 0%\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+    claims_by_label = {claim["label"]: claim for claim in saved_store["claims"]}
+
+    assert claims_by_label["valuation cap"]["value"] == "$20M"
+    assert claims_by_label["valuation cap"]["normalized_value"] == "usd_cents:2000000000"
+    assert claims_by_label["valuation cap"]["raw_text"] == "Cap $20M"
+
+
 def test_deal_terms_do_not_parse_unrelated_caps_as_valuation_caps(
     tmp_path: Path,
 ) -> None:
@@ -239,6 +262,48 @@ def test_deal_terms_do_not_parse_wrapped_market_cap_in_financing_context(
         "Market\n"
         "Cap $150M\n"
         "Discount 15%\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+
+    assert "valuation cap" not in {claim["label"] for claim in saved_store["claims"]}
+    assert {claim["label"] for claim in saved_store["claims"]} == {"discount"}
+
+
+def test_deal_terms_do_not_truncate_usdc_as_usd(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "UsdcCapCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "Valuation cap $20M USDC. Discount 15%.\n",
+        encoding="utf-8",
+    )
+
+    summary = ingest_folder(root, config=AppConfig(data_dir=tmp_path / "data"))
+
+    deal = summary.deals[0]
+    assert deal.evidence_store_path is not None
+    saved_store = json.loads(deal.evidence_store_path.read_text(encoding="utf-8"))
+
+    assert "valuation cap" not in {claim["label"] for claim in saved_store["claims"]}
+    assert {claim["label"] for claim in saved_store["claims"]} == {"discount"}
+
+
+def test_deal_terms_do_not_extract_negated_post_money_cap(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pitch-decks"
+    company = root / "NegatedPostMoneyCapCo"
+    company.mkdir(parents=True)
+    (company / "memo.txt").write_text(
+        "No post-money cap of $20M is included; the SAFE is uncapped. Discount 0%.\n",
         encoding="utf-8",
     )
 
