@@ -888,14 +888,17 @@ def _guard_claim_lineage(
     unsupported_line_numbers: list[int] = []
     dropped_instruction_line_numbers: list[int] = []
     for line_number, line in enumerate(output_text.splitlines(), start=1):
-        if _line_needs_lineage(line) and not _line_has_lineage(
+        if not _line_needs_lineage(line):
+            guarded_lines.append(line)
+            continue
+        if looks_like_embedded_source_instruction(line):
+            dropped_instruction_line_numbers.append(line_number)
+            continue
+        if not _line_has_lineage(
             line,
             source_names=source_names,
             source_header_names=source_header_names,
         ):
-            if looks_like_embedded_source_instruction(line):
-                dropped_instruction_line_numbers.append(line_number)
-                continue
             unsupported_line_numbers.append(line_number)
             guarded_lines.append(_line_with_needs_diligence_label(line))
             continue
