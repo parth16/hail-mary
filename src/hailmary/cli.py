@@ -73,6 +73,15 @@ from hailmary.ingest.folder_loader import (
 from hailmary.ingest.folder_loader import (
     ingest_folder as ingest_folder_path,
 )
+from hailmary.llm_eval import (
+    DEFAULT_LLM_EVAL_MODEL,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_REASONING_EFFORT,
+    LLMEvalError,
+    LLMEvalResult,
+    load_prompt_file,
+    run_llm_eval,
+)
 from hailmary.portfolio import (
     PortfolioError,
     PortfolioStatus,
@@ -2480,6 +2489,133 @@ def evaluate_deal(
         renderables.extend(_evaluate_deal_verbose_renderables(result))
     renderables.extend(_evaluate_deal_artifact_renderables(brief))
     _print_panel("Deal evaluation complete", renderables, border_style="green")
+
+
+@app.command("llm-eval")
+def llm_eval_command(
+    deal_folder_or_deal_id: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "Deal folder under pitch-decks, or a deal folder name, slug, or deal ID."
+            ),
+        ),
+    ],
+    model: Annotated[
+        str,
+        typer.Option(
+            "--model",
+            help="OpenAI model for the direct LLM diligence evaluation.",
+        ),
+    ] = DEFAULT_LLM_EVAL_MODEL,
+    reasoning_effort: Annotated[
+        str,
+        typer.Option(
+            "--reasoning-effort",
+            help="OpenAI reasoning effort for the Responses API request.",
+        ),
+    ] = DEFAULT_REASONING_EFFORT,
+    no_web_search: Annotated[
+        bool,
+        typer.Option(
+            "--no-web-search",
+            help="Do not attach OpenAI web search, even when web research is configured.",
+        ),
+    ] = False,
+    max_output_tokens: Annotated[
+        int,
+        typer.Option(
+            "--max-output-tokens",
+            help="Maximum OpenAI output tokens for the memo.",
+        ),
+    ] = DEFAULT_MAX_OUTPUT_TOKENS,
+    prompt_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--prompt-file",
+            help="Optional UTF-8 operator prompt file to use instead of the default.",
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help="Show included and excluded files plus request diagnostics on stderr.",
+        ),
+    ] = False,
+) -> None:
+    """Run a direct OpenAI LLM diligence evaluation and print the memo."""
+
+    config = _config_from_options(None)
+    try:
+        prompt_text = load_prompt_file(prompt_file) if prompt_file is not None else None
+        result = run_llm_eval(
+            deal_folder_or_deal_id,
+            config=config,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            no_web_search=no_web_search,
+            max_output_tokens=max_output_tokens,
+            prompt_text=prompt_text,
+        )
+    except LLMEvalError as exc:
+        _print_error(str(exc))
+        raise typer.Exit(1) from None
+
+    _print_llm_eval_stderr(result, verbose=verbose)
+    typer.echo(result.output_text)
+
+
+def _print_llm_eval_stderr(result: LLMEvalResult, *, verbose: bool) -> None:
+    for warning in result.prepared_input.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+    if verbose:
+        typer.echo(f"Model: {result.model}", err=True)
+        typer.echo(f"Reasoning effort: {result.reasoning_effort}", err=True)
+        typer.echo(
+            f"Web search: {'enabled' if result.web_search_enabled else 'disabled'}",
+            err=True,
+        )
+        for document in result.prepared_input.documents:
+            typer.echo(
+                f"Included: {document.relative_path.as_posix()}",
+                err=True,
+            )
+        for excluded_path in result.prepared_input.excluded_paths:
+            typer.echo(
+                f"Excluded: {_llm_eval_relative_path(result, excluded_path.path)} "
+                f"({excluded_path.reason})",
+                err=True,
+            )
+    _print_llm_eval_usage(result)
+
+
+def _print_llm_eval_usage(result: LLMEvalResult) -> None:
+    usage = result.usage
+    if (
+        usage.input_tokens is None
+        and usage.output_tokens is None
+        and usage.total_tokens is None
+    ):
+        return
+    typer.echo(
+        "Token usage: "
+        f"input={_token_count_text(usage.input_tokens)}, "
+        f"output={_token_count_text(usage.output_tokens)}, "
+        f"total={_token_count_text(usage.total_tokens)}",
+        err=True,
+    )
+
+
+def _token_count_text(value: int | None) -> str:
+    return str(value) if value is not None else "unknown"
+
+
+def _llm_eval_relative_path(result: LLMEvalResult, path: Path) -> str:
+    try:
+        return path.relative_to(result.prepared_input.deal_folder).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 @app.command("batch-evaluate")

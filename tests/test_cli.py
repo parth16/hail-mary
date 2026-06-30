@@ -85,6 +85,7 @@ def test_top_level_help_shows_only_operator_commands() -> None:
 
     assert result.exit_code == 0, result.output
     assert "evaluate-deal" in result.output
+    assert "llm-eval" in result.output
     assert "review-evidence" in result.output
     hidden_commands = [
         "init",
