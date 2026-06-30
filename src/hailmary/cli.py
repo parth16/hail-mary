@@ -12,8 +12,11 @@ from typing import Annotated, Literal, NoReturn, Protocol, Self
 
 import typer
 from rich import box
+from rich.align import Align
 from rich.console import Console, Group, RenderableType
+from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 from rich.rule import Rule
 from rich.status import Status
 from rich.table import Table
@@ -230,7 +233,8 @@ class _LLMEvalProgress:
     def __init__(self, output_console: Console) -> None:
         self._console = output_console
         self._stage_count = 0
-        self._status: Status | None = None
+        self._progress: Progress | None = None
+        self._task_id: TaskID | None = None
 
     def __enter__(self) -> Self:
         return self
@@ -248,19 +252,30 @@ class _LLMEvalProgress:
         self._stage_count += 1
         label = _llm_eval_progress_label(stage)
         if self._console.is_terminal:
-            if self._status is None:
-                self._status = self._console.status(_plain(label), spinner="dots")
-                self._status.__enter__()
+            if self._progress is None:
+                self._progress = Progress(
+                    SpinnerColumn("dots"),
+                    TextColumn("[bold cyan]{task.description}"),
+                    TimeElapsedColumn(),
+                    console=self._console,
+                    transient=False,
+                )
+                self._progress.__enter__()
+                self._task_id = self._progress.add_task(label, total=None)
             else:
-                self._status.update(_plain(label))
+                if self._task_id is not None:
+                    self._progress.update(self._task_id, description=label)
             return
-        self._console.print(_plain(f"{self._stage_count}. {label}", style="bold cyan"))
+        self._console.print(
+            _plain(f"Step {self._stage_count}: {label}", style="bold cyan")
+        )
 
     def stop(self) -> None:
-        if self._status is None:
+        if self._progress is None:
             return
-        self._status.__exit__(None, None, None)
-        self._status = None
+        self._progress.__exit__(None, None, None)
+        self._progress = None
+        self._task_id = None
 
 
 def _llm_eval_progress_label(stage: str) -> str:
@@ -295,6 +310,10 @@ def _plain(message: str, *, style: str | None = None) -> Text:
     if style is None:
         return Text(message)
     return Text(message, style=style)
+
+
+def _literal(value: object, *, style: str | None = None) -> Text:
+    return _plain(str(value), style=style)
 
 
 def _print_json(json_text: str) -> None:
@@ -2641,6 +2660,16 @@ def llm_eval_command(
         resolved_max_output_tokens = (
             DEFAULT_MAX_OUTPUT_TOKENS if max_output_tokens is None else max_output_tokens
         )
+        _print_llm_eval_start_card(
+            deal_folder_or_deal_id=deal_folder_or_deal_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=resolved_max_output_tokens,
+            web_search=web_search,
+            no_web_search=no_web_search,
+            background_mode=background_mode,
+            prompt_file=prompt_file,
+        )
         with _LLMEvalProgress(stderr_console) as progress:
             result = run_llm_eval(
                 deal_folder_or_deal_id,
@@ -2660,34 +2689,176 @@ def llm_eval_command(
         raise typer.Exit(1) from None
 
     _print_llm_eval_stderr(result, verbose=verbose)
-    typer.echo(result.output_text)
+    _print_llm_eval_memo(result.output_text)
+
+
+def _print_llm_eval_start_card(
+    *,
+    deal_folder_or_deal_id: str,
+    model: str,
+    reasoning_effort: str,
+    max_output_tokens: int,
+    web_search: bool,
+    no_web_search: bool,
+    background_mode: bool,
+    prompt_file: Path | None,
+) -> None:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold cyan", no_wrap=True)
+    table.add_column()
+    table.add_row("Command", "hailmary llm-eval")
+    table.add_row("Deal", _literal(deal_folder_or_deal_id))
+    table.add_row("Model", _literal(model))
+    table.add_row("Reasoning", _literal(reasoning_effort))
+    table.add_row("Output cap", _literal(_token_count_text(max_output_tokens)))
+    table.add_row(
+        "Web search",
+        _literal(_llm_eval_requested_web_search_label(web_search, no_web_search)),
+    )
+    table.add_row(
+        "Background",
+        _literal("enabled" if background_mode else "disabled"),
+    )
+    table.add_row(
+        "Prompt",
+        _literal("override" if prompt_file is not None else "default"),
+    )
+    stderr_console.print(
+        Panel(
+            Align.left(table),
+            title="Hail Mary Direct LLM Eval",
+            subtitle="stdout stays memo-only",
+            border_style="cyan",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+
+
+def _llm_eval_requested_web_search_label(web_search: bool, no_web_search: bool) -> str:
+    if no_web_search:
+        return "disabled by --no-web-search"
+    if web_search:
+        return "requested"
+    return "disabled"
 
 
 def _print_llm_eval_stderr(result: LLMEvalResult, *, verbose: bool) -> None:
-    for warning in result.prepared_input.warnings:
-        typer.echo(f"Warning: {warning}", err=True)
+    _print_llm_eval_warnings(result)
     if verbose:
-        typer.echo(f"Model: {result.model}", err=True)
-        typer.echo(f"Reasoning effort: {result.reasoning_effort}", err=True)
-        typer.echo(
-            f"Web search: {'enabled' if result.web_search_enabled else 'disabled'}",
-            err=True,
+        _print_llm_eval_source_manifest(result)
+    _print_llm_eval_summary(result)
+
+
+def _print_llm_eval_warnings(result: LLMEvalResult) -> None:
+    if not result.prepared_input.warnings:
+        return
+    warning_lines = [
+        _plain(f"Warning: {warning}", style="yellow")
+        for warning in result.prepared_input.warnings
+    ]
+    stderr_console.print(
+        Panel(
+            Group(*warning_lines),
+            title="Warnings",
+            border_style="yellow",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
         )
-        for document in result.prepared_input.documents:
-            typer.echo(
-                f"Included: {document.relative_path.as_posix()}",
-                err=True,
-            )
-        for excluded_path in result.prepared_input.excluded_paths:
-            typer.echo(
-                f"Excluded: {_llm_eval_relative_path(result, excluded_path.path)} "
-                f"({excluded_path.reason})",
-                err=True,
-            )
-    _print_llm_eval_usage(result)
+    )
+    for warning in result.prepared_input.warnings:
+        stderr_console.print(
+            _plain(f"Warning: {warning}", style="yellow"),
+            soft_wrap=True,
+        )
 
 
-def _print_llm_eval_usage(result: LLMEvalResult) -> None:
+def _print_llm_eval_source_manifest(result: LLMEvalResult) -> None:
+    table = Table(
+        title="Local Source Manifest",
+        box=box.SIMPLE_HEAVY,
+        header_style="bold",
+        show_edge=False,
+        pad_edge=False,
+    )
+    table.add_column("State", style="bold cyan", no_wrap=True)
+    table.add_column("Path", overflow="fold")
+    table.add_column("Details", overflow="fold")
+    for document in result.prepared_input.documents:
+        table.add_row(
+            "Included:",
+            _literal(document.relative_path.as_posix()),
+            _literal(f"{len(document.text):,} extracted chars"),
+        )
+    for excluded_path in result.prepared_input.excluded_paths:
+        table.add_row(
+            "Excluded:",
+            _literal(_llm_eval_relative_path(result, excluded_path.path)),
+            _literal(excluded_path.reason),
+        )
+    stderr_console.print(table)
+
+
+def _print_llm_eval_summary(result: LLMEvalResult) -> None:
+    lines: list[Text] = [
+        _plain("Memo: printed to stdout", style="bold green"),
+        _plain(f"Model: {result.model}"),
+        _plain(f"Reasoning effort: {result.reasoning_effort}"),
+        _plain(
+            f"Web search: {'enabled' if result.web_search_enabled else 'disabled'}"
+        ),
+        _plain(
+            "Sources: "
+            f"{len(result.prepared_input.documents)} included, "
+            f"{len(result.prepared_input.excluded_paths)} excluded"
+        ),
+    ]
+    usage_line = _llm_eval_usage_line(result)
+    if usage_line is not None:
+        lines.append(_plain(usage_line, style="bold cyan"))
+    stderr_console.print(
+        Panel(
+            Group(*lines),
+            title="Run Summary",
+            border_style="green",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+
+
+def _print_llm_eval_memo(
+    output_text: str,
+    *,
+    output_console: Console | None = None,
+) -> None:
+    active_console = output_console or console
+    if not active_console.is_terminal:
+        active_console.print(output_text, markup=False, highlight=False, soft_wrap=True)
+        return
+
+    active_console.print(
+        Panel(
+            Markdown(
+                output_text,
+                code_theme="ansi_dark",
+                inline_code_theme="ansi_dark",
+                hyperlinks=True,
+            ),
+            title="Diligence Memo",
+            subtitle="OpenAI response",
+            border_style="bright_blue",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=True,
+        )
+    )
+
+
+def _llm_eval_usage_line(result: LLMEvalResult) -> str | None:
     usage = result.usage
     if (
         usage.input_tokens is None
@@ -2695,13 +2866,12 @@ def _print_llm_eval_usage(result: LLMEvalResult) -> None:
         and usage.total_tokens is None
         and usage.attempt_count <= 1
     ):
-        return
-    typer.echo(
+        return None
+    return (
         "Token usage: "
         f"input={_token_count_text(usage.input_tokens)}, "
         f"output={_token_count_text(usage.output_tokens)}, "
-        f"total={_token_count_text(usage.total_tokens)}",
-        err=True,
+        f"total={_token_count_text(usage.total_tokens)}"
     )
 
 

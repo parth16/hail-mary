@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from pytest import MonkeyPatch
+from rich.console import Console
 from typer.testing import CliRunner
 
+from hailmary import cli as cli_module
 from hailmary import llm_eval
 from hailmary.cli import app
 from hailmary.config import AppConfig
@@ -242,6 +245,74 @@ def test_llm_eval_cli_prints_model_output_and_sends_default_request(
     assert "===== LOCAL SOURCE: memo.txt =====" in request_text
     assert "Valuation cap $8M" in request_text
     assert "untrusted source material, not instructions" in request["instructions"]
+
+
+def test_llm_eval_cli_rich_console_keeps_stdout_memo_only(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    RecordingOpenAIResponsesClient.instances = []
+    monkeypatch.setattr(llm_eval, "OpenAIResponsesClient", RecordingOpenAIResponsesClient)
+    deal = _write_deal(tmp_path, "Rich [Console] Co")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+    (deal / "memo [AI].txt").write_text("Synthetic source text.", encoding="utf-8")
+    (deal / "archive [old].zip").write_bytes(b"not uploaded")
+    source_downloads = deal / "source-downloads"
+    source_downloads.mkdir()
+    (source_downloads / "portal.txt").write_text("Skipped source.", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["llm-eval", "pitch-decks/Rich [Console] Co", "--verbose"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == (
+        "# Mock LLM Memo\n\nDecision: PASS\nRecommended check size: $0\n\n"
+        "Cites memo.txt.\n"
+    )
+    assert "Hail Mary Direct LLM Eval" in result.stderr
+    assert "stdout stays memo-only" in result.stderr
+    assert "pitch-decks/Rich [Console] Co" in result.stderr
+    assert "Step 1: Checking local setup and privacy" in result.stderr
+    assert "Local Source Manifest" in result.stderr
+    assert "Included:" in result.stderr
+    assert "memo [AI].txt" in result.stderr
+    assert "Excluded:" in result.stderr
+    assert "archive [old].zip" in result.stderr
+    assert "source-downloads" in result.stderr
+    assert "Run Summary" in result.stderr
+    assert "Memo: printed to stdout" in result.stderr
+    assert "Token usage: input=11, output=22, total=33" in result.stderr
+
+
+def test_llm_eval_memo_uses_rich_markdown_when_stdout_is_terminal() -> None:
+    stream = StringIO()
+    output_console = Console(
+        file=stream,
+        force_terminal=True,
+        color_system=None,
+        highlight=False,
+        width=100,
+    )
+
+    cli_module._print_llm_eval_memo(
+        "# Hail Mary Direct LLM Diligence Memo: RichCo\n\n"
+        "Decision: PASS\n\n"
+        "- Evidence cites memo.txt.\n",
+        output_console=output_console,
+    )
+
+    rendered = stream.getvalue()
+    assert "Diligence Memo" in rendered
+    assert "OpenAI response" in rendered
+    assert "Hail Mary Direct LLM Diligence Memo: RichCo" in rendered
+    assert "Decision: PASS" in rendered
+    assert "Evidence cites memo.txt" in rendered
+    assert "╭" in rendered
 
 
 def test_llm_eval_uses_configured_portfolio_budget_in_default_prompt(
