@@ -282,6 +282,8 @@ def _llm_eval_progress_label(stage: str) -> str:
         return "OpenAI response is queued..."
     if stage == "OpenAI background response in_progress":
         return "OpenAI response is in progress..."
+    if stage.startswith("OpenAI response hit max output limit; retrying"):
+        return "OpenAI hit the output-token limit; retrying with more room..."
     if stage == "OpenAI response validation":
         return "Validating the model memo..."
     if stage == "token usage collection":
@@ -2600,12 +2602,12 @@ def llm_eval_command(
         ),
     ] = False,
     max_output_tokens: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--max-output-tokens",
             help="Maximum OpenAI output tokens for the memo.",
         ),
-    ] = DEFAULT_MAX_OUTPUT_TOKENS,
+    ] = None,
     background_mode: Annotated[
         bool,
         typer.Option(
@@ -2636,6 +2638,9 @@ def llm_eval_command(
     config = _config_from_options(None)
     try:
         prompt_text = load_prompt_file(prompt_file) if prompt_file is not None else None
+        resolved_max_output_tokens = (
+            DEFAULT_MAX_OUTPUT_TOKENS if max_output_tokens is None else max_output_tokens
+        )
         with _LLMEvalProgress(stderr_console) as progress:
             result = run_llm_eval(
                 deal_folder_or_deal_id,
@@ -2644,7 +2649,8 @@ def llm_eval_command(
                 reasoning_effort=reasoning_effort,
                 allow_web_search=web_search,
                 no_web_search=no_web_search,
-                max_output_tokens=max_output_tokens,
+                max_output_tokens=resolved_max_output_tokens,
+                auto_retry_output_tokens=max_output_tokens is None,
                 background_mode=background_mode,
                 prompt_text=prompt_text,
                 stage_callback=progress.update,
@@ -2687,6 +2693,7 @@ def _print_llm_eval_usage(result: LLMEvalResult) -> None:
         usage.input_tokens is None
         and usage.output_tokens is None
         and usage.total_tokens is None
+        and usage.attempt_count <= 1
     ):
         return
     typer.echo(

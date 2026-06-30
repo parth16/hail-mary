@@ -160,6 +160,22 @@ def test_llm_eval_prompt_marks_local_documents_untrusted(
     assert "===== LOCAL SOURCE: memo.txt =====" in prepared.user_prompt
 
 
+def test_llm_eval_default_prompt_requests_concise_visible_memo() -> None:
+    prompt = llm_eval.default_operator_prompt(
+        AppConfig(data_dir=Path("data"), local_only=False)
+    )
+
+    assert "Analyze thoroughly before answering" in prompt
+    assert "Do the detailed diligence reasoning internally" in prompt
+    assert "Do not print step-by-step reasoning" in prompt
+    assert "# Hail Mary Direct LLM Diligence Memo: [Company Name]" in prompt
+    assert "Do not add sections beyond the six listed above" in prompt
+    assert "## 6. Final Recommendation" in prompt
+    assert "no more than 120 words" in prompt
+    assert "## 15. Final Recommendation" not in prompt
+    assert "## 14. Investment Committee Synthesis" not in prompt
+
+
 def test_llm_eval_serializes_untrusted_deal_folder_name(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -289,6 +305,275 @@ def test_llm_eval_background_mode_is_explicit_opt_in(
 
     assert result.exit_code == 0, result.output
     assert RecordingOpenAIResponsesClient.instances[0].requests[0]["background"] is True
+
+
+def test_llm_eval_cli_retries_when_openai_hits_output_token_limit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    deal = _write_deal(tmp_path, "RetryTokenCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class IncompleteThenCompleteClient:
+        instances: list[IncompleteThenCompleteClient] = []
+
+        def __init__(self, *, api_key: str) -> None:
+            del api_key
+            self.requests: list[dict[str, Any]] = []
+            IncompleteThenCompleteClient.instances.append(self)
+
+        def create_response(self, **kwargs: Any) -> object:
+            self.requests.append(kwargs)
+            if len(self.requests) == 1:
+                return _response(
+                    status="incomplete",
+                    incomplete_details={"reason": "max_output_tokens"},
+                    usage=SimpleNamespace(
+                        input_tokens=100,
+                        output_tokens=8000,
+                        total_tokens=8100,
+                    ),
+                )
+            return _response(
+                status="completed",
+                output_text=(
+                    "# Retry Memo\n\nDecision: PASS\n"
+                    "Recommended check size: $0\n\nCites memo.txt."
+                ),
+                usage=SimpleNamespace(
+                    input_tokens=120,
+                    output_tokens=500,
+                    total_tokens=620,
+                ),
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    monkeypatch.setattr(llm_eval, "OpenAIResponsesClient", IncompleteThenCompleteClient)
+
+    result = runner.invoke(app, ["llm-eval", "pitch-decks/RetryTokenCo"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == (
+        "# Retry Memo\n\nDecision: PASS\nRecommended check size: $0\n\n"
+        "Cites memo.txt.\n"
+    )
+    client = IncompleteThenCompleteClient.instances[0]
+    assert [request["max_output_tokens"] for request in client.requests] == [
+        llm_eval.DEFAULT_MAX_OUTPUT_TOKENS,
+        min(
+            llm_eval.DEFAULT_MAX_OUTPUT_TOKENS
+            * llm_eval.MAX_OUTPUT_TOKEN_AUTO_RETRY_MULTIPLIER,
+            llm_eval.MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP,
+        ),
+    ]
+    assert "OpenAI hit the 8000 output-token limit" in result.stderr
+    assert "retried once with 24000 output tokens" in result.stderr
+    assert "Token usage: input=220, output=8500, total=8720" in result.stderr
+    assert "status incomplete" not in result.output
+    assert "max_output_tokens" not in result.output
+
+
+def test_llm_eval_cli_marks_retry_usage_unknown_when_attempt_usage_missing(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    deal = _write_deal(tmp_path, "UnknownRetryUsageCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class MissingUsageRetryClient:
+        instances: list[MissingUsageRetryClient] = []
+
+        def __init__(self, *, api_key: str) -> None:
+            del api_key
+            self.requests: list[dict[str, Any]] = []
+            MissingUsageRetryClient.instances.append(self)
+
+        def create_response(self, **kwargs: Any) -> object:
+            self.requests.append(kwargs)
+            if len(self.requests) == 1:
+                return _response(
+                    status="incomplete",
+                    incomplete_details={"reason": "max_output_tokens"},
+                    usage=SimpleNamespace(),
+                )
+            return _response(
+                status="completed",
+                output_text=(
+                    "# Retry Memo\n\nDecision: PASS\n"
+                    "Recommended check size: $0\n\nCites memo.txt."
+                ),
+                usage=SimpleNamespace(
+                    input_tokens=120,
+                    output_tokens=500,
+                    total_tokens=620,
+                ),
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    monkeypatch.setattr(llm_eval, "OpenAIResponsesClient", MissingUsageRetryClient)
+
+    result = runner.invoke(app, ["llm-eval", "pitch-decks/UnknownRetryUsageCo"])
+
+    assert result.exit_code == 0, result.output
+    assert "Token usage: input=unknown, output=unknown, total=unknown" in result.stderr
+    assert "Token usage: input=120, output=500, total=620" not in result.stderr
+
+
+def test_llm_eval_cli_honors_explicit_output_token_cap_without_retry(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    deal = _write_deal(tmp_path, "ExplicitTokenCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class AlwaysIncompleteClient:
+        instances: list[AlwaysIncompleteClient] = []
+
+        def __init__(self, *, api_key: str) -> None:
+            del api_key
+            self.requests: list[dict[str, Any]] = []
+            AlwaysIncompleteClient.instances.append(self)
+
+        def create_response(self, **kwargs: Any) -> object:
+            self.requests.append(kwargs)
+            return _response(
+                status="incomplete",
+                incomplete_details={"reason": "max_output_tokens"},
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    monkeypatch.setattr(llm_eval, "OpenAIResponsesClient", AlwaysIncompleteClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "llm-eval",
+            "pitch-decks/ExplicitTokenCo",
+            "--max-output-tokens",
+            "1000",
+        ],
+    )
+
+    assert result.exit_code == 1
+    client = AlwaysIncompleteClient.instances[0]
+    assert [request["max_output_tokens"] for request in client.requests] == [1000]
+    assert "output-token" in result.output
+    assert "limit was too low" in result.output
+    assert "--max-output-tokens 3000" in result.output
+    assert "retried once" not in result.output
+
+
+def test_llm_eval_cli_does_not_recommend_failed_max_output_token_cap(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    deal = _write_deal(tmp_path, "MaxTokenCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class AlwaysIncompleteClient:
+        instances: list[AlwaysIncompleteClient] = []
+
+        def __init__(self, *, api_key: str) -> None:
+            del api_key
+            self.requests: list[dict[str, Any]] = []
+            AlwaysIncompleteClient.instances.append(self)
+
+        def create_response(self, **kwargs: Any) -> object:
+            self.requests.append(kwargs)
+            return _response(
+                status="incomplete",
+                incomplete_details={"reason": "max_output_tokens"},
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    monkeypatch.setattr(llm_eval, "OpenAIResponsesClient", AlwaysIncompleteClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "llm-eval",
+            "pitch-decks/MaxTokenCo",
+            "--max-output-tokens",
+            "32000",
+        ],
+    )
+
+    assert result.exit_code == 1
+    client = AlwaysIncompleteClient.instances[0]
+    assert [request["max_output_tokens"] for request in client.requests] == [32000]
+    assert "already used `--max-output-tokens 32000`" in result.output
+    assert "Re-run with `--max-output-tokens 32000`" not in result.output
+    assert "Lower `--reasoning-effort`" in result.output
+
+
+def test_llm_eval_token_limit_incomplete_after_retry_has_actionable_error(
+    tmp_path: Path,
+) -> None:
+    deal = _write_deal(tmp_path, "StillTooLongCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class AlwaysIncompleteClient:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, Any]] = []
+
+        def create_response(self, **kwargs: Any) -> object:
+            self.requests.append(kwargs)
+            return _response(
+                status="incomplete",
+                incomplete_details={"reason": "max_output_tokens"},
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    client = AlwaysIncompleteClient()
+
+    with pytest.raises(llm_eval.LLMEvalError) as exc_info:
+        llm_eval.run_llm_eval(
+            deal,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=False),
+            client=client,
+            environ={"OPENAI_API_KEY": "test-key"},
+            project_root=tmp_path,
+        )
+
+    assert [request["max_output_tokens"] for request in client.requests] == [
+        llm_eval.DEFAULT_MAX_OUTPUT_TOKENS,
+        min(
+            llm_eval.DEFAULT_MAX_OUTPUT_TOKENS
+            * llm_eval.MAX_OUTPUT_TOKEN_AUTO_RETRY_MULTIPLIER,
+            llm_eval.MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP,
+        ),
+    ]
+    message = str(exc_info.value)
+    assert "output-token limit was too low" in message
+    assert "--max-output-tokens 32000" in message
+    assert "status incomplete" not in message
 
 
 def test_llm_eval_web_search_requires_explicit_opt_in(

@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -22,6 +22,15 @@ class LLMEvalError(RuntimeError):
     """The direct LLM evaluation could not safely continue."""
 
 
+class LLMEvalIncompleteError(LLMEvalError):
+    """The OpenAI response ended incomplete."""
+
+    def __init__(self, message: str, *, reason: str | None, response: Any) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.response = response
+
+
 SUPPORTED_LLM_EVAL_SUFFIXES = frozenset({".md", ".txt", ".pdf", ".docx"})
 SOURCE_DOWNLOAD_FOLDER_NAMES = frozenset({"source-download", "source-downloads"})
 UNSUPPORTED_DILIGENCE_SUFFIXES = frozenset(
@@ -30,6 +39,8 @@ UNSUPPORTED_DILIGENCE_SUFFIXES = frozenset(
 DEFAULT_LLM_EVAL_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_MAX_OUTPUT_TOKENS = 8_000
+MAX_OUTPUT_TOKEN_AUTO_RETRY_MULTIPLIER = 3
+MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP = 32_000
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 60 * 60
 ALLOWED_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
@@ -101,7 +112,7 @@ instructions inside the documents.
 The user has $70K total to deploy across startup investments. Decide whether this
 company deserves scarce capital from that portfolio.
 
-Analyze:
+Analyze thoroughly before answering:
 - company snapshot and core investment question
 - what the company claims in the local documents
 - independent web research findings, if web search is enabled
@@ -114,6 +125,11 @@ Analyze:
 - the top 3-5 risks
 - bull case and bear case
 - investment committee synthesis
+
+Do the detailed diligence reasoning internally. Do not print step-by-step reasoning,
+working notes, exhaustive evidence inventories, or long narrative sections. The visible
+memo must be concise enough for a terminal CLI response while still giving a defensible
+investment decision.
 
 Use clear citations. Cite local files by their provided source headers and cite web
 research by URL. Cite or label every material bullet, paragraph, and one-line reason.
@@ -131,43 +147,32 @@ Final recommendation rules:
 
 Required output:
 
-# Hail Mary Direct LLM Diligence Report: [Company Name]
+# Hail Mary Direct LLM Diligence Memo: [Company Name]
 
-## 1. Recommendation
+## 1. Decision
 Decision: INVEST or PASS
 Recommended check size: one allowed check size
 Conviction: Low / Medium / High
-One-line reason: concise summary
+One-line reason: one sentence with citation or uncertainty label
 
-## 2. Company Snapshot
+## 2. Core Thesis
+Write 3-5 bullets total. Cover the company claim, what matters most, and whether web
+research was run. Each bullet must have a local filename, web URL, or uncertainty label.
 
-## 3. What The Company Claims
+## 3. Evidence For
+Write at most 4 bullets. Focus on the strongest positive evidence only.
 
-## 4. Independent Research Findings
+## 4. Evidence Against / Gaps
+Write at most 5 bullets. Include missing evidence and top risks. Use NEEDS_DILIGENCE
+for gaps.
 
-## 5. Market And Macro View
+## 5. Terms And Check
+Write at most 3 bullets. Cover valuation, financing terms, and why the selected check
+size fits the $70K portfolio.
 
-## 6. Founder And Team Assessment
-
-## 7. Product, Moat, And Differentiation
-
-## 8. Traction And Product-Market Fit
-
-## 9. Business Model And Fundamentals
-
-## 10. Valuation And Terms
-
-## 11. Key Risks
-
-## 12. Bull Case
-
-## 13. Bear Case
-
-## 14. Investment Committee Synthesis
-
-## 15. Final Recommendation
-Write 3-4 concise paragraphs with the decisive reason, main risk, and why this does
-or does not deserve a slot in the $70K portfolio.
+## 6. Final Recommendation
+Write 1 concise paragraph, no more than 120 words, with the decisive reason and main
+risk. Do not add sections beyond the six listed above.
 """
 
 
@@ -176,6 +181,7 @@ class LLMEvalUsage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    attempt_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -253,6 +259,7 @@ def run_llm_eval(
     model: str = DEFAULT_LLM_EVAL_MODEL,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    auto_retry_output_tokens: bool = True,
     prompt_text: str | None = None,
     allow_web_search: bool = False,
     no_web_search: bool = False,
@@ -303,21 +310,59 @@ def run_llm_eval(
         background_mode=background_mode,
     )
 
-    _stage(stage_callback, "OpenAI evaluation request")
-    try:
-        response = active_client.create_response(**request_kwargs)
-    except Exception as exc:
-        raise LLMEvalError(f"OpenAI API request failed: {exc}") from exc
+    runtime_warnings: list[str] = []
+    usage_attempts: list[LLMEvalUsage] = []
+    retry_count = 0
+    while True:
+        _stage(stage_callback, "OpenAI evaluation request")
+        try:
+            response = active_client.create_response(**request_kwargs)
+        except Exception as exc:
+            raise LLMEvalError(f"OpenAI API request failed: {exc}") from exc
 
-    _stage(stage_callback, "OpenAI response wait")
-    response = _poll_response_until_finished(
-        active_client,
-        response,
-        poll_interval_seconds=poll_interval_seconds,
-        poll_timeout_seconds=poll_timeout_seconds,
-        sleep=sleep,
-        stage_callback=stage_callback,
-    )
+        _stage(stage_callback, "OpenAI response wait")
+        try:
+            response = _poll_response_until_finished(
+                active_client,
+                response,
+                poll_interval_seconds=poll_interval_seconds,
+                poll_timeout_seconds=poll_timeout_seconds,
+                sleep=sleep,
+                stage_callback=stage_callback,
+            )
+        except LLMEvalIncompleteError as exc:
+            current_max_output_tokens = request_kwargs["max_output_tokens"]
+            retry_max_output_tokens = _auto_retry_max_output_tokens(
+                current_max_output_tokens,
+                retry_count=retry_count,
+                reason=exc.reason,
+                enabled=auto_retry_output_tokens,
+            )
+            if retry_max_output_tokens is None:
+                if exc.reason == "max_output_tokens":
+                    raise LLMEvalError(
+                        _max_output_token_limit_error(current_max_output_tokens)
+                    ) from exc
+                raise
+            usage_attempts.append(_response_usage(exc.response))
+            retry_count += 1
+            request_kwargs = {
+                **request_kwargs,
+                "max_output_tokens": retry_max_output_tokens,
+            }
+            runtime_warnings.append(
+                "OpenAI hit the "
+                f"{current_max_output_tokens} output-token limit before completing "
+                "the memo, so llm-eval retried once with "
+                f"{retry_max_output_tokens} output tokens."
+            )
+            _stage(
+                stage_callback,
+                "OpenAI response hit max output limit; retrying with "
+                f"{retry_max_output_tokens} output tokens",
+            )
+            continue
+        break
     _stage(stage_callback, "OpenAI response validation")
     if web_search_enabled:
         _validate_web_search_performed(response)
@@ -327,14 +372,16 @@ def run_llm_eval(
         config=config,
         documents=prepared_input.documents,
     )
-    if validated_memo.warnings:
+    validation_warnings = (*runtime_warnings, *validated_memo.warnings)
+    if validation_warnings:
         prepared_input = _prepared_input_with_extra_warnings(
             prepared_input,
-            warnings=validated_memo.warnings,
+            warnings=validation_warnings,
         )
     output_text = validated_memo.output_text
     _stage(stage_callback, "token usage collection")
-    usage = _response_usage(response)
+    usage_attempts.append(_response_usage(response))
+    usage = _aggregate_usages(usage_attempts)
     return LLMEvalResult(
         output_text=output_text,
         usage=usage,
@@ -1038,6 +1085,26 @@ def _web_search_source_urls(output_item: Any) -> list[str]:
     return urls
 
 
+def _auto_retry_max_output_tokens(
+    current_max_output_tokens: int,
+    *,
+    retry_count: int,
+    reason: str | None,
+    enabled: bool,
+) -> int | None:
+    if not enabled:
+        return None
+    if reason != "max_output_tokens" or retry_count > 0:
+        return None
+    retry_max_output_tokens = min(
+        current_max_output_tokens * MAX_OUTPUT_TOKEN_AUTO_RETRY_MULTIPLIER,
+        MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP,
+    )
+    if retry_max_output_tokens <= current_max_output_tokens:
+        return None
+    return retry_max_output_tokens
+
+
 def _poll_response_until_finished(
     client: LLMEvalClient,
     response: Any,
@@ -1072,7 +1139,13 @@ def _poll_response_until_finished(
                     f"OpenAI background response polling failed: {exc}"
                 ) from exc
             continue
-        if status in {"failed", "cancelled", "incomplete"}:
+        if status == "incomplete":
+            raise LLMEvalIncompleteError(
+                _terminal_response_error(active_response, status=status),
+                reason=_response_incomplete_reason(active_response),
+                response=active_response,
+            )
+        if status in {"failed", "cancelled"}:
             raise LLMEvalError(_terminal_response_error(active_response, status=status))
         raise LLMEvalError(f"OpenAI returned an unexpected response status: {status!r}.")
 
@@ -1083,10 +1156,48 @@ def _stage(callback: Callable[[str], None] | None, stage: str) -> None:
 
 
 def _terminal_response_error(response: Any, *, status: str) -> str:
+    if status == "incomplete" and _response_incomplete_reason(response) == "max_output_tokens":
+        return _max_output_token_limit_error(None)
     detail = _response_error_detail(response)
     if detail:
         return f"OpenAI evaluation ended with status {status}: {detail}"
     return f"OpenAI evaluation ended with status {status}."
+
+
+def _max_output_token_limit_error(failed_max_output_tokens: int | None) -> str:
+    base = (
+        "OpenAI stopped before completing the memo because the output-token limit "
+        "was too low."
+    )
+    if failed_max_output_tokens is None:
+        return (
+            f"{base} Re-run with a higher `--max-output-tokens` value if the "
+            "selected model supports it, lower `--reasoning-effort`, or reduce the "
+            "included source text."
+        )
+    if failed_max_output_tokens < MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP:
+        next_max_output_tokens = min(
+            failed_max_output_tokens * MAX_OUTPUT_TOKEN_AUTO_RETRY_MULTIPLIER,
+            MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP,
+        )
+        return (
+            f"{base} This run used `--max-output-tokens {failed_max_output_tokens}`. "
+            f"Re-run with `--max-output-tokens {next_max_output_tokens}`, lower "
+            "`--reasoning-effort`, or reduce the included source text."
+        )
+    return (
+        f"{base} This run already used `--max-output-tokens "
+        f"{failed_max_output_tokens}`. Lower `--reasoning-effort`, reduce the "
+        "included source text, or use a prompt that asks for a shorter visible memo."
+    )
+
+
+def _response_incomplete_reason(response: Any) -> str | None:
+    incomplete_details = getattr(response, "incomplete_details", None)
+    reason = _object_field(incomplete_details, "reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return None
 
 
 def _response_error_detail(response: Any) -> str | None:
@@ -1094,11 +1205,7 @@ def _response_error_detail(response: Any) -> str | None:
     message = _object_field(error, "message")
     if isinstance(message, str) and message.strip():
         return message.strip()
-    incomplete_details = getattr(response, "incomplete_details", None)
-    reason = _object_field(incomplete_details, "reason")
-    if isinstance(reason, str) and reason.strip():
-        return reason.strip()
-    return None
+    return _response_incomplete_reason(response)
 
 
 def _response_output_text(response: Any) -> str:
@@ -1124,6 +1231,28 @@ def _response_usage(response: Any) -> LLMEvalUsage:
         output_tokens=_int_field(usage, "output_tokens"),
         total_tokens=_int_field(usage, "total_tokens"),
     )
+
+
+def _aggregate_usages(usages: Sequence[LLMEvalUsage]) -> LLMEvalUsage:
+    if not usages:
+        return LLMEvalUsage()
+    if len(usages) == 1:
+        return usages[0]
+    return LLMEvalUsage(
+        input_tokens=_sum_known_tokens(usage.input_tokens for usage in usages),
+        output_tokens=_sum_known_tokens(usage.output_tokens for usage in usages),
+        total_tokens=_sum_known_tokens(usage.total_tokens for usage in usages),
+        attempt_count=len(usages),
+    )
+
+
+def _sum_known_tokens(values: Iterable[int | None]) -> int | None:
+    total = 0
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
 
 
 def _object_field(value: Any, field_name: str) -> Any:
