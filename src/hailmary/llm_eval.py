@@ -60,6 +60,7 @@ _WEB_SEARCH_STATUS_LINE_RE = re.compile(
     r")\b"
 )
 _WEB_URL_RE = re.compile(r"https://[^\s)>\]]+")
+_LIST_ITEM_RE = re.compile(r"^(\s*(?:[-*+]\s+|\d+[.)]\s+))(.*\S)(\s*)$")
 
 DIRECT_LLM_EVAL_INSTRUCTIONS = """\
 You are running Hail Mary direct LLM diligence evaluation.
@@ -204,6 +205,12 @@ class LLMEvalResult:
     web_search_enabled: bool
 
 
+@dataclass(frozen=True)
+class LLMEvalValidatedMemo:
+    output_text: str
+    warnings: tuple[str, ...]
+
+
 class LLMEvalClient(Protocol):
     def create_response(self, **kwargs: Any) -> Any:
         """Create a Responses API request."""
@@ -309,16 +316,17 @@ def run_llm_eval(
     if web_search_enabled:
         _validate_web_search_performed(response)
     output_text = _response_output_text(response)
-    memo_warnings = _validate_memo_output(
+    validated_memo = _validate_memo_output(
         output_text,
         config=config,
         documents=prepared_input.documents,
     )
-    if memo_warnings:
+    if validated_memo.warnings:
         prepared_input = _prepared_input_with_extra_warnings(
             prepared_input,
-            warnings=memo_warnings,
+            warnings=validated_memo.warnings,
         )
+    output_text = validated_memo.output_text
     _stage(stage_callback, "token usage collection")
     usage = _response_usage(response)
     return LLMEvalResult(
@@ -786,7 +794,7 @@ def _validate_memo_output(
     *,
     config: AppConfig,
     documents: Sequence[LLMEvalDocument],
-) -> tuple[str, ...]:
+) -> LLMEvalValidatedMemo:
     decision_lines = _recommendation_field_lines(output_text, _DECISION_LINE_RE)
     if not decision_lines:
         raise LLMEvalError(
@@ -846,7 +854,7 @@ def _validate_memo_output(
     if decision == "INVEST" and check_size == "$0":
         raise LLMEvalError("OpenAI returned INVEST with a $0 check size.")
 
-    return _claim_lineage_warnings(output_text, documents=documents)
+    return _guard_claim_lineage(output_text, documents=documents)
 
 
 def _prepared_input_with_extra_warnings(
@@ -864,36 +872,53 @@ def _prepared_input_with_extra_warnings(
     )
 
 
-def _claim_lineage_warnings(
+def _guard_claim_lineage(
     output_text: str,
     *,
     documents: Sequence[LLMEvalDocument],
-) -> tuple[str, ...]:
+) -> LLMEvalValidatedMemo:
     source_names = {
         document.relative_path.as_posix()
         for document in documents
         if document.relative_path.as_posix()
     }
     source_header_names = {_source_header_name(source_name) for source_name in source_names}
-    unsupported_lines = [
-        (line_number, line.strip())
-        for line_number, line in enumerate(output_text.splitlines(), start=1)
-        if _line_needs_lineage(line)
-        and not _line_has_lineage(
+    guarded_lines: list[str] = []
+    unsupported_line_numbers: list[int] = []
+    for line_number, line in enumerate(output_text.splitlines(), start=1):
+        if _line_needs_lineage(line) and not _line_has_lineage(
             line,
             source_names=source_names,
             source_header_names=source_header_names,
-        )
-    ]
-    if not unsupported_lines:
-        return ()
-    line_number, _ = unsupported_lines[0]
-    return (
-        "OpenAI returned memo text with "
-        f"{len(unsupported_lines)} material line(s) that lack a local filename citation, "
-        "web URL citation, or required uncertainty label. First unsupported line number: "
-        f"{line_number}. Treat unsupported memo claims as NEEDS_DILIGENCE.",
+        ):
+            unsupported_line_numbers.append(line_number)
+            guarded_lines.append(_line_with_needs_diligence_label(line))
+            continue
+        guarded_lines.append(line)
+    if not unsupported_line_numbers:
+        return LLMEvalValidatedMemo(output_text=output_text, warnings=())
+    first_line_number = unsupported_line_numbers[0]
+    guarded_output_text = "\n".join(guarded_lines).strip()
+    return LLMEvalValidatedMemo(
+        output_text=guarded_output_text,
+        warnings=(
+            "OpenAI returned memo text with "
+            f"{len(unsupported_line_numbers)} material line(s) that lacked a local "
+            "filename citation, web URL citation, or required uncertainty label. "
+            f"First unsupported line number: {first_line_number}. Those memo line(s) "
+            "were labeled NEEDS_DILIGENCE before printing.",
+        ),
     )
+
+
+def _line_with_needs_diligence_label(line: str) -> str:
+    list_match = _LIST_ITEM_RE.match(line)
+    if list_match is not None:
+        marker, content, trailing = list_match.groups()
+        return f"{marker}NEEDS_DILIGENCE: {content}{trailing}"
+    stripped = line.lstrip()
+    indentation = line[: len(line) - len(stripped)]
+    return f"{indentation}NEEDS_DILIGENCE: {stripped}"
 
 
 def _recommendation_field_lines(

@@ -756,9 +756,11 @@ def test_llm_eval_warns_but_prints_when_some_material_lines_lack_lineage(
     result = runner.invoke(app, ["llm-eval", "pitch-decks/UncitedMemoCo"])
 
     assert result.exit_code == 0, result.output
-    assert "The company has real revenue." in result.stdout
+    assert "NEEDS_DILIGENCE: The company has real revenue." in result.stdout
+    assert "\nThe company has real revenue." not in result.stdout
     assert "Warning: OpenAI returned memo text" in result.stderr
     assert "First unsupported line number" in result.stderr
+    assert "were labeled NEEDS_DILIGENCE before printing" in result.stderr
     assert "NEEDS_DILIGENCE" in result.stderr
     assert "real revenue" not in result.stderr
 
