@@ -205,6 +205,13 @@ def test_llm_eval_cli_prints_model_output_and_sends_default_request(
 
     assert result.exit_code == 0, result.output
     assert "# Mock LLM Memo" in result.output
+    assert result.stdout == (
+        "# Mock LLM Memo\n\nDecision: PASS\nRecommended check size: $0\n\n"
+        "Cites memo.txt.\n"
+    )
+    assert "Reading local documents..." in result.stderr
+    assert "Starting the OpenAI evaluation..." in result.stderr
+    assert "Token usage:" in result.stderr
     assert RecordingOpenAIResponsesClient.instances
     client = RecordingOpenAIResponsesClient.instances[0]
     assert client.api_key == "test-key"
@@ -442,6 +449,7 @@ def test_llm_eval_polls_background_response_until_completed(tmp_path: Path) -> N
             return responses.pop(0)
 
     client = PollingClient()
+    stages: list[str] = []
     result = llm_eval.run_llm_eval(
         deal,
         config=AppConfig(data_dir=tmp_path / "data", local_only=False),
@@ -449,10 +457,15 @@ def test_llm_eval_polls_background_response_until_completed(tmp_path: Path) -> N
         environ={"OPENAI_API_KEY": "test-key"},
         project_root=tmp_path,
         poll_interval_seconds=0,
+        stage_callback=stages.append,
     )
 
     assert result.output_text.startswith("Decision: PASS")
     assert client.retrieve_calls == ["resp_poll", "resp_poll"]
+    assert "OpenAI response wait" in stages
+    assert "OpenAI background response queued" in stages
+    assert "OpenAI background response in_progress" in stages
+    assert stages[-1] == "token usage collection"
 
 
 def test_llm_eval_rejects_pitch_decks_root(tmp_path: Path) -> None:
