@@ -257,6 +257,7 @@ def run_llm_eval(
     model: str = DEFAULT_LLM_EVAL_MODEL,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    auto_retry_output_tokens: bool = True,
     prompt_text: str | None = None,
     allow_web_search: bool = False,
     no_web_search: bool = False,
@@ -332,6 +333,7 @@ def run_llm_eval(
                 current_max_output_tokens,
                 retry_count=retry_count,
                 reason=exc.reason,
+                enabled=auto_retry_output_tokens,
             )
             if retry_max_output_tokens is None:
                 raise
@@ -1079,7 +1081,10 @@ def _auto_retry_max_output_tokens(
     *,
     retry_count: int,
     reason: str | None,
+    enabled: bool,
 ) -> int | None:
+    if not enabled:
+        return None
     if reason != "max_output_tokens" or retry_count > 0:
         return None
     retry_max_output_tokens = min(
