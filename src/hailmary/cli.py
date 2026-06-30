@@ -2519,7 +2519,20 @@ def llm_eval_command(
         bool,
         typer.Option(
             "--no-web-search",
-            help="Do not attach OpenAI web search, even when web research is configured.",
+            help=(
+                "Do not attach OpenAI web search, even when --web-search and web "
+                "research config are enabled."
+            ),
+        ),
+    ] = False,
+    web_search: Annotated[
+        bool,
+        typer.Option(
+            "--web-search",
+            help=(
+                "Explicitly allow OpenAI hosted web search in the same request as "
+                "local deal text. Also requires web research to be enabled in config."
+            ),
         ),
     ] = False,
     max_output_tokens: Annotated[
@@ -2564,6 +2577,7 @@ def llm_eval_command(
             config=config,
             model=model,
             reasoning_effort=reasoning_effort,
+            allow_web_search=web_search,
             no_web_search=no_web_search,
             max_output_tokens=max_output_tokens,
             background_mode=background_mode,

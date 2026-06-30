@@ -51,6 +51,7 @@ def _response(
     *,
     status: str,
     output_text: str = "",
+    output: list[object] | None = None,
     usage: object | None = None,
     response_id: str = "resp_test",
     error: object | None = None,
@@ -61,6 +62,7 @@ def _response(
         status=status,
         output_text=output_text
         or "Decision: PASS\nRecommended check size: $0\n\nCites memo.txt.",
+        output=output or [],
         usage=usage
         or SimpleNamespace(input_tokens=11, output_tokens=22, total_tokens=33),
         error=error,
@@ -234,6 +236,113 @@ def test_llm_eval_background_mode_is_explicit_opt_in(
 
     assert result.exit_code == 0, result.output
     assert RecordingOpenAIResponsesClient.instances[0].requests[0]["background"] is True
+
+
+def test_llm_eval_web_search_requires_explicit_opt_in(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
+    monkeypatch.setenv("HAILMARY_ENABLE_WEB_RESEARCH", "true")
+    RecordingOpenAIResponsesClient.instances = []
+    monkeypatch.setattr(llm_eval, "OpenAIResponsesClient", RecordingOpenAIResponsesClient)
+    deal = _write_deal(tmp_path, "WebConsentCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    result = runner.invoke(app, ["llm-eval", "pitch-decks/WebConsentCo"])
+
+    assert result.exit_code == 0, result.output
+    request = RecordingOpenAIResponsesClient.instances[0].requests[0]
+    assert "tools" not in request
+    assert "tool_choice" not in request
+
+
+def test_llm_eval_web_search_opt_in_requires_tool_call(
+    tmp_path: Path,
+) -> None:
+    deal = _write_deal(tmp_path, "WebToolCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class NoWebCallClient:
+        def create_response(self, **kwargs: Any) -> object:
+            self.request = kwargs
+            return _response(
+                status="completed",
+                output_text="Decision: PASS\nRecommended check size: $0\n\nCites memo.txt.",
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    client = NoWebCallClient()
+    with pytest.raises(llm_eval.LLMEvalError, match="did not include a web search"):
+        llm_eval.run_llm_eval(
+            deal,
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                local_only=False,
+                enable_web_research=True,
+            ),
+            allow_web_search=True,
+            client=client,
+            environ={"OPENAI_API_KEY": "test-key"},
+            project_root=tmp_path,
+        )
+    assert client.request["tools"] == [
+        {"type": "web_search", "search_context_size": "high"}
+    ]
+    assert client.request["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [{"type": "web_search"}],
+    }
+    assert client.request["include"] == ["web_search_call.action.sources"]
+
+
+def test_llm_eval_web_search_opt_in_accepts_tool_call(
+    tmp_path: Path,
+) -> None:
+    deal = _write_deal(tmp_path, "WebOkCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class WebCallClient:
+        def create_response(self, **_: Any) -> object:
+            return _response(
+                status="completed",
+                output_text=(
+                    "Decision: PASS\nRecommended check size: $0\n\n"
+                    "Cites memo.txt and https://example.com/research."
+                ),
+                output=[
+                    SimpleNamespace(
+                        type="web_search_call",
+                        status="completed",
+                    )
+                ],
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    result = llm_eval.run_llm_eval(
+        deal,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            enable_web_research=True,
+        ),
+        allow_web_search=True,
+        client=WebCallClient(),
+        environ={"OPENAI_API_KEY": "test-key"},
+        project_root=tmp_path,
+    )
+
+    assert result.web_search_enabled is True
+    assert "https://example.com/research" in result.output_text
 
 
 def test_llm_eval_polls_background_response_until_completed(tmp_path: Path) -> None:

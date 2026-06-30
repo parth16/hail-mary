@@ -216,6 +216,7 @@ def run_llm_eval(
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     prompt_text: str | None = None,
+    allow_web_search: bool = False,
     no_web_search: bool = False,
     background_mode: bool = False,
     client: LLMEvalClient | None = None,
@@ -243,7 +244,9 @@ def run_llm_eval(
         config=config,
         operator_prompt=prompt_text or DEFAULT_OPERATOR_PROMPT,
     )
-    web_search_enabled = bool(config.enable_web_research and not no_web_search)
+    web_search_enabled = bool(
+        config.enable_web_research and allow_web_search and not no_web_search
+    )
     active_client = client or OpenAIResponsesClient(api_key=api_key)
     request_kwargs = _response_request_kwargs(
         prepared_input,
@@ -266,6 +269,8 @@ def run_llm_eval(
         poll_timeout_seconds=poll_timeout_seconds,
         sleep=sleep,
     )
+    if web_search_enabled:
+        _validate_web_search_performed(response)
     output_text = _response_output_text(response)
     _validate_memo_output(output_text, documents=prepared_input.documents)
     usage = _response_usage(response)
@@ -428,8 +433,17 @@ def _response_request_kwargs(
         "store": False,
     }
     if web_search_enabled:
+        web_search_tool = {"type": "web_search", "search_context_size": "high"}
         request_kwargs["tools"] = [
-            {"type": "web_search", "search_context_size": "high"},
+            web_search_tool,
+        ]
+        request_kwargs["tool_choice"] = {
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{"type": "web_search"}],
+        }
+        request_kwargs["include"] = [
+            "web_search_call.action.sources",
         ]
     return request_kwargs
 
@@ -722,6 +736,25 @@ def _validate_memo_output(
         raise LLMEvalError(
             "OpenAI returned a memo without local filename citations, web URL citations, "
             "or required uncertainty labels."
+        )
+
+
+def _validate_web_search_performed(response: Any) -> None:
+    saw_web_search_call = False
+    for output_item in getattr(response, "output", []) or []:
+        if _object_field(output_item, "type") != "web_search_call":
+            continue
+        saw_web_search_call = True
+        status = _object_field(output_item, "status")
+        if status == "failed":
+            raise LLMEvalError(
+                "OpenAI web search was enabled, but the web search tool call failed."
+            )
+    if not saw_web_search_call:
+        raise LLMEvalError(
+            "OpenAI web search was enabled, but the response did not include a web "
+            "search tool call. The memo was not printed because it could overstate "
+            "independent web research."
         )
 
 
