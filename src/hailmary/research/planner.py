@@ -81,7 +81,7 @@ def prepare_research_plan(
         )
 
     include_meridian = meridian_url is not None
-    adapters = builtin_provider_adapters(
+    adapters = _default_plan_adapters(
         include_paid=include_paid,
         include_meridian=include_meridian,
     )
@@ -105,6 +105,27 @@ def prepare_research_plan(
     output_path = _unique_plan_path(output_dir, created_at)
     _write_private_json(output_path, plan.model_dump_json(indent=2), description="research plan")
     return ResearchPlanRunSummary(output_path=output_path, plan=plan)
+
+
+def _default_plan_adapters(
+    *,
+    include_paid: bool,
+    include_meridian: bool,
+) -> list[ProviderAdapter]:
+    adapters = builtin_provider_adapters(
+        include_paid=include_paid,
+        include_meridian=include_meridian,
+    )
+    return [
+        adapter
+        for adapter in adapters
+        if adapter.provider.default_enabled
+        or adapter.provider.category
+        in {
+            ResearchProviderCategory.AUTHENTICATED_PORTAL,
+            ResearchProviderCategory.PAID_OPTIONAL,
+        }
+    ]
 
 
 def _clean_company_names(company_names: list[str]) -> list[str]:

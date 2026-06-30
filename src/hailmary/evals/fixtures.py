@@ -1248,7 +1248,6 @@ def run_research_workflow_v4_fixture(work_dir: Path) -> None:
                 ("Synthetic MissingV4Co", 0): _sbir_response([]),
             }
         ),
-        github_client=_FakeGitHubRepositorySearchClient({}),
     )
 
     _expect(
@@ -1288,10 +1287,9 @@ def run_research_workflow_v4_fixture(work_dir: Path) -> None:
         ResearchProviderRunStatus.INCOMPLETE_SEARCH,
         "Expected capped USAspending search to be marked incomplete, not clean no-results.",
     )
-    _expect_equal(
-        statuses["github"].status,
-        ResearchProviderRunStatus.FAILED,
-        "Expected missing fake GitHub response to be recorded as a failed provider.",
+    _expect(
+        "github" not in statuses,
+        "Expected default workflow v4 not to query or status GitHub repository search.",
     )
     _expect_equal(
         statuses["sam_gov"].status,

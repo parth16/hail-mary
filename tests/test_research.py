@@ -125,6 +125,8 @@ def test_builtin_research_providers_hide_paid_by_default() -> None:
     assert "sec_form_d" in provider_ids
     assert "meridian" in provider_ids
     assert "crunchbase" not in provider_ids
+    github_provider = next(provider for provider in providers if provider.id == "github")
+    assert github_provider.default_enabled is False
 
 
 def test_builtin_research_providers_include_paid_when_requested() -> None:
@@ -274,13 +276,14 @@ def test_prepare_research_plan_writes_private_manual_plan(tmp_path: Path) -> Non
     )
 
     assert result.deal_count == 1
-    assert result.task_count == 10
+    assert result.task_count == 9
     assert result.output_path.exists()
     assert result.output_path.parent == tmp_path / "data" / "research-plans"
     assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
     assert stat.S_IMODE(result.output_path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(result.output_path.stat().st_mode) == 0o600
     assert any(task.provider_id == "sec_form_d" for task in result.plan.tasks)
+    assert all(task.provider_id != "github" for task in result.plan.tasks)
     assert all(
         task.provider_category != ResearchProviderCategory.PAID_OPTIONAL
         for task in result.plan.tasks
@@ -1056,16 +1059,16 @@ def test_run_research_workflow_runs_live_collectors_when_web_research_is_enabled
     assert sec_client.calls == [("Acme AI", 10, 0)]
     assert usaspending_client.calls == [("Acme AI", 10, 1)]
     assert sbir_client.calls == [("Acme AI", 10, 0)]
-    assert github_client.calls == [("Acme AI", 10, 1)]
+    assert github_client.calls == []
     collection_ids = {collection.source_id for collection in result.collections}
     assert collection_ids >= {
         "public_web_pages",
         "sec_form_d",
         "usaspending",
         "sbir",
-        "github",
     }
-    assert result.ready_to_import_count == 5
+    assert "github" not in collection_ids
+    assert result.ready_to_import_count == 4
     assert result.blocking_issue_count == 0
     assert result.no_prepared_result_companies == []
     company_website_status = next(
@@ -1128,17 +1131,16 @@ def test_run_research_workflow_does_not_run_live_collectors_when_web_gate_is_dis
         status.provider_id: status.status
         for status in result.summary.provider_statuses
         if status.provider_id
-        in {"company_website", "sec_form_d", "usaspending", "sbir", "github", "public_web"}
+        in {"company_website", "sec_form_d", "usaspending", "sbir", "public_web"}
     }
     assert live_api_statuses == {
         "company_website": ResearchProviderRunStatus.NOT_RUN,
         "sec_form_d": ResearchProviderRunStatus.NOT_RUN,
         "usaspending": ResearchProviderRunStatus.NOT_RUN,
         "sbir": ResearchProviderRunStatus.NOT_RUN,
-        "github": ResearchProviderRunStatus.NOT_RUN,
         "public_web": ResearchProviderRunStatus.NOT_RUN,
     }
-    assert result.summary.not_run_provider_count >= 6
+    assert result.summary.not_run_provider_count >= 5
 
 
 def test_run_research_workflow_discovers_fetches_and_previews_public_web_results(
@@ -1675,27 +1677,12 @@ def test_run_research_workflow_default_live_collectors_run_only_when_gate_allows
             deals=[ResearchCollectionDealSummary(company_name="Acme AI")],
         )
 
-    def fake_collect_github_repositories(
-        **kwargs: object,
-    ) -> GitHubRepositoryCollectionRunSummary:
-        assert kwargs["client"] is None
-        calls.append("github")
-        return GitHubRepositoryCollectionRunSummary(
-            collected_at=BUILT_AT,
-            deals=[ResearchCollectionDealSummary(company_name="Acme AI")],
-        )
-
     monkeypatch.setattr(
         workflow_module,
         "collect_usaspending_awards",
         fake_collect_usaspending_awards,
     )
     monkeypatch.setattr(workflow_module, "collect_sbir_awards", fake_collect_sbir_awards)
-    monkeypatch.setattr(
-        workflow_module,
-        "collect_github_repositories",
-        fake_collect_github_repositories,
-    )
 
     gated_off = run_research_workflow(
         config=AppConfig(data_dir=tmp_path / "data-off", local_only=True),
@@ -1720,7 +1707,7 @@ def test_run_research_workflow_default_live_collectors_run_only_when_gate_allows
         ),
     )
     assert gated_on.live_collection_enabled is True
-    assert calls == ["usaspending", "sbir", "github"]
+    assert calls == ["usaspending", "sbir"]
 
 
 def test_run_research_workflow_treats_corrupt_import_state_as_blocking(
@@ -9381,7 +9368,7 @@ def test_import_research_results_command_reports_untouched_template_rows(
     )
 
     assert result.exit_code == 0, result.output
-    assert "Skipped 9 untouched template rows." in result.output
+    assert "Skipped 8 untouched template rows." in result.output
     assert deal.evidence_store_path.read_text(encoding="utf-8") == before_store
 
 

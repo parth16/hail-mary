@@ -190,13 +190,14 @@ def _free_public_adapters() -> list[ProviderAdapter]:
                 access_mode=ResearchAccessMode.WEB_PAGE,
                 source_kind=SourceKind.WEB,
                 description="Public code repositories, release activity, and developer signals.",
+                default_enabled=False,
                 licensing_notes=(
                     "Public web source. Respect repository licenses and record the exact URL "
                     "and timestamp for any later evidence."
                 ),
                 operator_note=(
-                    "The live collector saves public repository metadata only when the "
-                    "owner or repository slug exactly matches the requested company."
+                    "Use only when public code repositories are directly relevant to the "
+                    "company. The collector saves metadata only for exact owner matches."
                 ),
             ),
             build_url=lambda company_name, _website_url: (
