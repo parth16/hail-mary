@@ -2833,6 +2833,14 @@ def _print_llm_eval_source_plan(source_plan: LLMEvalSourcePlan) -> None:
                 style="bold red",
             )
         )
+    elif source_plan.direct_mode_has_incomplete_coverage:
+        console.print(
+            _plain(
+                "Direct mode would truncate supported source files; auto mode will "
+                "use map-reduce for complete source coverage.",
+                style="bold yellow",
+            )
+        )
     else:
         console.print(
             _plain(

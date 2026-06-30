@@ -623,6 +623,7 @@ def _run_map_reduce_llm_eval(
     stage_callback: Callable[[str], None] | None,
 ) -> LLMEvalResult:
     _stage(stage_callback, "OpenAI map-reduce source summaries")
+    map_reduce_source_plan = _source_plan_for_map_reduce(prepared_input)
     map_summaries: list[_LLMEvalMapSummary] = []
     usage_attempts: list[LLMEvalUsage] = []
     runtime_warnings: list[str] = []
@@ -659,12 +660,22 @@ def _run_map_reduce_llm_eval(
             )
             usage_attempts.extend(map_usages)
             runtime_warnings.extend(map_warnings)
+            summary_text, removed_instruction_lines = _sanitize_map_summary_text(
+                _response_output_text(response)
+            )
+            if removed_instruction_lines:
+                runtime_warnings.append(
+                    "OpenAI returned a map-reduce source summary with "
+                    f"{removed_instruction_lines} line(s) that looked like "
+                    "instructions embedded in source documents. Those line(s) were "
+                    "removed before the final memo request."
+                )
             map_summaries.append(
                 _LLMEvalMapSummary(
                     source_filename=document.relative_path.as_posix(),
                     chunk_index=chunk_index,
                     chunk_count=len(chunks),
-                    summary_text=_response_output_text(response),
+                    summary_text=summary_text,
                 )
             )
 
@@ -673,7 +684,7 @@ def _run_map_reduce_llm_eval(
         documents=prepared_input.source_documents,
         source_documents=prepared_input.source_documents,
         excluded_paths=prepared_input.excluded_paths,
-        source_plan=prepared_input.source_plan,
+        source_plan=map_reduce_source_plan,
         warnings=prepared_input.warnings,
         instructions=REDUCE_LLM_EVAL_INSTRUCTIONS,
         operator_prompt=prepared_input.operator_prompt,
@@ -715,6 +726,58 @@ def _run_map_reduce_llm_eval(
         reasoning_effort=reduce_result.reasoning_effort,
         web_search_enabled=reduce_result.web_search_enabled,
         source_mode=MAP_REDUCE_SOURCE_MODE,
+    )
+
+
+def _source_plan_for_map_reduce(
+    prepared_input: LLMEvalPreparedInput,
+) -> LLMEvalSourcePlan:
+    source_char_counts = {
+        document.relative_path: len(document.text)
+        for document in prepared_input.source_documents
+    }
+    map_reduce_items: list[LLMEvalSourcePlanItem] = []
+    for item in prepared_input.source_plan.items:
+        source_chars = source_char_counts.get(item.relative_path)
+        if source_chars is None:
+            map_reduce_items.append(item)
+            continue
+        map_reduce_items.append(
+            LLMEvalSourcePlanItem(
+                path=item.path,
+                relative_path=item.relative_path,
+                status="included",
+                priority_bucket=item.priority_bucket,
+                reason="processed through map-reduce source summaries",
+                extracted_chars=source_chars,
+                allocated_chars=source_chars,
+                sent_chars=source_chars,
+            )
+        )
+    return LLMEvalSourcePlan(
+        deal_folder=prepared_input.source_plan.deal_folder,
+        items=tuple(map_reduce_items),
+        warnings=prepared_input.source_plan.warnings,
+        total_source_chars_cap=prepared_input.source_plan.total_source_chars_cap,
+        max_document_source_chars=prepared_input.source_plan.max_document_source_chars,
+    )
+
+
+def _sanitize_map_summary_text(summary_text: str) -> tuple[str, int]:
+    kept_lines: list[str] = []
+    removed_count = 0
+    for line in summary_text.splitlines():
+        if looks_like_embedded_source_instruction(line):
+            removed_count += 1
+            continue
+        kept_lines.append(line)
+    sanitized_text = "\n".join(kept_lines).strip()
+    if sanitized_text:
+        return sanitized_text, removed_count
+    return (
+        "NEEDS_DILIGENCE: The map summary for this source chunk was removed because "
+        "it resembled instructions embedded in source documents.",
+        removed_count,
     )
 
 
