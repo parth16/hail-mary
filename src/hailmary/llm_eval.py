@@ -247,9 +247,11 @@ def run_llm_eval(
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
     poll_timeout_seconds: float = DEFAULT_POLL_TIMEOUT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    stage_callback: Callable[[str], None] | None = None,
 ) -> LLMEvalResult:
     """Run one direct OpenAI LLM diligence evaluation and return the model memo."""
 
+    _stage(stage_callback, "local setup and privacy checks")
     _validate_request_options(
         model=model,
         reasoning_effort=reasoning_effort,
@@ -257,20 +259,24 @@ def run_llm_eval(
     )
     _ensure_llm_upload_allowed(config)
     api_key = _openai_api_key(environ=environ)
+    _stage(stage_callback, "deal folder resolution")
     deal_folder = resolve_deal_folder(
         deal_folder_or_deal_id,
         project_root=project_root,
     )
+    _stage(stage_callback, "local document extraction")
     prepared_input = prepare_llm_eval_input(
         deal_folder,
         config=config,
         operator_prompt=prompt_text or default_operator_prompt(config),
     )
+    _stage(stage_callback, "web search configuration")
     web_search_enabled = _resolve_web_search_enabled(
         config=config,
         allow_web_search=allow_web_search,
         no_web_search=no_web_search,
     )
+    _stage(stage_callback, "OpenAI request preparation")
     active_client = client or OpenAIResponsesClient(api_key=api_key)
     request_kwargs = _response_request_kwargs(
         prepared_input,
@@ -281,18 +287,22 @@ def run_llm_eval(
         background_mode=background_mode,
     )
 
+    _stage(stage_callback, "OpenAI evaluation request")
     try:
         response = active_client.create_response(**request_kwargs)
     except Exception as exc:
         raise LLMEvalError(f"OpenAI API request failed: {exc}") from exc
 
+    _stage(stage_callback, "OpenAI response wait")
     response = _poll_response_until_finished(
         active_client,
         response,
         poll_interval_seconds=poll_interval_seconds,
         poll_timeout_seconds=poll_timeout_seconds,
         sleep=sleep,
+        stage_callback=stage_callback,
     )
+    _stage(stage_callback, "OpenAI response validation")
     if web_search_enabled:
         _validate_web_search_performed(response)
     output_text = _response_output_text(response)
@@ -301,6 +311,7 @@ def run_llm_eval(
         config=config,
         documents=prepared_input.documents,
     )
+    _stage(stage_callback, "token usage collection")
     usage = _response_usage(response)
     return LLMEvalResult(
         output_text=output_text,
@@ -951,6 +962,7 @@ def _poll_response_until_finished(
     poll_interval_seconds: float,
     poll_timeout_seconds: float,
     sleep: Callable[[float], None],
+    stage_callback: Callable[[str], None] | None = None,
 ) -> Any:
     started_at = time.monotonic()
     active_response = response
@@ -968,6 +980,7 @@ def _poll_response_until_finished(
                 raise LLMEvalError(
                     "OpenAI did not finish the background evaluation before the timeout."
                 )
+            _stage(stage_callback, f"OpenAI background response {status}")
             sleep(poll_interval_seconds)
             try:
                 active_response = client.retrieve_response(response_id)
@@ -979,6 +992,11 @@ def _poll_response_until_finished(
         if status in {"failed", "cancelled", "incomplete"}:
             raise LLMEvalError(_terminal_response_error(active_response, status=status))
         raise LLMEvalError(f"OpenAI returned an unexpected response status: {status!r}.")
+
+
+def _stage(callback: Callable[[str], None] | None, stage: str) -> None:
+    if callback is not None:
+        callback(stage)
 
 
 def _terminal_response_error(response: Any, *, status: str) -> str:

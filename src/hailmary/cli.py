@@ -148,6 +148,7 @@ app.add_typer(portfolio_app, name="portfolio", hidden=True)
 app.add_typer(evidence_actions_app, name="evidence-actions")
 app.add_typer(diligence_app, name="diligence")
 console = Console(highlight=False)
+stderr_console = Console(stderr=True, highlight=False)
 DEFAULT_REVIEW_QUOTE_LIMIT = 240
 MAX_REVIEW_QUOTE_LIMIT = 500
 
@@ -222,6 +223,69 @@ def _evaluate_deal_progress_label(stage: str) -> str:
         return "Checking evidence health..."
     if stage == "final memo write":
         return "Writing the final memo..."
+    return f"{stage.capitalize()}..."
+
+
+class _LLMEvalProgress:
+    def __init__(self, output_console: Console) -> None:
+        self._console = output_console
+        self._stage_count = 0
+        self._status: Status | None = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc, traceback
+        self.stop()
+
+    def update(self, stage: str) -> None:
+        self._stage_count += 1
+        label = _llm_eval_progress_label(stage)
+        if self._console.is_terminal:
+            if self._status is None:
+                self._status = self._console.status(_plain(label), spinner="dots")
+                self._status.__enter__()
+            else:
+                self._status.update(_plain(label))
+            return
+        self._console.print(_plain(f"{self._stage_count}. {label}", style="bold cyan"))
+
+    def stop(self) -> None:
+        if self._status is None:
+            return
+        self._status.__exit__(None, None, None)
+        self._status = None
+
+
+def _llm_eval_progress_label(stage: str) -> str:
+    if stage == "local setup and privacy checks":
+        return "Checking local setup and privacy..."
+    if stage == "deal folder resolution":
+        return "Resolving the deal folder..."
+    if stage == "local document extraction":
+        return "Reading local documents..."
+    if stage == "web search configuration":
+        return "Checking web search settings..."
+    if stage == "OpenAI request preparation":
+        return "Preparing the OpenAI request..."
+    if stage == "OpenAI evaluation request":
+        return "Starting the OpenAI evaluation..."
+    if stage == "OpenAI response wait":
+        return "Waiting for OpenAI to finish..."
+    if stage == "OpenAI background response queued":
+        return "OpenAI response is queued..."
+    if stage == "OpenAI background response in_progress":
+        return "OpenAI response is in progress..."
+    if stage == "OpenAI response validation":
+        return "Validating the model memo..."
+    if stage == "token usage collection":
+        return "Collecting token usage..."
     return f"{stage.capitalize()}..."
 
 
@@ -2572,17 +2636,19 @@ def llm_eval_command(
     config = _config_from_options(None)
     try:
         prompt_text = load_prompt_file(prompt_file) if prompt_file is not None else None
-        result = run_llm_eval(
-            deal_folder_or_deal_id,
-            config=config,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            allow_web_search=web_search,
-            no_web_search=no_web_search,
-            max_output_tokens=max_output_tokens,
-            background_mode=background_mode,
-            prompt_text=prompt_text,
-        )
+        with _LLMEvalProgress(stderr_console) as progress:
+            result = run_llm_eval(
+                deal_folder_or_deal_id,
+                config=config,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                allow_web_search=web_search,
+                no_web_search=no_web_search,
+                max_output_tokens=max_output_tokens,
+                background_mode=background_mode,
+                prompt_text=prompt_text,
+                stage_callback=progress.update,
+            )
     except LLMEvalError as exc:
         _print_error(str(exc))
         raise typer.Exit(1) from None
