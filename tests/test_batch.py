@@ -116,7 +116,6 @@ def test_batch_evaluate_cli_prints_safe_summary(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "true")
-    monkeypatch.setenv("HAILMARY_MOCK_LLM", "true")
     root = tmp_path / "batch-cli-deals"
     _write_deal(root, "CliStrongCo", _strong_investable_text())
     broken_dir = root / "CliBrokenCo"
@@ -249,7 +248,6 @@ def test_batch_evaluate_cli_fails_when_no_child_deal_evaluates(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "true")
-    monkeypatch.setenv("HAILMARY_MOCK_LLM", "true")
     root = tmp_path / "all-broken-cli"
     for company_name in ("BrokenOne", "BrokenTwo"):
         broken_dir = root / company_name

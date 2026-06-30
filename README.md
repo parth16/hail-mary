@@ -52,6 +52,9 @@ hailmary review-evidence
 hailmary evidence-actions needs-review --deal-id exampleco --evidence-id ev_example --note "Check source before relying on this."
 ```
 
+Hail Mary loads `.env` from the project root for local API keys and operator
+settings. Values already exported in the shell take precedence over `.env`.
+
 `evaluate-deal` is the main operator-facing command. It evaluates one company folder
 end to end: local privacy checks, ingestion, optional external research workflow,
 evidence import, deterministic scoring, optional model review, final guardrails, and

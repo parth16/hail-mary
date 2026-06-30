@@ -73,6 +73,7 @@ def test_env_example_has_blank_paid_provider_placeholders() -> None:
     env_example = Path(__file__).parents[1] / ".env.example"
     text = env_example.read_text(encoding="utf-8")
 
+    assert "HAILMARY_MOCK_LLM" not in text
     for placeholder in [
         "HAILMARY_ENABLED_PAID_PROVIDERS=",
         "CRUNCHBASE_API_KEY=",
@@ -84,6 +85,71 @@ def test_env_example_has_blank_paid_provider_placeholders() -> None:
         "CB_INSIGHTS_API_KEY=",
     ]:
         assert placeholder in text
+
+
+def test_load_config_reads_project_dotenv_without_overriding_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    env_names = (
+        "BRAVE_SEARCH_API_KEY",
+        "HAILMARY_ENABLE_WEB_RESEARCH",
+        "HAILMARY_LOCAL_ONLY",
+        "HAILMARY_LOG_LEVEL",
+    )
+    previous_values = {name: os.environ.get(name) for name in env_names}
+    try:
+        for name in env_names:
+            os.environ.pop(name, None)
+        os.environ["HAILMARY_LOG_LEVEL"] = "WARNING"
+        (tmp_path / ".env").write_text(
+            "\n".join(
+                [
+                    'HAILMARY_LOCAL_ONLY="false" # model calls are allowed',
+                    "HAILMARY_ENABLE_WEB_RESEARCH=true",
+                    'BRAVE_SEARCH_API_KEY="dotenv-brave-key" # local key',
+                    "HAILMARY_LOG_LEVEL=DEBUG",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        config = load_config(ignore_saved=True)
+
+        assert config.local_only is False
+        assert config.enable_web_research is True
+        assert config.log_level == "WARNING"
+        assert os.environ["BRAVE_SEARCH_API_KEY"] == "dotenv-brave-key"
+    finally:
+        for name, value in previous_values.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def test_load_config_ignores_operator_mock_llm_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    previous_value = os.environ.get("HAILMARY_MOCK_LLM")
+    try:
+        os.environ.pop("HAILMARY_MOCK_LLM", None)
+        config_dir = tmp_path / ".hailmary"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("mock_llm: true\n", encoding="utf-8")
+        (tmp_path / ".env").write_text("HAILMARY_MOCK_LLM=true\n", encoding="utf-8")
+
+        config = load_config()
+
+        assert config.mock_llm is False
+    finally:
+        if previous_value is None:
+            os.environ.pop("HAILMARY_MOCK_LLM", None)
+        else:
+            os.environ["HAILMARY_MOCK_LLM"] = previous_value
 
 
 def test_init_adds_repo_local_custom_data_dir_to_local_git_exclude(
@@ -122,6 +188,8 @@ def test_local_state_uses_owner_only_permissions(
     ).is_file()
     assert stat.S_IMODE((tmp_path / ".hailmary").stat().st_mode) == 0o700
     assert stat.S_IMODE((tmp_path / ".hailmary" / "config.yaml").stat().st_mode) == 0o600
+    config_text = (tmp_path / ".hailmary" / "config.yaml").read_text(encoding="utf-8")
+    assert "mock_llm" not in config_text
 
 
 def test_model_token_budget_must_be_positive(
