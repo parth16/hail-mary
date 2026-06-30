@@ -110,7 +110,7 @@ After publishing a PR, start a background monitor that checks every minute for C
 
 All operator-facing output should use plain English. Avoid unnecessary jargon; if a finance, legal, or technical term is needed, explain it the first time it appears.
 
-Testing is a first-class part of the project. New code should include tests for logical and functional correctness, including success paths, important edge cases, and failure modes. User-facing commands should be robust, handle invalid input deliberately, and explain failures clearly.
+Testing is a first-class part of the project. New code should include tests for logical and functional correctness, including success paths, important edge cases, and failure modes. User-facing commands should be robust, handle invalid input deliberately, and explain failures clearly. Changes that can affect operator-facing CLI wiring must keep the live `hailmary evaluate-deal` subprocess smoke test passing through `uv run pytest tests/test_live_cli.py -q`.
 
 ## MVP Direction
 
