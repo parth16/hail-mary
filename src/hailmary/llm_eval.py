@@ -62,6 +62,11 @@ _WEB_SEARCH_STATUS_LINE_RE = re.compile(
 )
 _WEB_URL_RE = re.compile(r"https://[^\s)>\]]+")
 _LIST_ITEM_RE = re.compile(r"^(\s*(?:[-*+]\s+|\d+[.)]\s+))(.*\S)(\s*)$")
+_CITED_RECOMMENDATION_RATIONALE_RE = re.compile(
+    r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*)?recommend\s+(?:invest|pass)\b"
+    r"(?=.*\b(?:because|based on|due to|given|since)\b)",
+    re.IGNORECASE,
+)
 
 DIRECT_LLM_EVAL_INSTRUCTIONS = """\
 You are running Hail Mary direct LLM diligence evaluation.
@@ -891,14 +896,15 @@ def _guard_claim_lineage(
         if not _line_needs_lineage(line):
             guarded_lines.append(line)
             continue
-        if looks_like_embedded_source_instruction(line):
-            dropped_instruction_line_numbers.append(line_number)
-            continue
-        if not _line_has_lineage(
+        has_lineage = _line_has_lineage(
             line,
             source_names=source_names,
             source_header_names=source_header_names,
-        ):
+        )
+        if _line_looks_like_source_instruction_echo(line, has_lineage=has_lineage):
+            dropped_instruction_line_numbers.append(line_number)
+            continue
+        if not has_lineage:
             unsupported_line_numbers.append(line_number)
             guarded_lines.append(_line_with_needs_diligence_label(line))
             continue
@@ -927,6 +933,14 @@ def _guard_claim_lineage(
     return LLMEvalValidatedMemo(
         output_text=guarded_output_text,
         warnings=tuple(warnings),
+    )
+
+
+def _line_looks_like_source_instruction_echo(line: str, *, has_lineage: bool) -> bool:
+    if not looks_like_embedded_source_instruction(line):
+        return False
+    return not (
+        has_lineage and _CITED_RECOMMENDATION_RATIONALE_RE.search(line) is not None
     )
 
 
