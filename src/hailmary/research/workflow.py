@@ -21,7 +21,6 @@ from .collection import (
     SbirAwardsClient,
     SecFormDFilingsClient,
     UsaspendingAwardsClient,
-    collect_github_repositories,
     collect_sbir_awards,
     collect_sec_form_d_filings,
     collect_usaspending_awards,
@@ -72,7 +71,6 @@ LIVE_PROVIDER_IDS = {
     "sec_form_d",
     "usaspending",
     "sbir",
-    "github",
     "public_web",
 }
 MANUAL_OR_LOCAL_PROVIDER_IDS = {"sam_gov", "uspto"}
@@ -765,17 +763,6 @@ def _run_live_collectors(
                 config=config,
                 company_names=company_names,
                 client=sbir_client,
-                collected_at=collected_at,
-            ),
-        ),
-        (
-            "github",
-            "GitHub",
-            True,
-            lambda: collect_github_repositories(
-                config=config,
-                company_names=company_names,
-                client=github_client,
                 collected_at=collected_at,
             ),
         ),
