@@ -723,11 +723,20 @@ def test_llm_eval_rejects_check_size_outside_config_limits(tmp_path: Path) -> No
         )
 
 
-def test_llm_eval_rejects_uncited_material_lines(tmp_path: Path) -> None:
+def test_llm_eval_warns_but_prints_when_some_material_lines_lack_lineage(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
     deal = _write_deal(tmp_path, "UncitedMemoCo")
     (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
 
     class UncitedMemoClient:
+        def __init__(self, *, api_key: str) -> None:
+            del api_key
+
         def create_response(self, **_: Any) -> object:
             return _response(
                 status="completed",
@@ -742,15 +751,16 @@ def test_llm_eval_rejects_uncited_material_lines(tmp_path: Path) -> None:
             del response_id
             raise AssertionError("retrieve should not be called")
 
-    with pytest.raises(llm_eval.LLMEvalError, match="First unsupported line number") as exc:
-        llm_eval.run_llm_eval(
-            deal,
-            config=AppConfig(data_dir=tmp_path / "data", local_only=False),
-            client=UncitedMemoClient(),
-            environ={"OPENAI_API_KEY": "test-key"},
-            project_root=tmp_path,
-        )
-    assert "real revenue" not in str(exc.value)
+    monkeypatch.setattr(llm_eval, "OpenAIResponsesClient", UncitedMemoClient)
+
+    result = runner.invoke(app, ["llm-eval", "pitch-decks/UncitedMemoCo"])
+
+    assert result.exit_code == 0, result.output
+    assert "The company has real revenue." in result.stdout
+    assert "Warning: OpenAI returned memo text" in result.stderr
+    assert "First unsupported line number" in result.stderr
+    assert "NEEDS_DILIGENCE" in result.stderr
+    assert "real revenue" not in result.stderr
 
 
 def test_llm_eval_rejects_incomplete_web_search_call(
