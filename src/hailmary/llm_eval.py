@@ -293,8 +293,16 @@ class LLMEvalSourcePlan:
         )
 
     @property
+    def truncated_items(self) -> tuple[LLMEvalSourcePlanItem, ...]:
+        return tuple(item for item in self.items if item.status == "truncated")
+
+    @property
     def direct_mode_would_fail_closed(self) -> bool:
         return bool(self.omitted_supported_items)
+
+    @property
+    def direct_mode_has_incomplete_coverage(self) -> bool:
+        return bool(self.omitted_supported_items or self.truncated_items)
 
 
 @dataclass(frozen=True)
@@ -427,6 +435,9 @@ def run_llm_eval(
         allow_omitted_supported_sources=(
             allow_omitted_supported_sources or resolved_source_mode != DIRECT_SOURCE_MODE
         ),
+        suppress_omitted_supported_warning=(
+            resolved_source_mode in {AUTO_SOURCE_MODE, MAP_REDUCE_SOURCE_MODE}
+        ),
     )
     _stage(stage_callback, "web search configuration")
     web_search_enabled = _resolve_web_search_enabled(
@@ -441,7 +452,7 @@ def run_llm_eval(
         resolved_source_mode == MAP_REDUCE_SOURCE_MODE
         or (
             resolved_source_mode == AUTO_SOURCE_MODE
-            and prepared_input.source_plan.direct_mode_would_fail_closed
+            and prepared_input.source_plan.direct_mode_has_incomplete_coverage
         )
     ):
         return _run_map_reduce_llm_eval(
@@ -614,6 +625,7 @@ def _run_map_reduce_llm_eval(
     _stage(stage_callback, "OpenAI map-reduce source summaries")
     map_summaries: list[_LLMEvalMapSummary] = []
     usage_attempts: list[LLMEvalUsage] = []
+    runtime_warnings: list[str] = []
     for document in prepared_input.source_documents:
         chunks = _source_text_chunks(document.text)
         for chunk_index, chunk_text in enumerate(chunks, start=1):
@@ -636,15 +648,17 @@ def _run_map_reduce_llm_eval(
                 "max_output_tokens": max_output_tokens,
                 "store": False,
             }
-            response = _create_response_and_wait(
+            response, map_usages, map_warnings = _create_response_with_output_retry(
                 client,
                 request_kwargs,
+                auto_retry_output_tokens=auto_retry_output_tokens,
                 poll_interval_seconds=poll_interval_seconds,
                 poll_timeout_seconds=poll_timeout_seconds,
                 sleep=sleep,
                 stage_callback=stage_callback,
             )
-            usage_attempts.append(_response_usage(response))
+            usage_attempts.extend(map_usages)
+            runtime_warnings.extend(map_warnings)
             map_summaries.append(
                 _LLMEvalMapSummary(
                     source_filename=document.relative_path.as_posix(),
@@ -687,10 +701,16 @@ def _run_map_reduce_llm_eval(
         source_mode=MAP_REDUCE_SOURCE_MODE,
         citation_documents=prepared_input.source_documents,
     )
+    result_prepared_input = reduce_result.prepared_input
+    if runtime_warnings:
+        result_prepared_input = _prepared_input_with_extra_warnings(
+            result_prepared_input,
+            warnings=runtime_warnings,
+        )
     return LLMEvalResult(
         output_text=reduce_result.output_text,
         usage=_aggregate_usages([*usage_attempts, reduce_result.usage]),
-        prepared_input=reduce_result.prepared_input,
+        prepared_input=result_prepared_input,
         model=reduce_result.model,
         reasoning_effort=reduce_result.reasoning_effort,
         web_search_enabled=reduce_result.web_search_enabled,
@@ -775,6 +795,66 @@ def _source_text_chunks(text: str) -> list[str]:
         stripped_text[start : start + MAX_DOCUMENT_SOURCE_CHARS].rstrip()
         for start in range(0, len(stripped_text), MAX_DOCUMENT_SOURCE_CHARS)
     ]
+
+
+def _create_response_with_output_retry(
+    client: LLMEvalClient,
+    request_kwargs: Mapping[str, Any],
+    *,
+    auto_retry_output_tokens: bool,
+    poll_interval_seconds: float,
+    poll_timeout_seconds: float,
+    sleep: Callable[[float], None],
+    stage_callback: Callable[[str], None] | None,
+) -> tuple[Any, list[LLMEvalUsage], list[str]]:
+    active_request_kwargs = dict(request_kwargs)
+    usage_attempts: list[LLMEvalUsage] = []
+    runtime_warnings: list[str] = []
+    retry_count = 0
+    while True:
+        try:
+            response = _create_response_and_wait(
+                client,
+                active_request_kwargs,
+                poll_interval_seconds=poll_interval_seconds,
+                poll_timeout_seconds=poll_timeout_seconds,
+                sleep=sleep,
+                stage_callback=stage_callback,
+            )
+        except LLMEvalIncompleteError as exc:
+            current_max_output_tokens = active_request_kwargs["max_output_tokens"]
+            retry_max_output_tokens = _auto_retry_max_output_tokens(
+                current_max_output_tokens,
+                retry_count=retry_count,
+                reason=exc.reason,
+                enabled=auto_retry_output_tokens,
+            )
+            if retry_max_output_tokens is None:
+                if exc.reason == "max_output_tokens":
+                    raise LLMEvalError(
+                        _max_output_token_limit_error(current_max_output_tokens)
+                    ) from exc
+                raise
+            usage_attempts.append(_response_usage(exc.response))
+            retry_count += 1
+            active_request_kwargs = {
+                **active_request_kwargs,
+                "max_output_tokens": retry_max_output_tokens,
+            }
+            runtime_warnings.append(
+                "OpenAI hit the "
+                f"{current_max_output_tokens} output-token limit before completing "
+                "a map-reduce source summary, so llm-eval retried once with "
+                f"{retry_max_output_tokens} output tokens."
+            )
+            _stage(
+                stage_callback,
+                "OpenAI response hit max output limit; retrying with "
+                f"{retry_max_output_tokens} output tokens",
+            )
+            continue
+        usage_attempts.append(_response_usage(response))
+        return response, usage_attempts, runtime_warnings
 
 
 def _create_response_and_wait(
@@ -881,6 +961,7 @@ def prepare_llm_eval_input(
     config: AppConfig | None = None,
     operator_prompt: str = DEFAULT_OPERATOR_PROMPT,
     allow_omitted_supported_sources: bool = False,
+    suppress_omitted_supported_warning: bool = False,
 ) -> LLMEvalPreparedInput:
     active_config = config or AppConfig()
     source_bundle = _prepare_llm_eval_sources(
@@ -897,6 +978,28 @@ def prepare_llm_eval_input(
         and not allow_omitted_supported_sources
     ):
         raise _source_coverage_error(source_bundle.source_plan)
+    warnings = source_bundle.warnings
+    source_plan = source_bundle.source_plan
+    if (
+        source_plan.direct_mode_would_fail_closed
+        and allow_omitted_supported_sources
+        and not suppress_omitted_supported_warning
+    ):
+        omitted_names = ", ".join(
+            item.relative_path.as_posix() for item in source_plan.omitted_supported_items
+        )
+        warning = (
+            "Direct source coverage omitted supported file(s) before the OpenAI "
+            f"request: {omitted_names}."
+        )
+        warnings = (*warnings, warning)
+        source_plan = LLMEvalSourcePlan(
+            deal_folder=source_plan.deal_folder,
+            items=source_plan.items,
+            warnings=warnings,
+            total_source_chars_cap=source_plan.total_source_chars_cap,
+            max_document_source_chars=source_plan.max_document_source_chars,
+        )
     user_prompt = build_llm_eval_user_prompt(
         deal_folder=deal_folder,
         documents=source_bundle.documents,
@@ -907,8 +1010,8 @@ def prepare_llm_eval_input(
         documents=source_bundle.documents,
         source_documents=source_bundle.source_documents,
         excluded_paths=source_bundle.excluded_paths,
-        source_plan=source_bundle.source_plan,
-        warnings=source_bundle.warnings,
+        source_plan=source_plan,
+        warnings=warnings,
         instructions=DIRECT_LLM_EVAL_INSTRUCTIONS,
         operator_prompt=operator_prompt,
         user_prompt=user_prompt,
@@ -1175,21 +1278,6 @@ def _prepare_llm_eval_sources(
         for item in sorted_items
         if item.status in {"omitted_supported", "unusable"}
     )
-    if source_plan.direct_mode_would_fail_closed:
-        omitted_names = ", ".join(
-            item.relative_path.as_posix() for item in source_plan.omitted_supported_items
-        )
-        warnings.append(
-            "Direct source coverage omitted supported file(s) before the OpenAI "
-            f"request: {omitted_names}."
-        )
-        source_plan = LLMEvalSourcePlan(
-            deal_folder=root,
-            items=sorted_items,
-            warnings=tuple(warnings),
-            total_source_chars_cap=MAX_TOTAL_SOURCE_CHARS,
-            max_document_source_chars=MAX_DOCUMENT_SOURCE_CHARS,
-        )
     return _LLMEvalSourceBundle(
         documents=tuple(documents),
         source_documents=source_documents,

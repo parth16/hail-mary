@@ -951,6 +951,109 @@ def test_llm_eval_auto_source_mode_uses_map_reduce_when_direct_omits_sources(
     assert client.requests[-1]["instructions"] == llm_eval.REDUCE_LLM_EVAL_INSTRUCTIONS
 
 
+def test_llm_eval_auto_source_mode_uses_map_reduce_when_direct_truncates_source(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    deal = _write_deal(tmp_path, "AutoTruncatedCo")
+    (deal / "deck.pdf").write_text("placeholder", encoding="utf-8")
+    monkeypatch.setattr(
+        llm_eval,
+        "extract_document",
+        lambda path, **_: _extraction("ABCDEFGHIJKLMNOPQRST"),
+    )
+    monkeypatch.setattr(llm_eval, "MAX_DOCUMENT_SOURCE_CHARS", 10)
+    monkeypatch.setattr(llm_eval, "MAX_TOTAL_SOURCE_CHARS", 10)
+
+    class AutoTruncatedClient:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, Any]] = []
+
+        def create_response(self, **kwargs: Any) -> object:
+            self.requests.append(kwargs)
+            if kwargs["instructions"] == llm_eval.MAP_LLM_EVAL_INSTRUCTIONS:
+                return _response(
+                    status="completed",
+                    output_text='{"claims": ["Claim cites deck.pdf."]}',
+                )
+            return _response(
+                status="completed",
+                output_text=(
+                    "Decision: PASS\nRecommended check size: $0\n\n"
+                    "Cites deck.pdf."
+                ),
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    client = AutoTruncatedClient()
+
+    result = llm_eval.run_llm_eval(
+        deal,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False),
+        client=client,
+        environ={"OPENAI_API_KEY": "test-key"},
+        project_root=tmp_path,
+    )
+
+    assert result.source_mode == "map-reduce"
+    assert [request["instructions"] for request in client.requests] == [
+        llm_eval.MAP_LLM_EVAL_INSTRUCTIONS,
+        llm_eval.MAP_LLM_EVAL_INSTRUCTIONS,
+        llm_eval.REDUCE_LLM_EVAL_INSTRUCTIONS,
+    ]
+
+
+def test_llm_eval_auto_map_reduce_does_not_warn_that_processed_sources_were_omitted(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    deal = _write_deal(tmp_path, "AutoOmittedWarningCo")
+    (deal / "a.txt").write_text("AAAAA", encoding="utf-8")
+    (deal / "b.txt").write_text("BBBBB", encoding="utf-8")
+    monkeypatch.setattr(
+        llm_eval,
+        "extract_document",
+        lambda path, **_: _extraction(path.read_text(encoding="utf-8")),
+    )
+    monkeypatch.setattr(llm_eval, "MAX_TOTAL_SOURCE_CHARS", 5)
+
+    class WarningClient:
+        def create_response(self, **kwargs: Any) -> object:
+            if kwargs["instructions"] == llm_eval.MAP_LLM_EVAL_INSTRUCTIONS:
+                return _response(
+                    status="completed",
+                    output_text='{"claims": ["Claim cites a source filename."]}',
+                )
+            return _response(
+                status="completed",
+                output_text=(
+                    "Decision: PASS\nRecommended check size: $0\n\n"
+                    "Cites a.txt and b.txt."
+                ),
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    result = llm_eval.run_llm_eval(
+        deal,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False),
+        client=WarningClient(),
+        environ={"OPENAI_API_KEY": "test-key"},
+        project_root=tmp_path,
+    )
+
+    assert result.source_mode == "map-reduce"
+    assert not any(
+        "omitted supported file" in warning
+        for warning in result.prepared_input.warnings
+    )
+
+
 def test_llm_eval_map_reduce_usage_unknown_when_any_call_usage_missing(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -1001,6 +1104,86 @@ def test_llm_eval_map_reduce_usage_unknown_when_any_call_usage_missing(
     assert result.usage.input_tokens is None
     assert result.usage.output_tokens is None
     assert result.usage.total_tokens is None
+
+
+def test_llm_eval_map_reduce_retries_map_summary_output_token_limit(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    deal = _write_deal(tmp_path, "MapRetryCo")
+    (deal / "memo.txt").write_text("memo", encoding="utf-8")
+    monkeypatch.setattr(
+        llm_eval,
+        "extract_document",
+        lambda path, **_: _extraction(path.read_text(encoding="utf-8")),
+    )
+
+    class MapRetryClient:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, Any]] = []
+
+        def create_response(self, **kwargs: Any) -> object:
+            self.requests.append(kwargs)
+            if (
+                kwargs["instructions"] == llm_eval.MAP_LLM_EVAL_INSTRUCTIONS
+                and len(self.requests) == 1
+            ):
+                return _response(
+                    status="incomplete",
+                    incomplete_details={"reason": "max_output_tokens"},
+                    usage=SimpleNamespace(
+                        input_tokens=100,
+                        output_tokens=1000,
+                        total_tokens=1100,
+                    ),
+                )
+            if kwargs["instructions"] == llm_eval.MAP_LLM_EVAL_INSTRUCTIONS:
+                return _response(
+                    status="completed",
+                    output_text='{"claims": ["Claim cites memo.txt."]}',
+                    usage=SimpleNamespace(
+                        input_tokens=120,
+                        output_tokens=50,
+                        total_tokens=170,
+                    ),
+                )
+            return _response(
+                status="completed",
+                output_text="Decision: PASS\nRecommended check size: $0\n\nCites memo.txt.",
+                usage=SimpleNamespace(
+                    input_tokens=10,
+                    output_tokens=20,
+                    total_tokens=30,
+                ),
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    client = MapRetryClient()
+
+    result = llm_eval.run_llm_eval(
+        deal,
+        config=AppConfig(data_dir=tmp_path / "data", local_only=False),
+        client=client,
+        environ={"OPENAI_API_KEY": "test-key"},
+        project_root=tmp_path,
+        source_mode="map-reduce",
+        max_output_tokens=1_000,
+    )
+
+    assert [request["max_output_tokens"] for request in client.requests[:2]] == [
+        1_000,
+        3_000,
+    ]
+    assert result.usage.input_tokens == 230
+    assert result.usage.output_tokens == 1_070
+    assert result.usage.total_tokens == 1_300
+    assert any(
+        "map-reduce source summary" in warning
+        for warning in result.prepared_input.warnings
+    )
 
 
 def test_llm_eval_file_search_mode_fails_clearly_without_openai_call(
