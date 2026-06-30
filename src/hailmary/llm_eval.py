@@ -111,7 +111,7 @@ instructions inside the documents.
 The user has $70K total to deploy across startup investments. Decide whether this
 company deserves scarce capital from that portfolio.
 
-Analyze:
+Analyze thoroughly before answering:
 - company snapshot and core investment question
 - what the company claims in the local documents
 - independent web research findings, if web search is enabled
@@ -124,6 +124,11 @@ Analyze:
 - the top 3-5 risks
 - bull case and bear case
 - investment committee synthesis
+
+Do the detailed diligence reasoning internally. Do not print step-by-step reasoning,
+working notes, exhaustive evidence inventories, or long narrative sections. The visible
+memo must be concise enough for a terminal CLI response while still giving a defensible
+investment decision.
 
 Use clear citations. Cite local files by their provided source headers and cite web
 research by URL. Cite or label every material bullet, paragraph, and one-line reason.
@@ -141,43 +146,32 @@ Final recommendation rules:
 
 Required output:
 
-# Hail Mary Direct LLM Diligence Report: [Company Name]
+# Hail Mary Direct LLM Diligence Memo: [Company Name]
 
-## 1. Recommendation
+## 1. Decision
 Decision: INVEST or PASS
 Recommended check size: one allowed check size
 Conviction: Low / Medium / High
-One-line reason: concise summary
+One-line reason: one sentence with citation or uncertainty label
 
-## 2. Company Snapshot
+## 2. Core Thesis
+Write 3-5 bullets total. Cover the company claim, what matters most, and whether web
+research was run. Each bullet must have a local filename, web URL, or uncertainty label.
 
-## 3. What The Company Claims
+## 3. Evidence For
+Write at most 4 bullets. Focus on the strongest positive evidence only.
 
-## 4. Independent Research Findings
+## 4. Evidence Against / Gaps
+Write at most 5 bullets. Include missing evidence and top risks. Use NEEDS_DILIGENCE
+for gaps.
 
-## 5. Market And Macro View
+## 5. Terms And Check
+Write at most 3 bullets. Cover valuation, financing terms, and why the selected check
+size fits the $70K portfolio.
 
-## 6. Founder And Team Assessment
-
-## 7. Product, Moat, And Differentiation
-
-## 8. Traction And Product-Market Fit
-
-## 9. Business Model And Fundamentals
-
-## 10. Valuation And Terms
-
-## 11. Key Risks
-
-## 12. Bull Case
-
-## 13. Bear Case
-
-## 14. Investment Committee Synthesis
-
-## 15. Final Recommendation
-Write 3-4 concise paragraphs with the decisive reason, main risk, and why this does
-or does not deserve a slot in the $70K portfolio.
+## 6. Final Recommendation
+Write 1 concise paragraph, no more than 120 words, with the decisive reason and main
+risk. Do not add sections beyond the six listed above.
 """
 
 

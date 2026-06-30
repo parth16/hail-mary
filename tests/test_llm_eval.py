@@ -160,6 +160,22 @@ def test_llm_eval_prompt_marks_local_documents_untrusted(
     assert "===== LOCAL SOURCE: memo.txt =====" in prepared.user_prompt
 
 
+def test_llm_eval_default_prompt_requests_concise_visible_memo() -> None:
+    prompt = llm_eval.default_operator_prompt(
+        AppConfig(data_dir=Path("data"), local_only=False)
+    )
+
+    assert "Analyze thoroughly before answering" in prompt
+    assert "Do the detailed diligence reasoning internally" in prompt
+    assert "Do not print step-by-step reasoning" in prompt
+    assert "# Hail Mary Direct LLM Diligence Memo: [Company Name]" in prompt
+    assert "Do not add sections beyond the six listed above" in prompt
+    assert "## 6. Final Recommendation" in prompt
+    assert "no more than 120 words" in prompt
+    assert "## 15. Final Recommendation" not in prompt
+    assert "## 14. Investment Committee Synthesis" not in prompt
+
+
 def test_llm_eval_serializes_untrusted_deal_folder_name(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
