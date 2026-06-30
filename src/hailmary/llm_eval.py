@@ -22,6 +22,14 @@ class LLMEvalError(RuntimeError):
     """The direct LLM evaluation could not safely continue."""
 
 
+class LLMEvalIncompleteError(LLMEvalError):
+    """The OpenAI response ended incomplete."""
+
+    def __init__(self, message: str, *, reason: str | None) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 SUPPORTED_LLM_EVAL_SUFFIXES = frozenset({".md", ".txt", ".pdf", ".docx"})
 SOURCE_DOWNLOAD_FOLDER_NAMES = frozenset({"source-download", "source-downloads"})
 UNSUPPORTED_DILIGENCE_SUFFIXES = frozenset(
@@ -30,6 +38,8 @@ UNSUPPORTED_DILIGENCE_SUFFIXES = frozenset(
 DEFAULT_LLM_EVAL_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_MAX_OUTPUT_TOKENS = 8_000
+MAX_OUTPUT_TOKEN_AUTO_RETRY_MULTIPLIER = 3
+MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP = 32_000
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 60 * 60
 ALLOWED_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
@@ -303,21 +313,52 @@ def run_llm_eval(
         background_mode=background_mode,
     )
 
-    _stage(stage_callback, "OpenAI evaluation request")
-    try:
-        response = active_client.create_response(**request_kwargs)
-    except Exception as exc:
-        raise LLMEvalError(f"OpenAI API request failed: {exc}") from exc
+    runtime_warnings: list[str] = []
+    retry_count = 0
+    while True:
+        _stage(stage_callback, "OpenAI evaluation request")
+        try:
+            response = active_client.create_response(**request_kwargs)
+        except Exception as exc:
+            raise LLMEvalError(f"OpenAI API request failed: {exc}") from exc
 
-    _stage(stage_callback, "OpenAI response wait")
-    response = _poll_response_until_finished(
-        active_client,
-        response,
-        poll_interval_seconds=poll_interval_seconds,
-        poll_timeout_seconds=poll_timeout_seconds,
-        sleep=sleep,
-        stage_callback=stage_callback,
-    )
+        _stage(stage_callback, "OpenAI response wait")
+        try:
+            response = _poll_response_until_finished(
+                active_client,
+                response,
+                poll_interval_seconds=poll_interval_seconds,
+                poll_timeout_seconds=poll_timeout_seconds,
+                sleep=sleep,
+                stage_callback=stage_callback,
+            )
+        except LLMEvalIncompleteError as exc:
+            current_max_output_tokens = request_kwargs["max_output_tokens"]
+            retry_max_output_tokens = _auto_retry_max_output_tokens(
+                current_max_output_tokens,
+                retry_count=retry_count,
+                reason=exc.reason,
+            )
+            if retry_max_output_tokens is None:
+                raise
+            retry_count += 1
+            request_kwargs = {
+                **request_kwargs,
+                "max_output_tokens": retry_max_output_tokens,
+            }
+            runtime_warnings.append(
+                "OpenAI hit the "
+                f"{current_max_output_tokens} output-token limit before completing "
+                "the memo, so llm-eval retried once with "
+                f"{retry_max_output_tokens} output tokens."
+            )
+            _stage(
+                stage_callback,
+                "OpenAI response hit max output limit; retrying with "
+                f"{retry_max_output_tokens} output tokens",
+            )
+            continue
+        break
     _stage(stage_callback, "OpenAI response validation")
     if web_search_enabled:
         _validate_web_search_performed(response)
@@ -327,10 +368,11 @@ def run_llm_eval(
         config=config,
         documents=prepared_input.documents,
     )
-    if validated_memo.warnings:
+    validation_warnings = (*runtime_warnings, *validated_memo.warnings)
+    if validation_warnings:
         prepared_input = _prepared_input_with_extra_warnings(
             prepared_input,
-            warnings=validated_memo.warnings,
+            warnings=validation_warnings,
         )
     output_text = validated_memo.output_text
     _stage(stage_callback, "token usage collection")
@@ -1038,6 +1080,23 @@ def _web_search_source_urls(output_item: Any) -> list[str]:
     return urls
 
 
+def _auto_retry_max_output_tokens(
+    current_max_output_tokens: int,
+    *,
+    retry_count: int,
+    reason: str | None,
+) -> int | None:
+    if reason != "max_output_tokens" or retry_count > 0:
+        return None
+    retry_max_output_tokens = min(
+        current_max_output_tokens * MAX_OUTPUT_TOKEN_AUTO_RETRY_MULTIPLIER,
+        MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP,
+    )
+    if retry_max_output_tokens <= current_max_output_tokens:
+        return None
+    return retry_max_output_tokens
+
+
 def _poll_response_until_finished(
     client: LLMEvalClient,
     response: Any,
@@ -1072,7 +1131,12 @@ def _poll_response_until_finished(
                     f"OpenAI background response polling failed: {exc}"
                 ) from exc
             continue
-        if status in {"failed", "cancelled", "incomplete"}:
+        if status == "incomplete":
+            raise LLMEvalIncompleteError(
+                _terminal_response_error(active_response, status=status),
+                reason=_response_incomplete_reason(active_response),
+            )
+        if status in {"failed", "cancelled"}:
             raise LLMEvalError(_terminal_response_error(active_response, status=status))
         raise LLMEvalError(f"OpenAI returned an unexpected response status: {status!r}.")
 
@@ -1083,10 +1147,24 @@ def _stage(callback: Callable[[str], None] | None, stage: str) -> None:
 
 
 def _terminal_response_error(response: Any, *, status: str) -> str:
+    if status == "incomplete" and _response_incomplete_reason(response) == "max_output_tokens":
+        return (
+            "OpenAI stopped before completing the memo because the output-token limit "
+            "was too low. Re-run with a higher `--max-output-tokens` value, for "
+            "example `--max-output-tokens 32000`, or lower `--reasoning-effort`."
+        )
     detail = _response_error_detail(response)
     if detail:
         return f"OpenAI evaluation ended with status {status}: {detail}"
     return f"OpenAI evaluation ended with status {status}."
+
+
+def _response_incomplete_reason(response: Any) -> str | None:
+    incomplete_details = getattr(response, "incomplete_details", None)
+    reason = _object_field(incomplete_details, "reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()
+    return None
 
 
 def _response_error_detail(response: Any) -> str | None:
@@ -1094,11 +1172,7 @@ def _response_error_detail(response: Any) -> str | None:
     message = _object_field(error, "message")
     if isinstance(message, str) and message.strip():
         return message.strip()
-    incomplete_details = getattr(response, "incomplete_details", None)
-    reason = _object_field(incomplete_details, "reason")
-    if isinstance(reason, str) and reason.strip():
-        return reason.strip()
-    return None
+    return _response_incomplete_reason(response)
 
 
 def _response_output_text(response: Any) -> str:

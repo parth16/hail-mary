@@ -282,6 +282,8 @@ def _llm_eval_progress_label(stage: str) -> str:
         return "OpenAI response is queued..."
     if stage == "OpenAI background response in_progress":
         return "OpenAI response is in progress..."
+    if stage.startswith("OpenAI response hit max output limit; retrying"):
+        return "OpenAI hit the output-token limit; retrying with more room..."
     if stage == "OpenAI response validation":
         return "Validating the model memo..."
     if stage == "token usage collection":
