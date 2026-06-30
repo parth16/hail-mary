@@ -102,6 +102,7 @@ def test_llm_eval_document_selection_excludes_zip_and_source_downloads(
     (deal / "legal.docx").write_bytes(b"synthetic docx")
     (deal / "archive.zip").write_bytes(b"synthetic zip")
     (deal / "model.xlsx").write_text("not included", encoding="utf-8")
+    (deal / "screenshot.png").write_bytes(b"synthetic image")
     source_downloads = deal / "source-downloads"
     source_downloads.mkdir()
     (source_downloads / "secret.txt").write_text("SHOULD_NOT_BE_SENT", encoding="utf-8")
@@ -127,6 +128,7 @@ def test_llm_eval_document_selection_excludes_zip_and_source_downloads(
     assert "source-downloads" in excluded_names
     assert "source-download" in excluded_names
     assert any("model.xlsx" in warning for warning in prepared.warnings)
+    assert any("screenshot.png" in warning for warning in prepared.warnings)
 
 
 def test_llm_eval_prompt_marks_local_documents_untrusted(
@@ -634,11 +636,75 @@ def test_llm_eval_rejects_non_exact_recommendation_lines(tmp_path: Path) -> None
             del response_id
             raise AssertionError("retrieve should not be called")
 
-    with pytest.raises(llm_eval.LLMEvalError, match="valid `Decision"):
+    with pytest.raises(llm_eval.LLMEvalError, match="invalid `Decision:` line"):
         llm_eval.run_llm_eval(
             deal,
             config=AppConfig(data_dir=tmp_path / "data", local_only=False),
             client=NonExactMemoClient(),
+            environ={"OPENAI_API_KEY": "test-key"},
+            project_root=tmp_path,
+        )
+
+
+def test_llm_eval_rejects_later_malformed_recommendation_lines(tmp_path: Path) -> None:
+    deal = _write_deal(tmp_path, "LaterBadMemoCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class LaterBadMemoClient:
+        def create_response(self, **_: Any) -> object:
+            return _response(
+                status="completed",
+                output_text=(
+                    "Decision: PASS\n"
+                    "Recommended check size: $0\n\n"
+                    "Cites memo.txt.\n"
+                    "Decision: HOLD\n"
+                    "Recommended check size: $25K\n"
+                ),
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    with pytest.raises(llm_eval.LLMEvalError, match="invalid `Decision:` line"):
+        llm_eval.run_llm_eval(
+            deal,
+            config=AppConfig(data_dir=tmp_path / "data", local_only=False),
+            client=LaterBadMemoClient(),
+            environ={"OPENAI_API_KEY": "test-key"},
+            project_root=tmp_path,
+        )
+
+
+def test_llm_eval_rejects_check_size_outside_config_limits(tmp_path: Path) -> None:
+    deal = _write_deal(tmp_path, "ConfiguredCheckCo")
+    (deal / "memo.txt").write_text("Synthetic source text.", encoding="utf-8")
+
+    class OversizedCheckClient:
+        def create_response(self, **_: Any) -> object:
+            return _response(
+                status="completed",
+                output_text=(
+                    "Decision: INVEST\n"
+                    "Recommended check size: $10K\n\n"
+                    "Cites memo.txt."
+                ),
+            )
+
+        def retrieve_response(self, response_id: str) -> object:
+            del response_id
+            raise AssertionError("retrieve should not be called")
+
+    with pytest.raises(llm_eval.LLMEvalError, match="configured check-size limits"):
+        llm_eval.run_llm_eval(
+            deal,
+            config=AppConfig(
+                data_dir=tmp_path / "data",
+                local_only=False,
+                max_check=5_000,
+            ),
+            client=OversizedCheckClient(),
             environ={"OPENAI_API_KEY": "test-key"},
             project_root=tmp_path,
         )
@@ -663,7 +729,7 @@ def test_llm_eval_rejects_uncited_material_lines(tmp_path: Path) -> None:
             del response_id
             raise AssertionError("retrieve should not be called")
 
-    with pytest.raises(llm_eval.LLMEvalError, match="First unsupported line"):
+    with pytest.raises(llm_eval.LLMEvalError, match="First unsupported line number") as exc:
         llm_eval.run_llm_eval(
             deal,
             config=AppConfig(data_dir=tmp_path / "data", local_only=False),
@@ -671,6 +737,7 @@ def test_llm_eval_rejects_uncited_material_lines(tmp_path: Path) -> None:
             environ={"OPENAI_API_KEY": "test-key"},
             project_root=tmp_path,
         )
+    assert "real revenue" not in str(exc.value)
 
 
 def test_llm_eval_rejects_incomplete_web_search_call(

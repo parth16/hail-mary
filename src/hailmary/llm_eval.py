@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from hailmary.config import AppConfig
+from hailmary.config import CHECK_SIZE_TIERS, AppConfig
 from hailmary.config import _project_root as config_project_root
 from hailmary.ingest.document_classifier import is_ignored_path
 from hailmary.ingest.extractors import extract_document
@@ -23,7 +23,9 @@ class LLMEvalError(RuntimeError):
 
 SUPPORTED_LLM_EVAL_SUFFIXES = frozenset({".md", ".txt", ".pdf", ".docx"})
 SOURCE_DOWNLOAD_FOLDER_NAMES = frozenset({"source-download", "source-downloads"})
-UNSUPPORTED_DILIGENCE_SUFFIXES = frozenset({".csv", ".htm", ".html", ".xlsx"})
+UNSUPPORTED_DILIGENCE_SUFFIXES = frozenset(
+    {".csv", ".htm", ".html", ".jpeg", ".jpg", ".png", ".xlsx"}
+)
 DEFAULT_LLM_EVAL_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_MAX_OUTPUT_TOKENS = 8_000
@@ -34,12 +36,20 @@ MAX_DOCUMENT_SOURCE_CHARS = 80_000
 MAX_TOTAL_SOURCE_CHARS = 240_000
 ALLOWED_CHECK_SIZE_TEXT = "$0, $1K, $2.5K, $5K, $7.5K, or $10K"
 UNCERTAINTY_LABELS = frozenset({"UNVERIFIED", "INFERRED", "NEEDS_DILIGENCE"})
-_DECISION_RE = re.compile(
-    r"(?im)^\s*(?:\*\*)?Decision(?:\*\*)?\s*:\s*(INVEST|PASS)\s*(?:\*\*)?\s*$"
+CHECK_SIZE_BY_TEXT = {
+    "$0": 0,
+    "$1K": 1_000,
+    "$2.5K": 2_500,
+    "$5K": 5_000,
+    "$7.5K": 7_500,
+    "$10K": 10_000,
+}
+CHECK_SIZE_TEXT_BY_VALUE = {value: text for text, value in CHECK_SIZE_BY_TEXT.items()}
+_DECISION_LINE_RE = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Decision(?:\*\*)?\s*:\s*(.*?)\s*$"
 )
-_CHECK_SIZE_RE = re.compile(
-    r"(?im)^\s*(?:\*\*)?Recommended check size(?:\*\*)?\s*:\s*"
-    r"(\$0|\$1K|\$2\.5K|\$5K|\$7\.5K|\$10K)\s*(?:\*\*)?\s*$"
+_CHECK_SIZE_LINE_RE = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Recommended check size(?:\*\*)?\s*:\s*(.*?)\s*$"
 )
 _SKIP_LINEAGE_LINE_RE = re.compile(
     r"(?i)^\s*(?:[-*]\s*)?(?:decision|recommended check size|conviction)\s*:"
@@ -286,7 +296,11 @@ def run_llm_eval(
     if web_search_enabled:
         _validate_web_search_performed(response)
     output_text = _response_output_text(response)
-    _validate_memo_output(output_text, documents=prepared_input.documents)
+    _validate_memo_output(
+        output_text,
+        config=config,
+        documents=prepared_input.documents,
+    )
     usage = _response_usage(response)
     return LLMEvalResult(
         output_text=output_text,
@@ -319,7 +333,11 @@ def load_prompt_file(path: Path) -> str:
 
 
 def default_operator_prompt(config: AppConfig) -> str:
-    return DEFAULT_OPERATOR_PROMPT.replace("$70K", _portfolio_budget_text(config))
+    prompt = DEFAULT_OPERATOR_PROMPT.replace("$70K", _portfolio_budget_text(config))
+    return prompt.replace(
+        "choose exactly one check size: $1K, $2.5K, $5K, $7.5K, or $10K",
+        _configured_invest_check_prompt(config),
+    )
 
 
 def resolve_deal_folder(
@@ -747,22 +765,63 @@ def _validate_request_options(
 def _validate_memo_output(
     output_text: str,
     *,
+    config: AppConfig,
     documents: Sequence[LLMEvalDocument],
 ) -> None:
-    decision_match = _DECISION_RE.search(output_text)
-    if decision_match is None:
+    decision_lines = _recommendation_field_lines(output_text, _DECISION_LINE_RE)
+    if not decision_lines:
         raise LLMEvalError(
             "OpenAI returned a memo without a valid `Decision: INVEST` or "
             "`Decision: PASS` line."
         )
-    decision = decision_match.group(1)
-    check_size_match = _CHECK_SIZE_RE.search(output_text)
-    if check_size_match is None:
+    invalid_decision_line = next(
+        (
+            line_number
+            for line_number, value in decision_lines
+            if value not in {"INVEST", "PASS"}
+        ),
+        None,
+    )
+    if invalid_decision_line is not None:
+        raise LLMEvalError(
+            "OpenAI returned an invalid `Decision:` line at line "
+            f"{invalid_decision_line}. Allowed decisions are INVEST or PASS."
+        )
+    decisions = {value for _, value in decision_lines}
+    if len(decisions) != 1:
+        raise LLMEvalError("OpenAI returned conflicting `Decision:` lines.")
+    decision = next(iter(decisions))
+
+    check_size_lines = _recommendation_field_lines(output_text, _CHECK_SIZE_LINE_RE)
+    if not check_size_lines:
         raise LLMEvalError(
             "OpenAI returned a memo without a valid `Recommended check size:` line. "
             f"Allowed check sizes are {ALLOWED_CHECK_SIZE_TEXT}."
         )
-    check_size = check_size_match.group(1)
+    invalid_check_line = next(
+        (
+            line_number
+            for line_number, value in check_size_lines
+            if value not in CHECK_SIZE_BY_TEXT
+        ),
+        None,
+    )
+    if invalid_check_line is not None:
+        raise LLMEvalError(
+            "OpenAI returned an invalid `Recommended check size:` line at line "
+            f"{invalid_check_line}. Allowed check sizes are {ALLOWED_CHECK_SIZE_TEXT}."
+        )
+    check_sizes = {value for _, value in check_size_lines}
+    if len(check_sizes) != 1:
+        raise LLMEvalError("OpenAI returned conflicting `Recommended check size:` lines.")
+    check_size = next(iter(check_sizes))
+    allowed_check_sizes = _allowed_check_size_texts(config)
+    if check_size not in allowed_check_sizes:
+        allowed_text = _check_size_text_list(allowed_check_sizes)
+        raise LLMEvalError(
+            "OpenAI returned a check size outside the configured check-size limits. "
+            f"Allowed check sizes for this run are {allowed_text}."
+        )
     if decision == "PASS" and check_size != "$0":
         raise LLMEvalError("OpenAI returned PASS with a nonzero check size.")
     if decision == "INVEST" and check_size == "$0":
@@ -783,8 +842,8 @@ def _validate_claim_lineage(
     }
     source_header_names = {_source_header_name(source_name) for source_name in source_names}
     unsupported_lines = [
-        line.strip()
-        for line in output_text.splitlines()
+        (line_number, line.strip())
+        for line_number, line in enumerate(output_text.splitlines(), start=1)
         if _line_needs_lineage(line)
         and not _line_has_lineage(
             line,
@@ -793,12 +852,27 @@ def _validate_claim_lineage(
         )
     ]
     if unsupported_lines:
-        example = unsupported_lines[0]
+        line_number, _ = unsupported_lines[0]
         raise LLMEvalError(
             "OpenAI returned memo text with material lines that lack a local filename "
             "citation, web URL citation, or required uncertainty label. First unsupported "
-            f"line: {example}"
+            f"line number: {line_number}."
         )
+
+
+def _recommendation_field_lines(
+    output_text: str,
+    pattern: re.Pattern[str],
+) -> list[tuple[int, str]]:
+    return [
+        (line_number, _clean_recommendation_value(match.group(1)))
+        for line_number, line in enumerate(output_text.splitlines(), start=1)
+        if (match := pattern.match(line)) is not None
+    ]
+
+
+def _clean_recommendation_value(value: str) -> str:
+    return value.strip().strip("*").strip()
 
 
 def _line_needs_lineage(line: str) -> bool:
@@ -1025,3 +1099,35 @@ def _portfolio_budget_text(config: AppConfig) -> str:
     if budget % 1_000 == 0:
         return f"${budget // 1_000:,}K"
     return f"${budget:,}"
+
+
+def _configured_invest_check_prompt(config: AppConfig) -> str:
+    nonzero_checks = sorted(_allowed_check_size_texts(config) - {"$0"})
+    if not nonzero_checks:
+        return "no nonzero check size is configured; use PASS and $0"
+    return f"choose exactly one check size: {_check_size_text_list(set(nonzero_checks))}"
+
+
+def _allowed_check_size_texts(config: AppConfig) -> set[str]:
+    maximum_check = min(config.max_check, config.capital_budget)
+    allowed_values = {
+        tier
+        for tier in CHECK_SIZE_TIERS
+        if tier == 0 or config.min_check <= tier <= maximum_check
+    }
+    return {
+        CHECK_SIZE_TEXT_BY_VALUE[tier]
+        for tier in allowed_values
+        if tier in CHECK_SIZE_TEXT_BY_VALUE
+    }
+
+
+def _check_size_text_list(check_sizes: set[str]) -> str:
+    ordered = [
+        CHECK_SIZE_TEXT_BY_VALUE[tier]
+        for tier in CHECK_SIZE_TIERS
+        if CHECK_SIZE_TEXT_BY_VALUE.get(tier) in check_sizes
+    ]
+    if len(ordered) <= 1:
+        return ordered[0] if ordered else "$0"
+    return f"{', '.join(ordered[:-1])}, or {ordered[-1]}"
