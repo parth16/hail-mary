@@ -129,27 +129,18 @@ def test_load_config_reads_project_dotenv_without_overriding_shell(
                 os.environ[name] = value
 
 
-def test_load_config_ignores_operator_mock_llm_settings(
+def test_load_config_ignores_legacy_saved_mock_llm_setting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    previous_value = os.environ.get("HAILMARY_MOCK_LLM")
-    try:
-        os.environ.pop("HAILMARY_MOCK_LLM", None)
-        config_dir = tmp_path / ".hailmary"
-        config_dir.mkdir()
-        (config_dir / "config.yaml").write_text("mock_llm: true\n", encoding="utf-8")
-        (tmp_path / ".env").write_text("HAILMARY_MOCK_LLM=true\n", encoding="utf-8")
+    config_dir = tmp_path / ".hailmary"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("mock_llm: true\n", encoding="utf-8")
 
-        config = load_config()
+    config = load_config()
 
-        assert config.mock_llm is False
-    finally:
-        if previous_value is None:
-            os.environ.pop("HAILMARY_MOCK_LLM", None)
-        else:
-            os.environ["HAILMARY_MOCK_LLM"] = previous_value
+    assert config.mock_llm is False
 
 
 def test_init_adds_repo_local_custom_data_dir_to_local_git_exclude(

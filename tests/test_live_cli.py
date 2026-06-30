@@ -147,7 +147,6 @@ def _live_cli_env(
                 data_dir / "browser-profiles" / "meridian"
             ),
             "HAILMARY_LOCAL_ONLY": "true",
-            "HAILMARY_MOCK_LLM": "true",
             "HAILMARY_ENABLE_WEB_RESEARCH": "false",
             "HAILMARY_ENABLE_OCR": "false",
             "HAILMARY_CALCULATED_RISK_MODE": "true",
