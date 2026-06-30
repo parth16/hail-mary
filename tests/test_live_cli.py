@@ -16,7 +16,13 @@ def test_live_evaluate_deal_cli_smoke_uses_real_wrapper() -> None:
     assert wrapper.is_file()
 
     config_dir = repo_root / ".hailmary"
-    with tempfile.TemporaryDirectory(prefix="evaluate-deal-") as raw_work_dir:
+    exclude_path = _git_exclude_path(repo_root)
+    original_exclude = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else None
+
+    with tempfile.TemporaryDirectory(
+        prefix="evaluate-deal-",
+        dir=repo_root.parent,
+    ) as raw_work_dir:
         work_dir = Path(raw_work_dir).resolve(strict=True)
         saved_config_dir = work_dir / "saved-hailmary-config"
         config_was_moved = False
@@ -93,11 +99,32 @@ def test_live_evaluate_deal_cli_smoke_uses_real_wrapper() -> None:
             assert export["privacy"]["contains_raw_evidence_text"] is False
             assert export["privacy"]["contains_model_excerpts"] is False
         finally:
-            if config_was_moved:
-                shutil.rmtree(config_dir, ignore_errors=True)
-                saved_config_dir.rename(config_dir)
-            else:
-                shutil.rmtree(config_dir, ignore_errors=True)
+            try:
+                if config_was_moved:
+                    shutil.rmtree(config_dir, ignore_errors=True)
+                    saved_config_dir.rename(config_dir)
+                else:
+                    shutil.rmtree(config_dir, ignore_errors=True)
+            finally:
+                _restore_git_exclude(exclude_path, original_exclude)
+
+
+def _git_exclude_path(repo_root: Path) -> Path:
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--git-path", "info/exclude"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    return Path(result.stdout.strip())
+
+
+def _restore_git_exclude(path: Path, original_text: str | None) -> None:
+    if original_text is None:
+        path.unlink(missing_ok=True)
+        return
+    path.write_text(original_text, encoding="utf-8")
 
 
 def _live_cli_env(
