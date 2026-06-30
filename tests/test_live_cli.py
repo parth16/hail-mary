@@ -16,16 +16,14 @@ def test_live_evaluate_deal_cli_smoke_uses_real_wrapper() -> None:
     assert wrapper.is_file()
 
     config_dir = repo_root / ".hailmary"
-    config_dir_existed = config_dir.exists() or config_dir.is_symlink()
-    temp_parent = repo_root / "tmp" / "live-cli-tests"
-    temp_parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        with tempfile.TemporaryDirectory(
-            prefix="evaluate-deal-",
-            dir=temp_parent,
-        ) as raw_work_dir:
-            work_dir = Path(raw_work_dir).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix="evaluate-deal-") as raw_work_dir:
+        work_dir = Path(raw_work_dir).resolve(strict=True)
+        saved_config_dir = work_dir / "saved-hailmary-config"
+        config_was_moved = False
+        try:
+            if config_dir.exists() or config_dir.is_symlink():
+                config_dir.rename(saved_config_dir)
+                config_was_moved = True
             company_dir = work_dir / "SyntheticLiveCliCo"
             company_dir.mkdir()
             (company_dir / "memo.txt").write_text(
@@ -47,7 +45,7 @@ def test_live_evaluate_deal_cli_smoke_uses_real_wrapper() -> None:
                     str(data_dir),
                     "--skip-research",
                 ],
-                cwd=repo_root,
+                cwd=work_dir,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -94,9 +92,12 @@ def test_live_evaluate_deal_cli_smoke_uses_real_wrapper() -> None:
             assert export["deal"]["evaluation_mode"] == "local-only"
             assert export["privacy"]["contains_raw_evidence_text"] is False
             assert export["privacy"]["contains_model_excerpts"] is False
-    finally:
-        if not config_dir_existed:
-            shutil.rmtree(config_dir, ignore_errors=True)
+        finally:
+            if config_was_moved:
+                shutil.rmtree(config_dir, ignore_errors=True)
+                saved_config_dir.rename(config_dir)
+            else:
+                shutil.rmtree(config_dir, ignore_errors=True)
 
 
 def _live_cli_env(
