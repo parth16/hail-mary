@@ -70,6 +70,7 @@ USASPENDING_AWARD_FIELDS = [
     "Start Date",
     "End Date",
     "Award Amount",
+    "Loan Value",
     "Award Type",
     "Awarding Agency",
     "Awarding Sub Agency",
@@ -78,31 +79,18 @@ USASPENDING_AWARD_FIELDS = [
     "Description",
     "generated_internal_id",
 ]
+USASPENDING_AWARD_TYPE_CODE_GROUPS = (
+    ("A", "B", "C", "D"),
+    ("IDV_A", "IDV_B", "IDV_B_A", "IDV_B_B", "IDV_B_C", "IDV_C", "IDV_D", "IDV_E"),
+    ("02", "03", "04", "05", "F001", "F002"),
+    ("07", "08", "F003", "F004"),
+    ("06", "10", "F006", "F007"),
+    ("09", "11", "-1", "F005", "F008", "F009", "F010"),
+)
 USASPENDING_AWARD_TYPE_CODES = [
-    "-1",
-    "02",
-    "03",
-    "04",
-    "05",
-    "06",
-    "07",
-    "08",
-    "09",
-    "10",
-    "11",
-    "A",
-    "B",
-    "C",
-    "D",
-    "IDV_A",
-    "IDV_B",
-    "IDV_B_A",
-    "IDV_B_B",
-    "IDV_B_C",
-    "IDV_C",
-    "IDV_D",
-    "IDV_E",
+    code for group in USASPENDING_AWARD_TYPE_CODE_GROUPS for code in group
 ]
+USASPENDING_LOAN_AWARD_TYPE_CODES = ("07", "08", "F003", "F004")
 USASPENDING_MAX_PAGES = 20
 SBIR_AWARDS_ENDPOINT = "https://api.www.sbir.gov/public/api/awards"
 SBIR_MAX_PAGES = 20
@@ -228,6 +216,7 @@ class UsaspendingAwardRecord(BaseModel):
     recipient_name: str = Field(alias="Recipient Name")
     generated_internal_id: str | None = None
     award_amount: float | None = Field(default=None, alias="Award Amount")
+    loan_value: float | None = Field(default=None, alias="Loan Value")
     award_type: str | None = Field(default=None, alias="Award Type")
     awarding_agency: str | None = Field(default=None, alias="Awarding Agency")
     awarding_sub_agency: str | None = Field(default=None, alias="Awarding Sub Agency")
@@ -888,9 +877,45 @@ class UrlLibUsaspendingAwardsClient:
         page: int,
         timeout_seconds: float,
     ) -> UsaspendingAwardsResponse:
+        merged_results: list[dict[str, Any]] = []
+        has_next = False
+        for award_type_codes in USASPENDING_AWARD_TYPE_CODE_GROUPS:
+            response = self._search_awards_page(
+                company_name,
+                limit=limit,
+                page=page,
+                timeout_seconds=timeout_seconds,
+                award_type_codes=award_type_codes,
+            )
+            merged_results.extend(response.results)
+            has_next = has_next or response.has_next_page
+        return UsaspendingAwardsResponse.model_validate(
+            {
+                "results": merged_results,
+                "page_metadata": {
+                    "page": page,
+                    "hasNext": has_next,
+                },
+            }
+        )
+
+    def _search_awards_page(
+        self,
+        company_name: str,
+        *,
+        limit: int,
+        page: int,
+        timeout_seconds: float,
+        award_type_codes: tuple[str, ...],
+    ) -> UsaspendingAwardsResponse:
         _validate_usaspending_api_url(USASPENDING_AWARDS_ENDPOINT)
         _ensure_usaspending_resolved_public_endpoint(USASPENDING_AWARDS_ENDPOINT)
-        payload = _usaspending_awards_payload(company_name, limit=limit, page=page)
+        payload = _usaspending_awards_payload(
+            company_name,
+            limit=limit,
+            page=page,
+            award_type_codes=award_type_codes,
+        )
         request = urllib.request.Request(
             USASPENDING_AWARDS_ENDPOINT,
             data=json.dumps(payload).encode("utf-8"),
@@ -1545,10 +1570,11 @@ def collect_usaspending_awards(
     deal_summaries: list[ResearchCollectionDealSummary] = []
     for deal in deals:
         deal_results: list[ResearchResultInput] = []
+        deal_candidates: list[tuple[float, ResearchResultInput]] = []
         page = 1
         seen_awards: set[str] = set()
         try:
-            while len(deal_results) < limit:
+            while len(deal_candidates) < limit:
                 awards_response = awards_client.search_awards(
                     deal.company_name,
                     limit=limit,
@@ -1569,22 +1595,19 @@ def collect_usaspending_awards(
                         if dedupe_key in seen_awards:
                             continue
                         seen_awards.add(dedupe_key)
-                    deal_results.append(
-                        _research_result_from_usaspending_award(
-                            deal,
-                            award,
-                            provider=provider,
-                            collected_at=collected_at,
-                            identity_match=match,
-                        )
+                    result = _research_result_from_usaspending_award(
+                        deal,
+                        award,
+                        provider=provider,
+                        collected_at=collected_at,
+                        identity_match=match,
                     )
-                    if len(deal_results) >= limit:
-                        break
-                if len(deal_results) >= limit or not awards_response.has_next_page:
+                    deal_candidates.append((_usaspending_award_value(award), result))
+                if len(deal_candidates) >= limit or not awards_response.has_next_page:
                     break
                 page += 1
                 if page > USASPENDING_MAX_PAGES:
-                    match_count = len(deal_results)
+                    match_count = len(deal_candidates)
                     if match_count == 1:
                         match_text = (
                             "saved 1 exact recipient-name match it already validated"
@@ -1605,11 +1628,18 @@ def collect_usaspending_awards(
                     break
         except UsaspendingApiError as exc:
             raise ResearchCollectionError(str(exc)) from exc
+        ordered_deal_results = [
+            result
+            for _value, result in sorted(
+                deal_candidates,
+                key=lambda candidate: -candidate[0],
+            )
+        ]
         deal_results = _rank_public_results(
-            deal_results,
+            ordered_deal_results,
             deal=deal,
             collected_at=collected_at,
-        )
+        )[:limit]
         results.extend(deal_results)
         deal_summaries.append(
             ResearchCollectionDealSummary(
@@ -2442,19 +2472,35 @@ def _usaspending_awards_payload(
     *,
     limit: int,
     page: int,
+    award_type_codes: Iterable[str] | None = None,
 ) -> dict[str, object]:
+    award_codes = list(award_type_codes or USASPENDING_AWARD_TYPE_CODE_GROUPS[0])
     return {
         "subawards": False,
         "limit": limit,
         "page": page,
-        "sort": "Award Amount",
+        "sort": _usaspending_award_sort_field(award_codes),
         "order": "desc",
         "filters": {
             "recipient_search_text": [company_name],
-            "award_type_codes": USASPENDING_AWARD_TYPE_CODES,
+            "award_type_codes": award_codes,
         },
         "fields": USASPENDING_AWARD_FIELDS,
     }
+
+
+def _usaspending_award_sort_field(award_type_codes: Iterable[str]) -> str:
+    if set(award_type_codes) == set(USASPENDING_LOAN_AWARD_TYPE_CODES):
+        return "Loan Value"
+    return "Award Amount"
+
+
+def _usaspending_award_value(award: UsaspendingAwardRecord) -> float:
+    if award.loan_value is not None:
+        return award.loan_value
+    if award.award_amount is not None:
+        return award.award_amount
+    return 0.0
 
 
 def _sbir_awards_api_url(
@@ -2962,6 +3008,8 @@ def _usaspending_award_text(award: UsaspendingAwardRecord) -> str:
         parts.append(f"Recipient UEI: {award.recipient_uei}.")
     if award.award_amount is not None:
         parts.append(f"Award amount: {_format_money(award.award_amount)}.")
+    if award.loan_value is not None:
+        parts.append(f"Loan value: {_format_money(award.loan_value)}.")
     if award.award_type:
         parts.append(f"Award type: {award.award_type}.")
     if award.start_date or award.end_date:

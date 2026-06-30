@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import socket
+import ssl
 import sys
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+import certifi
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field, ValidationError
 
@@ -254,6 +256,7 @@ class _BoundHTTPSConnection(http.client.HTTPSConnection):
         **kwargs: Any,
     ) -> None:
         self._provider_id = provider_id
+        kwargs.setdefault("context", _verified_https_context())
         super().__init__(host, port=port, **kwargs)
 
     def connect(self) -> None:
@@ -281,6 +284,12 @@ def _connection_factory(
         return connection_class(host, provider_id=provider_id, **kwargs)
 
     return factory
+
+
+def _verified_https_context() -> ssl.SSLContext:
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 def _open_vetted_socket(

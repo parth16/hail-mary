@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 import hailmary.cli as cli_module
 import hailmary.research.collection as collection_module
 import hailmary.research.public_web as public_web_module
+import hailmary.research.web as web_module
 import hailmary.research.workflow as workflow_module
 from hailmary.agents.packets import build_agent_input_packet
 from hailmary.cli import app
@@ -2590,6 +2591,54 @@ def test_collect_usaspending_awards_paginates_until_exact_match(
     assert saved["results"][0]["title"] == "USAspending award FAKE-222 for Acme AI"
 
 
+def test_collect_usaspending_awards_ranks_merged_groups_before_limit(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(
+        data_dir=tmp_path / "data",
+        local_only=False,
+        enable_web_research=True,
+    )
+    client = _FakeUsaspendingAwardsClient(
+        {
+            ("Acme AI", 1): _usaspending_response(
+                [
+                    _usaspending_award(
+                        recipient_name="Acme AI",
+                        award_id="CONTRACT-LOW",
+                        generated_internal_id="CONT_AWD_LOW",
+                        award_amount=100.0,
+                    ),
+                    _usaspending_award(
+                        recipient_name="Acme AI",
+                        award_id="LOAN-HIGH",
+                        generated_internal_id="LOAN_AWD_HIGH",
+                        award_amount=None,
+                        loan_value=500_000.0,
+                    ),
+                ],
+            ),
+        }
+    )
+
+    result = collect_usaspending_awards(
+        config=config,
+        company_names=["Acme AI"],
+        limit=1,
+        client=client,
+        collected_at=BUILT_AT,
+    )
+
+    assert len(result.match_details) == 2
+    assert result.output_path is not None
+    saved = json.loads(result.output_path.read_text(encoding="utf-8"))
+    assert len(saved["results"]) == 1
+    prepared = saved["results"][0]
+    assert prepared["title"] == "USAspending award LOAN-HIGH for Acme AI"
+    assert "Loan value: $500,000.00." in prepared["text"]
+    assert "CONTRACT-LOW" not in prepared["text"]
+
+
 def test_collect_usaspending_awards_does_not_report_no_match_after_page_cap(
     tmp_path: Path,
 ) -> None:
@@ -3043,20 +3092,167 @@ def test_usaspending_client_wraps_guarded_dns_failures_during_open(
         )
 
 
+def test_guarded_https_connection_uses_certifi_without_operator_ca_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contexts: list[_FakeSSLContext] = []
+    cafiles: list[str | None] = []
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    monkeypatch.setattr(web_module.certifi, "where", lambda: "/synthetic/certifi.pem")
+
+    def fake_create_default_context(
+        *,
+        cafile: str | None = None,
+        capath: str | None = None,
+        cadata: str | None = None,
+    ) -> _FakeSSLContext:
+        _ = (capath, cadata)
+        cafiles.append(cafile)
+        context = _FakeSSLContext()
+        contexts.append(context)
+        return context
+
+    monkeypatch.setattr(web_module.ssl, "create_default_context", fake_create_default_context)
+
+    connection = web_module._BoundHTTPSConnection(
+        "api.usaspending.gov",
+        provider_id="usaspending",
+    )
+
+    assert cafiles == ["/synthetic/certifi.pem"]
+    assert connection._context is contexts[0]
+
+
+def test_guarded_https_connection_honors_operator_ca_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cafiles: list[str | None] = []
+    monkeypatch.setenv("SSL_CERT_FILE", "/synthetic/operator-ca.pem")
+
+    def fake_create_default_context(
+        *,
+        cafile: str | None = None,
+        capath: str | None = None,
+        cadata: str | None = None,
+    ) -> _FakeSSLContext:
+        _ = (capath, cadata)
+        cafiles.append(cafile)
+        return _FakeSSLContext()
+
+    monkeypatch.setattr(web_module.ssl, "create_default_context", fake_create_default_context)
+
+    web_module._BoundHTTPSConnection(
+        "api.usaspending.gov",
+        provider_id="usaspending",
+    )
+
+    assert cafiles == [None]
+
+
 def test_usaspending_awards_payload_uses_requested_page() -> None:
     payload = collection_module._usaspending_awards_payload(
         "Acme AI",
         limit=7,
         page=3,
+        award_type_codes=("02", "03"),
     )
 
     assert payload["limit"] == 7
     assert payload["page"] == 3
+    assert payload["sort"] == "Award Amount"
     filters = payload["filters"]
     assert isinstance(filters, dict)
-    award_type_codes = filters["award_type_codes"]
-    assert isinstance(award_type_codes, list)
-    assert "-1" in award_type_codes
+    assert filters["award_type_codes"] == ["02", "03"]
+
+
+def test_usaspending_awards_payload_uses_loan_safe_sort() -> None:
+    payload = collection_module._usaspending_awards_payload(
+        "Acme AI",
+        limit=7,
+        page=3,
+        award_type_codes=collection_module.USASPENDING_LOAN_AWARD_TYPE_CODES,
+    )
+
+    assert payload["sort"] == "Loan Value"
+
+
+def test_usaspending_client_requests_award_type_groups_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        collection_module,
+        "_ensure_usaspending_resolved_public_endpoint",
+        lambda _url: None,
+    )
+    request_payloads: list[dict[str, object]] = []
+
+    class FakeResponse:
+        headers: object
+
+        def __init__(self) -> None:
+            self.headers = _FakeHeaders()
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return collection_module.USASPENDING_AWARDS_ENDPOINT
+
+        def read(self, _size: int) -> bytes:
+            return b'{"results":[],"page_metadata":{"page":1,"hasNext":false}}'
+
+    class FakeOpener:
+        def open(
+            self,
+            request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> FakeResponse:
+            _ = timeout
+            data = request.data
+            assert data is not None
+            request_payloads.append(json.loads(data.decode("utf-8")))
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_handlers: FakeOpener(),
+    )
+
+    response = UrlLibUsaspendingAwardsClient().search_awards(
+        "Acme AI",
+        limit=1,
+        page=1,
+        timeout_seconds=1.0,
+    )
+
+    requested_groups: list[tuple[str, ...]] = []
+    sort_fields: list[str] = []
+    for payload in request_payloads:
+        filters = payload["filters"]
+        assert isinstance(filters, dict)
+        award_type_codes = filters["award_type_codes"]
+        assert isinstance(award_type_codes, list)
+        requested_groups.append(tuple(str(code) for code in award_type_codes))
+        sort_field = payload["sort"]
+        assert isinstance(sort_field, str)
+        sort_fields.append(sort_field)
+    assert requested_groups == list(collection_module.USASPENDING_AWARD_TYPE_CODE_GROUPS)
+    assert sort_fields == [
+        (
+            "Loan Value"
+            if group == collection_module.USASPENDING_LOAN_AWARD_TYPE_CODES
+            else "Award Amount"
+        )
+        for group in collection_module.USASPENDING_AWARD_TYPE_CODE_GROUPS
+    ]
+    assert response.results == []
+    assert response.has_next_page is False
 
 
 def test_collect_usaspending_awards_dry_run_does_not_call_api(
@@ -9378,6 +9574,12 @@ class _FakeHeaders:
         return "utf-8"
 
 
+class _FakeSSLContext:
+    def wrap_socket(self, sock: object, *, server_hostname: str) -> object:
+        _ = server_hostname
+        return sock
+
+
 class _FakeUsaspendingAwardsClient:
     def __init__(
         self,
@@ -9597,6 +9799,7 @@ def _usaspending_award(
     award_id: str = "FAKE-123",
     generated_internal_id: str = "CONT_AWD_FAKE_123",
     award_amount: float | None = None,
+    loan_value: float | None = None,
     description: str | None = None,
 ) -> UsaspendingAwardRecord:
     return UsaspendingAwardRecord.model_validate(
@@ -9606,6 +9809,7 @@ def _usaspending_award(
             "Recipient UEI": "UEI123",
             "generated_internal_id": generated_internal_id,
             "Award Amount": award_amount,
+            "Loan Value": loan_value,
             "Award Type": "Contract",
             "Awarding Agency": "Department of Example",
             "Awarding Sub Agency": "Example Office",
