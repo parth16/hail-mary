@@ -44,6 +44,7 @@ from hailmary.research import (
     ResearchProviderRunStatus,
     ResearchQualityStatus,
     ResearchWorkflowCollectionSummary,
+    ResearchWorkflowImportPreview,
     ResearchWorkflowIssue,
     ResearchWorkflowRunSummary,
     SbirAwardsResponse,
@@ -1579,23 +1580,94 @@ def test_evaluate_deal_blocks_bad_provider_results_file(
     assert not list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
 
 
-def test_evaluate_deal_blocks_research_workflow_errors_before_scoring(
+def test_evaluate_deal_continues_when_live_provider_is_rate_limited(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    company_dir = _write_company_folder(tmp_path, company_name="LiveFailCo")
+    company_dir = _write_company_folder(tmp_path, company_name="RateLimitedResearchCo")
 
     def fake_run_research_workflow(**_: object) -> ResearchWorkflowRunSummary:
         return _research_workflow_summary(
             tmp_path,
-            company_name="LiveFailCo",
+            company_name="RateLimitedResearchCo",
             live_collection_enabled=True,
+            collections=[
+                ResearchWorkflowCollectionSummary(
+                    kind="live_public",
+                    source_id="sbir",
+                    source_name="SBIR/STTR",
+                    status=ResearchProviderRunStatus.FAILED,
+                    error="SBIR/STTR returned HTTP 429.",
+                )
+            ],
+            issues=[
+                ResearchWorkflowIssue(
+                    severity="warning",
+                    source="SBIR/STTR",
+                    message="SBIR/STTR returned HTTP 429.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(evaluation, "run_research_workflow", fake_run_research_workflow)
+
+    result = evaluate_deal_folder(
+        company_dir,
+        config=AppConfig(
+            data_dir=tmp_path / "data",
+            local_only=False,
+            enable_web_research=True,
+            mock_llm=True,
+        ),
+        max_concurrency=1,
+    )
+
+    assert result.research_run is not None
+    assert result.research_run.workflow.blocking_issue_count == 0
+    assert result.research_run.workflow.summary.failed_provider_count == 1
+    assert any(
+        "Research warning: SBIR/STTR: SBIR/STTR returned HTTP 429."
+        in warning
+        for warning in result.warnings
+    )
+    assert list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
+
+
+def test_evaluate_deal_blocks_when_generated_research_import_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    company_dir = _write_company_folder(tmp_path, company_name="GeneratedImportFailCo")
+    generated_path = tmp_path / "data" / "research-results" / "generated-sbir-results.json"
+
+    def fake_run_research_workflow(**_: object) -> ResearchWorkflowRunSummary:
+        return _research_workflow_summary(
+            tmp_path,
+            company_name="GeneratedImportFailCo",
+            live_collection_enabled=True,
+            collections=[
+                ResearchWorkflowCollectionSummary(
+                    kind="live_public",
+                    source_id="sbir",
+                    source_name="SBIR/STTR",
+                    status=ResearchProviderRunStatus.FETCHED,
+                    output_path=generated_path,
+                    result_count=1,
+                )
+            ],
+            import_previews=[
+                ResearchWorkflowImportPreview(
+                    input_path=generated_path,
+                    error="The generated SBIR/STTR results file could not be imported.",
+                )
+            ],
             issues=[
                 ResearchWorkflowIssue(
                     severity="error",
-                    source="Direct public web pages",
-                    message="Could not fetch the public page.",
+                    source=f"import dry run for {generated_path}",
+                    message="The generated SBIR/STTR results file could not be imported.",
                 )
             ],
         )
@@ -1604,7 +1676,7 @@ def test_evaluate_deal_blocks_research_workflow_errors_before_scoring(
 
     with pytest.raises(
         EvaluationError,
-        match="External research failed before scoring: Direct public web pages",
+        match="External research results were collected but could not be imported",
     ):
         evaluate_deal_folder(
             company_dir,
@@ -1612,9 +1684,9 @@ def test_evaluate_deal_blocks_research_workflow_errors_before_scoring(
                 data_dir=tmp_path / "data",
                 local_only=False,
                 enable_web_research=True,
+                mock_llm=True,
             ),
             max_concurrency=1,
-            website_url="https://example.com/livefailco",
         )
 
     assert not list((tmp_path / "data" / "reports").glob("*-final-evaluation.md"))
@@ -4955,6 +5027,7 @@ def _research_workflow_summary(
     company_name: str,
     live_collection_enabled: bool,
     collections: list[ResearchWorkflowCollectionSummary] | None = None,
+    import_previews: list[ResearchWorkflowImportPreview] | None = None,
     issues: list[ResearchWorkflowIssue] | None = None,
 ) -> ResearchWorkflowRunSummary:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
@@ -4974,6 +5047,7 @@ def _research_workflow_summary(
         plan_path=root / "data" / "research-plans" / "synthetic-plan.json",
         result_template_path=root / "data" / "research-results" / "synthetic-template.json",
         collections=collections or [],
+        import_previews=import_previews or [],
         issues=issues or [],
         live_collection_enabled=live_collection_enabled,
     )
