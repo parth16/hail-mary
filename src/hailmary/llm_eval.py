@@ -685,7 +685,7 @@ def _run_map_reduce_llm_eval(
         source_documents=prepared_input.source_documents,
         excluded_paths=prepared_input.excluded_paths,
         source_plan=map_reduce_source_plan,
-        warnings=prepared_input.warnings,
+        warnings=_warnings_without_direct_truncation_warnings(prepared_input),
         instructions=REDUCE_LLM_EVAL_INSTRUCTIONS,
         operator_prompt=prepared_input.operator_prompt,
         user_prompt=build_llm_eval_reduce_prompt(
@@ -729,6 +729,22 @@ def _run_map_reduce_llm_eval(
     )
 
 
+def _warnings_without_direct_truncation_warnings(
+    prepared_input: LLMEvalPreparedInput,
+) -> tuple[str, ...]:
+    direct_truncation_prefixes = tuple(
+        f"{item.relative_path.as_posix()}: source text was truncated "
+        for item in prepared_input.source_plan.truncated_items
+    )
+    if not direct_truncation_prefixes:
+        return prepared_input.warnings
+    return tuple(
+        warning
+        for warning in prepared_input.warnings
+        if not warning.startswith(direct_truncation_prefixes)
+    )
+
+
 def _source_plan_for_map_reduce(
     prepared_input: LLMEvalPreparedInput,
 ) -> LLMEvalSourcePlan:
@@ -757,7 +773,7 @@ def _source_plan_for_map_reduce(
     return LLMEvalSourcePlan(
         deal_folder=prepared_input.source_plan.deal_folder,
         items=tuple(map_reduce_items),
-        warnings=prepared_input.source_plan.warnings,
+        warnings=_warnings_without_direct_truncation_warnings(prepared_input),
         total_source_chars_cap=prepared_input.source_plan.total_source_chars_cap,
         max_document_source_chars=prepared_input.source_plan.max_document_source_chars,
     )

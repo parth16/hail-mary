@@ -1004,6 +1004,14 @@ def test_llm_eval_auto_source_mode_uses_map_reduce_when_direct_truncates_source(
         llm_eval.MAP_LLM_EVAL_INSTRUCTIONS,
         llm_eval.REDUCE_LLM_EVAL_INSTRUCTIONS,
     ]
+    assert not any(
+        "source text was truncated" in warning
+        for warning in result.prepared_input.warnings
+    )
+    assert not any(
+        "source text was truncated" in warning
+        for warning in result.prepared_input.source_plan.warnings
+    )
 
 
 def test_llm_eval_auto_map_reduce_does_not_warn_that_processed_sources_were_omitted(
