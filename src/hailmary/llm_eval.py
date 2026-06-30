@@ -23,6 +23,7 @@ class LLMEvalError(RuntimeError):
 
 SUPPORTED_LLM_EVAL_SUFFIXES = frozenset({".md", ".txt", ".pdf", ".docx"})
 SOURCE_DOWNLOAD_FOLDER_NAMES = frozenset({"source-download", "source-downloads"})
+UNSUPPORTED_DILIGENCE_SUFFIXES = frozenset({".csv", ".htm", ".html", ".xlsx"})
 DEFAULT_LLM_EVAL_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "xhigh"
 DEFAULT_MAX_OUTPUT_TOKENS = 8_000
@@ -253,10 +254,12 @@ def run_llm_eval(
     prepared_input = prepare_llm_eval_input(
         deal_folder,
         config=config,
-        operator_prompt=prompt_text or DEFAULT_OPERATOR_PROMPT,
+        operator_prompt=prompt_text or default_operator_prompt(config),
     )
-    web_search_enabled = bool(
-        config.enable_web_research and allow_web_search and not no_web_search
+    web_search_enabled = _resolve_web_search_enabled(
+        config=config,
+        allow_web_search=allow_web_search,
+        no_web_search=no_web_search,
     )
     active_client = client or OpenAIResponsesClient(api_key=api_key)
     request_kwargs = _response_request_kwargs(
@@ -313,6 +316,10 @@ def load_prompt_file(path: Path) -> str:
     if not prompt_text.strip():
         raise LLMEvalError("The prompt file is empty.")
     return prompt_text
+
+
+def default_operator_prompt(config: AppConfig) -> str:
+    return DEFAULT_OPERATOR_PROMPT.replace("$70K", _portfolio_budget_text(config))
 
 
 def resolve_deal_folder(
@@ -542,6 +549,12 @@ def _collect_deal_documents(
                 excluded_paths.append(
                     LLMEvalExcludedPath(path=path, reason="unsupported file type")
                 )
+                if suffix in UNSUPPORTED_DILIGENCE_SUFFIXES:
+                    warnings.append(
+                        f"Skipped {_relative_name(path, root)}: llm-eval does not "
+                        "currently include this diligence file format. Supported "
+                        "formats are .md, .txt, .pdf, and .docx."
+                    )
                 continue
             remaining_chars = MAX_TOTAL_SOURCE_CHARS - sum(
                 len(document.text) for document in documents
@@ -552,6 +565,11 @@ def _collect_deal_documents(
                         path=path,
                         reason="source text input cap reached",
                     )
+                )
+                warnings.append(
+                    f"Skipped {_relative_name(path, root)}: source text input cap "
+                    f"of {MAX_TOTAL_SOURCE_CHARS:,} characters was reached before "
+                    "this file could be included."
                 )
                 continue
             document, document_warnings = _extract_llm_eval_document(
@@ -690,6 +708,23 @@ def _ensure_llm_upload_allowed(config: AppConfig) -> None:
             "but HAILMARY_LOCAL_ONLY is true. Set HAILMARY_LOCAL_ONLY=false only when "
             "you intentionally want to send this deal's local document text to OpenAI."
         )
+
+
+def _resolve_web_search_enabled(
+    *,
+    config: AppConfig,
+    allow_web_search: bool,
+    no_web_search: bool,
+) -> bool:
+    if no_web_search:
+        return False
+    if allow_web_search and not config.enable_web_research:
+        raise LLMEvalError(
+            "OpenAI web search was requested with --web-search, but web research is "
+            "not enabled in configuration. Set HAILMARY_ENABLE_WEB_RESEARCH=true only "
+            "when you intentionally want this run to use hosted web search."
+        )
+    return bool(allow_web_search and config.enable_web_research)
 
 
 def _validate_request_options(
@@ -983,3 +1018,10 @@ def _generated_roots(config: AppConfig) -> tuple[Path, ...]:
 def _absolute_config_path(path: Path) -> Path:
     expanded_path = path.expanduser()
     return expanded_path if expanded_path.is_absolute() else Path.cwd() / expanded_path
+
+
+def _portfolio_budget_text(config: AppConfig) -> str:
+    budget = config.capital_budget
+    if budget % 1_000 == 0:
+        return f"${budget // 1_000:,}K"
+    return f"${budget:,}"
