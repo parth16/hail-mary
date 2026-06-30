@@ -15,6 +15,7 @@ from hailmary.config import _project_root as config_project_root
 from hailmary.ingest.document_classifier import is_ignored_path
 from hailmary.ingest.extractors import extract_document
 from hailmary.utils.slug import slugify
+from hailmary.utils.source_instructions import looks_like_embedded_source_instruction
 
 
 class LLMEvalError(RuntimeError):
@@ -885,29 +886,44 @@ def _guard_claim_lineage(
     source_header_names = {_source_header_name(source_name) for source_name in source_names}
     guarded_lines: list[str] = []
     unsupported_line_numbers: list[int] = []
+    dropped_instruction_line_numbers: list[int] = []
     for line_number, line in enumerate(output_text.splitlines(), start=1):
         if _line_needs_lineage(line) and not _line_has_lineage(
             line,
             source_names=source_names,
             source_header_names=source_header_names,
         ):
+            if looks_like_embedded_source_instruction(line):
+                dropped_instruction_line_numbers.append(line_number)
+                continue
             unsupported_line_numbers.append(line_number)
             guarded_lines.append(_line_with_needs_diligence_label(line))
             continue
         guarded_lines.append(line)
-    if not unsupported_line_numbers:
+    if not unsupported_line_numbers and not dropped_instruction_line_numbers:
         return LLMEvalValidatedMemo(output_text=output_text, warnings=())
-    first_line_number = unsupported_line_numbers[0]
     guarded_output_text = "\n".join(guarded_lines).strip()
-    return LLMEvalValidatedMemo(
-        output_text=guarded_output_text,
-        warnings=(
+    warnings: list[str] = []
+    if unsupported_line_numbers:
+        first_line_number = unsupported_line_numbers[0]
+        warnings.append(
             "OpenAI returned memo text with "
             f"{len(unsupported_line_numbers)} material line(s) that lacked a local "
             "filename citation, web URL citation, or required uncertainty label. "
             f"First unsupported line number: {first_line_number}. Those memo line(s) "
-            "were labeled NEEDS_DILIGENCE before printing.",
-        ),
+            "were labeled NEEDS_DILIGENCE before printing."
+        )
+    if dropped_instruction_line_numbers:
+        warnings.append(
+            "OpenAI returned memo text with "
+            f"{len(dropped_instruction_line_numbers)} line(s) that looked like "
+            "instructions embedded in source documents. First dropped line number: "
+            f"{dropped_instruction_line_numbers[0]}. Those line(s) were removed "
+            "before printing."
+        )
+    return LLMEvalValidatedMemo(
+        output_text=guarded_output_text,
+        warnings=tuple(warnings),
     )
 
 
