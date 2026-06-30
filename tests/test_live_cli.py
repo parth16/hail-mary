@@ -39,7 +39,8 @@ def test_live_evaluate_deal_cli_smoke_uses_real_wrapper() -> None:
                 "PRIVATE_FULL_TEXT_MARKER_AT_END",
                 encoding="utf-8",
             )
-            data_dir = work_dir / "data"
+            data_dir = work_dir / "generated-data"
+            assert not data_dir.resolve(strict=False).is_relative_to(repo_root)
 
             env = _live_cli_env(os.environ, data_dir=data_dir)
             result = subprocess.run(
