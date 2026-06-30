@@ -1721,7 +1721,7 @@ def test_evaluate_deal_rule_based_web_mode_is_not_labeled_local_only(
     )
 
     assert result.evaluation_mode == "rule-based"
-    assert "Rule-based mode is on" in result.mode_explanation
+    assert "Rule-based test mode is on" in result.mode_explanation
     assert "Local-only mode was used" not in result.mode_explanation
     memo_lines = result.final_memo_path.read_text(encoding="utf-8").splitlines()
     assert any("Live public collection ran" in line for line in memo_lines)
@@ -4872,7 +4872,6 @@ def _set_openai_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HAILMARY_MODEL", "gpt-test")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("HAILMARY_LOCAL_ONLY", "false")
-    monkeypatch.setenv("HAILMARY_MOCK_LLM", "false")
 
 
 def _write_company_folder(

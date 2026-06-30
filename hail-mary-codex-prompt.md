@@ -727,7 +727,7 @@ Deliver:
 
 Acceptance:
 
-- `HAILMARY_MOCK_LLM=true` avoids external calls
+- `HAILMARY_LOCAL_ONLY=true` avoids external model calls
 - agents cite evidence IDs only
 - unsupported claims are labeled and cannot raise score
 
@@ -813,7 +813,7 @@ When the CLI exists, also smoke test:
 ```bash
 uv run hailmary init
 uv run hailmary ingest-folder ./pitch-decks
-HAILMARY_MOCK_LLM=true uv run hailmary analyze-all
+HAILMARY_LOCAL_ONLY=true uv run hailmary analyze-all
 ```
 
 If a check cannot run because a phase has not built the necessary project files yet, state that clearly.

@@ -40,7 +40,6 @@ The command should require:
 - `HAILMARY_MODEL`
 - `OPENAI_API_KEY`
 - `HAILMARY_LOCAL_ONLY=false`
-- `HAILMARY_MOCK_LLM=false`
 
 If any setting is missing or incompatible, the command should fail before making an LLM call and explain the exact setting the operator needs to change.
 
@@ -104,7 +103,7 @@ Use synthetic fixtures only.
 Required tests:
 
 - `evaluate-deal` succeeds for one synthetic company folder with mocked OpenAI responses, and the mocked OpenAI client asserts the request payload contains only selected packet excerpts, not raw deck bytes, full extracted documents, or local source paths.
-- Missing or incompatible `HAILMARY_LLM_PROVIDER`, `OPENAI_API_KEY`, `HAILMARY_MODEL`, `HAILMARY_LOCAL_ONLY=false`, or `HAILMARY_MOCK_LLM=false` fails before model calls.
+- Missing or incompatible `HAILMARY_LLM_PROVIDER`, `OPENAI_API_KEY`, `HAILMARY_MODEL`, or `HAILMARY_LOCAL_ONLY=false` fails before model calls.
 - A specialist validation failure retries once, then continues with a warning and records the failed role as a limitation in the final memo.
 - A final-decision validation failure exits without writing a final memo.
 - Deterministic kill gates force final `PASS` even when mocked model output tries `INVEST`.

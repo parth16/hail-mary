@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -20,6 +21,8 @@ MAX_CHECK_SIZE = max(CHECK_SIZE_TIERS)
 CHECK_SIZE_TIER_TEXT = "$0, $1K, $2.5K, $5K, $7.5K, or $10K"
 MAX_PORTFOLIO_DECIMAL_FIXED_CHARS = 120
 MERIDIAN_PROFILE_MARKER = ".hailmary-profile"
+DOTENV_FILENAME = ".env"
+_DOTENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 class AppConfig(BaseModel):
@@ -48,7 +51,7 @@ class AppConfig(BaseModel):
     enable_web_research: bool = False
     calculated_risk_mode: bool = True
     enabled_paid_providers: tuple[str, ...] = Field(default_factory=tuple)
-    mock_llm: bool = True
+    mock_llm: bool = False
     llm_specialist_token_budget: int | None = None
     llm_final_token_budget: int | None = None
     llm_specialist_max_output_tokens: int | None = None
@@ -209,6 +212,7 @@ def _parse_decimal(value: str, *, source: str) -> Decimal:
 def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> AppConfig:
     """Load config from environment variables and command options."""
 
+    _load_project_dotenv()
     saved_values = {} if ignore_saved else _read_local_config(AppConfig().config_path)
     env_data_dir = os.getenv("HAILMARY_DATA_DIR")
     data_dir_was_overridden = data_dir is not None or (
@@ -243,11 +247,6 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
     )
     if local_only:
         enable_web_research = False
-    mock_llm = (
-        _env_bool("HAILMARY_MOCK_LLM", True)
-        if "HAILMARY_MOCK_LLM" in os.environ
-        else _config_bool(saved_values, "mock_llm", True)
-    )
     env_reserve_percent = _env_setting_is_present("HAILMARY_RESERVE_PERCENT")
     env_reserve_dollars = _env_setting_is_present("HAILMARY_RESERVE_DOLLARS")
 
@@ -366,7 +365,7 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
             config_values=saved_values,
             config_name="enabled_paid_providers",
         ),
-        mock_llm=mock_llm,
+        mock_llm=False,
         llm_specialist_token_budget=_setting_optional_int(
             env_name="HAILMARY_LLM_SPECIALIST_TOKEN_BUDGET",
             config_values=saved_values,
@@ -409,6 +408,99 @@ def load_config(data_dir: Path | None = None, *, ignore_saved: bool = False) -> 
         ),
     )
     return validate_investment_settings(config)
+
+
+def _load_project_dotenv() -> None:
+    """Load local operator secrets from .env without overriding the shell."""
+
+    dotenv_path = _project_root() / DOTENV_FILENAME
+    if not dotenv_path.exists():
+        return
+    if dotenv_path.is_symlink():
+        raise ConfigError(f"Hail Mary needs {dotenv_path} to be a real file, not a symlink.")
+    if not dotenv_path.is_file():
+        raise ConfigError(f"Hail Mary needs {dotenv_path} to be a file, but it is a folder.")
+
+    try:
+        dotenv_text = dotenv_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"Could not read local .env at {dotenv_path}: {exc}") from exc
+
+    for line_number, raw_line in enumerate(dotenv_text.splitlines(), start=1):
+        parsed = _parse_dotenv_line(raw_line, path=dotenv_path, line_number=line_number)
+        if parsed is None:
+            continue
+        key, value = parsed
+        os.environ.setdefault(key, value)
+
+
+def _parse_dotenv_line(
+    raw_line: str,
+    *,
+    path: Path,
+    line_number: int,
+) -> tuple[str, str] | None:
+    stripped = raw_line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped.startswith("export "):
+        stripped = stripped[len("export ") :].lstrip()
+    if "=" not in stripped:
+        raise ConfigError(
+            f"Could not parse local .env at {path} line {line_number}: expected KEY=value."
+        )
+
+    raw_key, raw_value = stripped.split("=", 1)
+    key = raw_key.strip()
+    if not _DOTENV_KEY_RE.fullmatch(key):
+        raise ConfigError(
+            f"Could not parse local .env at {path} line {line_number}: "
+            f"{key!r} is not a valid setting name."
+        )
+
+    return key, _parse_dotenv_value(raw_value, path=path, line_number=line_number)
+
+
+def _parse_dotenv_value(raw_value: str, *, path: Path, line_number: int) -> str:
+    value = raw_value.strip()
+    if not value:
+        return ""
+    if value[0] in {"'", '"'}:
+        quote = value[0]
+        closing_quote_index = _closing_dotenv_quote_index(value, quote)
+        if closing_quote_index is None:
+            raise ConfigError(
+                f"Could not parse local .env at {path} line {line_number}: "
+                "quoted value is missing a closing quote."
+            )
+        suffix = value[closing_quote_index + 1 :].strip()
+        if suffix and not suffix.startswith("#"):
+            raise ConfigError(
+                f"Could not parse local .env at {path} line {line_number}: "
+                "quoted value must be followed only by a comment or whitespace."
+            )
+        return value[1:closing_quote_index]
+
+    return _strip_dotenv_comment(value).strip()
+
+
+def _closing_dotenv_quote_index(value: str, quote: str) -> int | None:
+    escaped = False
+    for index, character in enumerate(value[1:], start=1):
+        if quote == '"' and character == "\\" and not escaped:
+            escaped = True
+            continue
+        if character == quote and not escaped:
+            return index
+        escaped = False
+    return None
+
+
+def _strip_dotenv_comment(value: str) -> str:
+    for index, character in enumerate(value):
+        if character == "#" and (index == 0 or value[index - 1].isspace()):
+            return value[:index]
+    return value
 
 
 def _env_setting_is_present(name: str) -> bool:
@@ -1197,7 +1289,6 @@ def _default_config_text(config: AppConfig) -> str:
     enable_ocr = "true" if config.enable_ocr else "false"
     web_research = "true" if config.enable_web_research else "false"
     calculated_risk = "true" if config.calculated_risk_mode else "false"
-    mock_llm = "true" if config.mock_llm else "false"
     llm_input_cost_rate = _optional_int_text(
         config.llm_input_cost_per_million_tokens_cents
     )
@@ -1234,7 +1325,6 @@ enable_ocr: {enable_ocr}
 enable_web_research: {web_research}
 calculated_risk_mode: {calculated_risk}
 enabled_paid_providers: ""
-mock_llm: {mock_llm}
 llm_specialist_token_budget: {_optional_int_text(config.llm_specialist_token_budget)}
 llm_final_token_budget: {_optional_int_text(config.llm_final_token_budget)}
 llm_specialist_max_output_tokens: {_optional_int_text(config.llm_specialist_max_output_tokens)}

@@ -810,8 +810,6 @@ def _operator_visible_limitations(limitations: Sequence[str]) -> list[str]:
 def _operator_limitation_visible_in_brief(limitation: str) -> bool:
     lowered = limitation.lower()
     return lowered.startswith("local-only mode was used") or (
-        "model review was skipped" in lowered and "hailmary_mock_llm" in lowered
-    ) or (
         "no usable source-linked evidence" in lowered
         and "skipped model committee review" in lowered
     )
@@ -1941,11 +1939,6 @@ def load_llm_settings(
             "HAILMARY_LOCAL_ONLY must be false for OpenAI-backed evaluation. "
             "Set HAILMARY_LOCAL_ONLY=false before running `hailmary evaluate-deal`."
         )
-    if config.mock_llm:
-        raise EvaluationError(
-            "HAILMARY_MOCK_LLM must be false for OpenAI-backed evaluation. "
-            "Set HAILMARY_MOCK_LLM=false before running `hailmary evaluate-deal`."
-        )
 
     return LLMSettings(provider=provider, model=model, api_key=api_key)
 
@@ -2016,7 +2009,7 @@ def _evaluation_mode(config: AppConfig) -> EvaluationMode:
         )
 
     limitation = (
-        "Model review was skipped because HAILMARY_MOCK_LLM is true. The final "
+        "Model review was skipped by an internal rule-based test setting. The final "
         "recommendation comes from rule-based scoring, which means fixed checks over "
         "source-linked evidence."
     )
@@ -2024,9 +2017,9 @@ def _evaluation_mode(config: AppConfig) -> EvaluationMode:
         name="rule-based",
         model_backed=False,
         explanation=(
-            "Rule-based mode is on because HAILMARY_MOCK_LLM is true. Hail Mary "
-            "will ingest local documents, run any enabled external research, then "
-            "make the final recommendation with rule-based scoring."
+            "Rule-based test mode is on. Hail Mary will ingest local documents, run "
+            "any enabled external research, then make the final recommendation with "
+            "rule-based scoring."
         ),
         limitation=limitation,
     )
