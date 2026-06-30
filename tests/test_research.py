@@ -44,6 +44,7 @@ from hailmary.research import (
     ResearchProviderRunStatus,
     ResearchTaskStatus,
     ResearchTemplateError,
+    ResearchWorkflowCollectionSummary,
     SbirApiError,
     SbirAwardRecord,
     SbirAwardsResponse,
@@ -1400,6 +1401,95 @@ def test_run_research_workflow_public_web_search_failure_blocks(
         for issue in result.issues
     )
     assert result.blocking_issue_count >= 1
+    assert result.summary.failed_provider_count >= 1
+
+
+def test_research_workflow_demotes_only_provider_availability_failures() -> None:
+    assert not workflow_module._collection_error_should_block(
+        ResearchWorkflowCollectionSummary(
+            kind="live_public",
+            source_id="sbir",
+            source_name="SBIR/STTR",
+            status=ResearchProviderRunStatus.FAILED,
+            error="SBIR/STTR returned HTTP 429.",
+        )
+    )
+    assert not workflow_module._collection_error_should_block(
+        ResearchWorkflowCollectionSummary(
+            kind="web",
+            source_id="public_web_pages",
+            source_name="Direct public web pages",
+            status=ResearchProviderRunStatus.FAILED,
+            error="Could not reach the public page: timed out.",
+        )
+    )
+    assert workflow_module._collection_error_should_block(
+        ResearchWorkflowCollectionSummary(
+            kind="live_public",
+            source_id="public_web",
+            source_name="Public web and press search",
+            status=ResearchProviderRunStatus.FAILED,
+            error="Brave Search rejected the request.",
+        )
+    )
+    assert workflow_module._collection_error_should_block(
+        ResearchWorkflowCollectionSummary(
+            kind="live_public",
+            source_id="public_web",
+            source_name="Public web and press search",
+            status=ResearchProviderRunStatus.FAILED,
+            error="Public web search returned HTTP 429.",
+        )
+    )
+    assert workflow_module._collection_error_should_block(
+        ResearchWorkflowCollectionSummary(
+            kind="live_public",
+            source_id="sbir",
+            source_name="SBIR/STTR",
+            status=ResearchProviderRunStatus.FAILED,
+            error="Could not write SBIR/STTR research results: output file is a symlink.",
+        )
+    )
+    assert workflow_module._collection_error_should_block(
+        ResearchWorkflowCollectionSummary(
+            kind="live_public",
+            source_id="sbir",
+            source_name="SBIR/STTR",
+            status=ResearchProviderRunStatus.FAILED,
+            error="Collected SBIR/STTR results did not pass validation.",
+        )
+    )
+
+
+def test_research_workflow_direct_web_warning_issues_keep_url_safety_blocking() -> None:
+    safety_issues = workflow_module._direct_web_warning_issues(
+        ResearchWorkflowCollectionSummary(
+            kind="web",
+            source_id="public_web_pages",
+            source_name="Direct public web pages",
+            status=ResearchProviderRunStatus.FAILED,
+            warnings=[
+                "source_url cannot use a private, local, or reserved network address",
+                "The public page timed out.",
+            ],
+        )
+    )
+
+    assert len(safety_issues) == 1
+    assert safety_issues[0].severity == "error"
+    assert "private, local, or reserved network address" in safety_issues[0].message
+
+    availability_issues = workflow_module._direct_web_warning_issues(
+        ResearchWorkflowCollectionSummary(
+            kind="web",
+            source_id="public_web_pages",
+            source_name="Direct public web pages",
+            status=ResearchProviderRunStatus.FAILED,
+            warnings=["The public page timed out."],
+        )
+    )
+
+    assert availability_issues == []
 
 
 def test_run_research_workflow_public_web_fetched_identity_mismatch_is_skipped(
@@ -1667,7 +1757,7 @@ def test_run_research_workflow_treats_corrupt_import_state_as_blocking(
     )
 
 
-def test_run_research_workflow_treats_live_collection_failures_as_blocking(
+def test_run_research_workflow_selectively_disables_live_provider_rate_limits(
     tmp_path: Path,
 ) -> None:
     config = AppConfig(
@@ -1680,6 +1770,10 @@ def test_run_research_workflow_treats_live_collection_failures_as_blocking(
         {},
         error=SecFormDApiError("SEC User-Agent must include a contact email."),
     )
+    sbir_client = _FakeSbirAwardsClient(
+        {},
+        error=SbirApiError("SBIR/STTR returned HTTP 429."),
+    )
 
     result = run_research_workflow(
         config=config,
@@ -1691,20 +1785,39 @@ def test_run_research_workflow_treats_live_collection_failures_as_blocking(
         usaspending_client=_FakeUsaspendingAwardsClient(
             {("Acme AI", 1): _usaspending_response([])}
         ),
-        sbir_client=_FakeSbirAwardsClient({("Acme AI", 0): _sbir_response([])}),
+        sbir_client=sbir_client,
         github_client=_FakeGitHubRepositorySearchClient(
             {("Acme AI", 1): _github_repository_response([])}
         ),
     )
 
     assert web_client.calls == ["https://example.com/acme"]
-    assert result.blocking_issue_count == 2
+    assert sbir_client.calls == [("Acme AI", 10, 0)]
+    assert result.blocking_issue_count == 1
+    warning_messages = [
+        issue.message for issue in result.issues if issue.severity == "warning"
+    ]
+    assert any("SBIR/STTR returned HTTP 429" in message for message in warning_messages)
     error_messages = [issue.message for issue in result.issues if issue.severity == "error"]
-    assert any("Could not fetch the public page." in message for message in error_messages)
     assert any("SEC User-Agent" in message for message in error_messages)
-    assert result.summary.failed_provider_count == 2
+    assert not any(
+        "Could not fetch the public page." in message
+        for message in warning_messages + error_messages
+    )
+    direct_web = next(
+        collection
+        for collection in result.collections
+        if collection.source_id == "public_web_pages"
+    )
+    assert any("Could not fetch the public page." in warning for warning in direct_web.warnings)
+    assert result.summary.failed_provider_count == 3
     assert any(
         status.provider_id == "sec_form_d"
+        and status.status == ResearchProviderRunStatus.FAILED
+        for status in result.summary.provider_statuses
+    )
+    assert any(
+        status.provider_id == "sbir"
         and status.status == ResearchProviderRunStatus.FAILED
         for status in result.summary.provider_statuses
     )

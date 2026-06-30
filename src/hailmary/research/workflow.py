@@ -431,7 +431,7 @@ def run_research_workflow(
             if paid_summary.error is not None:
                 issues.append(
                     ResearchWorkflowIssue(
-                        severity="error",
+                        severity=_collection_error_issue_severity(paid_summary),
                         source="optional paid providers",
                         message=paid_summary.error,
                     )
@@ -458,20 +458,13 @@ def run_research_workflow(
             if collection.error is not None:
                 issues.append(
                     ResearchWorkflowIssue(
-                        severity="error",
+                        severity=_collection_error_issue_severity(collection),
                         source=collection.source_name,
                         message=collection.error,
                     )
                 )
             if collection.kind == "web":
-                issues.extend(
-                    ResearchWorkflowIssue(
-                        severity="error",
-                        source=collection.source_name,
-                        message=warning,
-                    )
-                    for warning in collection.warnings
-                )
+                issues.extend(_direct_web_warning_issues(collection))
     else:
         issues.append(
             ResearchWorkflowIssue(
@@ -824,6 +817,107 @@ def _run_live_collectors(
 
 def _live_collection_enabled(config: AppConfig) -> bool:
     return not config.local_only and config.enable_web_research
+
+
+def _collection_error_issue_severity(
+    collection: ResearchWorkflowCollectionSummary,
+) -> IssueSeverity:
+    if _collection_error_should_block(collection):
+        return "error"
+    return "warning"
+
+
+def _direct_web_warning_issues(
+    collection: ResearchWorkflowCollectionSummary,
+) -> list[ResearchWorkflowIssue]:
+    if collection.kind != "web":
+        return []
+    return [
+        ResearchWorkflowIssue(
+            severity="error",
+            source=collection.source_name,
+            message=warning,
+        )
+        for warning in collection.warnings
+        if _looks_like_direct_web_safety_failure(warning)
+    ]
+
+
+def _collection_error_should_block(
+    collection: ResearchWorkflowCollectionSummary,
+) -> bool:
+    if collection.error is None:
+        return False
+    if collection.source_id == "public_web":
+        return True
+    if _looks_like_local_collection_failure(collection.error):
+        return True
+    return not _collection_error_can_degrade(collection)
+
+
+def _collection_error_can_degrade(collection: ResearchWorkflowCollectionSummary) -> bool:
+    if collection.error is None:
+        return False
+    if collection.kind == "live_public" and collection.source_id != "public_web":
+        return _looks_like_provider_availability_failure(collection.error)
+    if collection.kind == "web" and collection.source_id == "public_web_pages":
+        return _looks_like_provider_availability_failure(collection.error)
+    if collection.kind == "paid_optional":
+        return _looks_like_provider_availability_failure(collection.error)
+    return False
+
+
+def _looks_like_direct_web_safety_failure(message: str) -> bool:
+    lowered = message.casefold()
+    safety_markers = (
+        "access-token",
+        "access_token",
+        "credential",
+        "hidden authenticated data",
+        "invalid port",
+        "local-only website host",
+        "localhost",
+        "private, local, or reserved network address",
+        "signed url",
+        "signature",
+        "source_url cannot",
+        "token",
+        "unsupported redirect",
+        "unsafe",
+    )
+    return any(marker in lowered for marker in safety_markers)
+
+
+def _looks_like_local_collection_failure(message: str) -> bool:
+    lowered = message.casefold()
+    local_failure_markers = (
+        "could not create",
+        "could not save",
+        "could not write",
+        "did not pass validation",
+        "local generated-data",
+        "output file is a symlink",
+        "output path",
+        "private data directory",
+        "research results file",
+        "symlink",
+    )
+    return any(marker in lowered for marker in local_failure_markers)
+
+
+def _looks_like_provider_availability_failure(message: str) -> bool:
+    lowered = message.casefold()
+    if "could not reach" in lowered:
+        return True
+    if "timed out" in lowered or "timeout" in lowered:
+        return True
+    if "rate limit" in lowered or "too many requests" in lowered:
+        return True
+    if "temporarily unavailable" in lowered:
+        return True
+    if "returned http 429" in lowered or "returned http 408" in lowered:
+        return True
+    return any(f"returned http {status}" in lowered for status in range(500, 600))
 
 
 def _run_web_collection(
