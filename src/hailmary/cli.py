@@ -77,12 +77,16 @@ from hailmary.ingest.folder_loader import (
     ingest_folder as ingest_folder_path,
 )
 from hailmary.llm_eval import (
+    AUTO_SOURCE_MODE,
     DEFAULT_LLM_EVAL_MODEL,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_REASONING_EFFORT,
     LLMEvalError,
     LLMEvalResult,
+    LLMEvalSourcePlan,
+    build_llm_eval_source_plan,
     load_prompt_file,
+    resolve_deal_folder,
     run_llm_eval,
 )
 from hailmary.portfolio import (
@@ -289,6 +293,10 @@ def _llm_eval_progress_label(stage: str) -> str:
         return "Checking web search settings..."
     if stage == "OpenAI request preparation":
         return "Preparing the OpenAI request..."
+    if stage == "OpenAI map-reduce source summaries":
+        return "Summarizing local sources with OpenAI..."
+    if stage == "OpenAI map-reduce final memo":
+        return "Building the final memo from source summaries..."
     if stage == "OpenAI evaluation request":
         return "Starting the OpenAI evaluation..."
     if stage == "OpenAI response wait":
@@ -2644,6 +2652,33 @@ def llm_eval_command(
             help="Optional UTF-8 operator prompt file to use instead of the default.",
         ),
     ] = None,
+    source_mode: Annotated[
+        str,
+        typer.Option(
+            "--source-mode",
+            help="Source coverage mode: direct, auto, map-reduce, or file-search.",
+        ),
+    ] = AUTO_SOURCE_MODE,
+    allow_omitted_supported_sources: Annotated[
+        bool,
+        typer.Option(
+            "--allow-omitted-supported-sources",
+            help=(
+                "Allow direct mode to continue when supported local sources are "
+                "omitted by source caps."
+            ),
+        ),
+    ] = False,
+    source_plan: Annotated[
+        bool,
+        typer.Option(
+            "--source-plan",
+            help=(
+                "Show the local source coverage plan without requiring an OpenAI API "
+                "key or calling OpenAI."
+            ),
+        ),
+    ] = False,
     verbose: Annotated[
         bool,
         typer.Option(
@@ -2656,6 +2691,11 @@ def llm_eval_command(
 
     config = _config_from_options(None)
     try:
+        if source_plan:
+            resolved_deal = resolve_deal_folder(deal_folder_or_deal_id)
+            plan = build_llm_eval_source_plan(resolved_deal, config=config)
+            _print_llm_eval_source_plan(plan)
+            return
         prompt_text = load_prompt_file(prompt_file) if prompt_file is not None else None
         resolved_max_output_tokens = (
             DEFAULT_MAX_OUTPUT_TOKENS if max_output_tokens is None else max_output_tokens
@@ -2668,6 +2708,7 @@ def llm_eval_command(
             web_search=web_search,
             no_web_search=no_web_search,
             background_mode=background_mode,
+            source_mode=source_mode,
             prompt_file=prompt_file,
         )
         with _LLMEvalProgress(stderr_console) as progress:
@@ -2681,6 +2722,8 @@ def llm_eval_command(
                 max_output_tokens=resolved_max_output_tokens,
                 auto_retry_output_tokens=max_output_tokens is None,
                 background_mode=background_mode,
+                source_mode=source_mode,
+                allow_omitted_supported_sources=allow_omitted_supported_sources,
                 prompt_text=prompt_text,
                 stage_callback=progress.update,
             )
@@ -2701,6 +2744,7 @@ def _print_llm_eval_start_card(
     web_search: bool,
     no_web_search: bool,
     background_mode: bool,
+    source_mode: str,
     prompt_file: Path | None,
 ) -> None:
     table = Table.grid(padding=(0, 2))
@@ -2719,6 +2763,7 @@ def _print_llm_eval_start_card(
         "Background",
         _literal("enabled" if background_mode else "disabled"),
     )
+    table.add_row("Source mode", _literal(source_mode))
     table.add_row(
         "Prompt",
         _literal("override" if prompt_file is not None else "default"),
@@ -2775,44 +2820,122 @@ def _print_llm_eval_warnings(result: LLMEvalResult) -> None:
         )
 
 
+def _print_llm_eval_source_plan(source_plan: LLMEvalSourcePlan) -> None:
+    table = _llm_eval_source_plan_table(source_plan, title="LLM Eval Source Plan")
+    console.print(table)
+    for line in _llm_eval_source_plan_plain_lines(source_plan):
+        console.print(line, soft_wrap=True)
+    if source_plan.direct_mode_would_fail_closed:
+        console.print(
+            _plain(
+                "Direct mode would fail closed because supported source files would "
+                "be omitted by the source text cap.",
+                style="bold red",
+            )
+        )
+    else:
+        console.print(
+            _plain(
+                "Direct mode has coverage for every usable supported source.",
+                style="bold green",
+            )
+        )
+    if source_plan.warnings:
+        for warning in source_plan.warnings:
+            stderr_console.print(
+                _plain(f"Warning: {warning}", style="yellow"),
+                soft_wrap=True,
+            )
+
+
 def _print_llm_eval_source_manifest(result: LLMEvalResult) -> None:
+    stderr_console.print(
+        _llm_eval_source_plan_table(
+            result.prepared_input.source_plan,
+            title="Local Source Manifest",
+        )
+    )
+    for line in _llm_eval_source_plan_plain_lines(result.prepared_input.source_plan):
+        stderr_console.print(line, soft_wrap=True)
+
+
+def _llm_eval_source_plan_table(
+    source_plan: LLMEvalSourcePlan,
+    *,
+    title: str,
+) -> Table:
     table = Table(
-        title="Local Source Manifest",
+        title=title,
         box=box.SIMPLE_HEAVY,
         header_style="bold",
         show_edge=False,
         pad_edge=False,
     )
-    table.add_column("State", style="bold cyan", no_wrap=True)
+    table.add_column("Status", style="bold cyan", no_wrap=True)
     table.add_column("Path", overflow="fold")
-    table.add_column("Details", overflow="fold")
-    for document in result.prepared_input.documents:
+    table.add_column("Priority", overflow="fold")
+    table.add_column("Allocated", justify="right", no_wrap=True)
+    table.add_column("Sent", justify="right", no_wrap=True)
+    table.add_column("Extracted", justify="right", no_wrap=True)
+    table.add_column("Reason", overflow="fold")
+    for item in source_plan.items:
         table.add_row(
-            "Included:",
-            _literal(document.relative_path.as_posix()),
-            _literal(f"{len(document.text):,} extracted chars"),
+            item.status,
+            _literal(item.relative_path.as_posix()),
+            _literal(item.priority_bucket),
+            _literal(_char_count_text(item.allocated_chars)),
+            _literal(_char_count_text(item.sent_chars)),
+            _literal(_char_count_text(item.extracted_chars)),
+            _literal(item.reason),
         )
-    for excluded_path in result.prepared_input.excluded_paths:
-        table.add_row(
-            "Excluded:",
-            _literal(_llm_eval_relative_path(result, excluded_path.path)),
-            _literal(excluded_path.reason),
+    return table
+
+
+def _char_count_text(value: int) -> str:
+    return f"{value:,}" if value else "-"
+
+
+def _llm_eval_source_plan_plain_lines(source_plan: LLMEvalSourcePlan) -> list[Text]:
+    lines: list[Text] = []
+    for item in source_plan.items:
+        lines.append(
+            _plain(
+                "source-plan "
+                f"status={item.status} "
+                f"path={item.relative_path.as_posix()} "
+                f"priority={item.priority_bucket} "
+                f"allocated={item.allocated_chars} "
+                f"sent={item.sent_chars} "
+                f"extracted={item.extracted_chars} "
+                f"reason={item.reason}"
+            )
         )
-    stderr_console.print(table)
+    return lines
 
 
 def _print_llm_eval_summary(result: LLMEvalResult) -> None:
+    included_count = sum(
+        1
+        for item in result.prepared_input.source_plan.items
+        if item.status in {"included", "truncated"}
+    )
+    excluded_count = sum(
+        1
+        for item in result.prepared_input.source_plan.items
+        if item.status in {"excluded", "omitted_supported", "unusable"}
+    )
     lines: list[Text] = [
         _plain("Memo: printed to stdout", style="bold green"),
         _plain(f"Model: {result.model}"),
         _plain(f"Reasoning effort: {result.reasoning_effort}"),
+        _plain(f"Source mode: {result.source_mode}"),
         _plain(
             f"Web search: {'enabled' if result.web_search_enabled else 'disabled'}"
         ),
         _plain(
             "Sources: "
-            f"{len(result.prepared_input.documents)} included, "
-            f"{len(result.prepared_input.excluded_paths)} excluded"
+            f"{included_count} included/truncated, "
+            f"{excluded_count} excluded/omitted/unusable"
         ),
     ]
     usage_line = _llm_eval_usage_line(result)
