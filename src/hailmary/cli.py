@@ -2529,6 +2529,16 @@ def llm_eval_command(
             help="Maximum OpenAI output tokens for the memo.",
         ),
     ] = DEFAULT_MAX_OUTPUT_TOKENS,
+    background_mode: Annotated[
+        bool,
+        typer.Option(
+            "--background-mode",
+            help=(
+                "Run the OpenAI request in background mode. Background responses may "
+                "be temporarily stored by OpenAI for polling."
+            ),
+        ),
+    ] = False,
     prompt_file: Annotated[
         Path | None,
         typer.Option(
@@ -2556,6 +2566,7 @@ def llm_eval_command(
             reasoning_effort=reasoning_effort,
             no_web_search=no_web_search,
             max_output_tokens=max_output_tokens,
+            background_mode=background_mode,
             prompt_text=prompt_text,
         )
     except LLMEvalError as exc:
