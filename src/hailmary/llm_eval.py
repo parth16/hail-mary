@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -25,9 +25,10 @@ class LLMEvalError(RuntimeError):
 class LLMEvalIncompleteError(LLMEvalError):
     """The OpenAI response ended incomplete."""
 
-    def __init__(self, message: str, *, reason: str | None) -> None:
+    def __init__(self, message: str, *, reason: str | None, response: Any) -> None:
         super().__init__(message)
         self.reason = reason
+        self.response = response
 
 
 SUPPORTED_LLM_EVAL_SUFFIXES = frozenset({".md", ".txt", ".pdf", ".docx"})
@@ -180,6 +181,7 @@ class LLMEvalUsage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    attempt_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -309,6 +311,7 @@ def run_llm_eval(
     )
 
     runtime_warnings: list[str] = []
+    usage_attempts: list[LLMEvalUsage] = []
     retry_count = 0
     while True:
         _stage(stage_callback, "OpenAI evaluation request")
@@ -336,7 +339,12 @@ def run_llm_eval(
                 enabled=auto_retry_output_tokens,
             )
             if retry_max_output_tokens is None:
+                if exc.reason == "max_output_tokens":
+                    raise LLMEvalError(
+                        _max_output_token_limit_error(current_max_output_tokens)
+                    ) from exc
                 raise
+            usage_attempts.append(_response_usage(exc.response))
             retry_count += 1
             request_kwargs = {
                 **request_kwargs,
@@ -372,7 +380,8 @@ def run_llm_eval(
         )
     output_text = validated_memo.output_text
     _stage(stage_callback, "token usage collection")
-    usage = _response_usage(response)
+    usage_attempts.append(_response_usage(response))
+    usage = _aggregate_usages(usage_attempts)
     return LLMEvalResult(
         output_text=output_text,
         usage=usage,
@@ -1134,6 +1143,7 @@ def _poll_response_until_finished(
             raise LLMEvalIncompleteError(
                 _terminal_response_error(active_response, status=status),
                 reason=_response_incomplete_reason(active_response),
+                response=active_response,
             )
         if status in {"failed", "cancelled"}:
             raise LLMEvalError(_terminal_response_error(active_response, status=status))
@@ -1147,15 +1157,39 @@ def _stage(callback: Callable[[str], None] | None, stage: str) -> None:
 
 def _terminal_response_error(response: Any, *, status: str) -> str:
     if status == "incomplete" and _response_incomplete_reason(response) == "max_output_tokens":
-        return (
-            "OpenAI stopped before completing the memo because the output-token limit "
-            "was too low. Re-run with a higher `--max-output-tokens` value, for "
-            "example `--max-output-tokens 32000`, or lower `--reasoning-effort`."
-        )
+        return _max_output_token_limit_error(None)
     detail = _response_error_detail(response)
     if detail:
         return f"OpenAI evaluation ended with status {status}: {detail}"
     return f"OpenAI evaluation ended with status {status}."
+
+
+def _max_output_token_limit_error(failed_max_output_tokens: int | None) -> str:
+    base = (
+        "OpenAI stopped before completing the memo because the output-token limit "
+        "was too low."
+    )
+    if failed_max_output_tokens is None:
+        return (
+            f"{base} Re-run with a higher `--max-output-tokens` value if the "
+            "selected model supports it, lower `--reasoning-effort`, or reduce the "
+            "included source text."
+        )
+    if failed_max_output_tokens < MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP:
+        next_max_output_tokens = min(
+            failed_max_output_tokens * MAX_OUTPUT_TOKEN_AUTO_RETRY_MULTIPLIER,
+            MAX_OUTPUT_TOKEN_AUTO_RETRY_CAP,
+        )
+        return (
+            f"{base} This run used `--max-output-tokens {failed_max_output_tokens}`. "
+            f"Re-run with `--max-output-tokens {next_max_output_tokens}`, lower "
+            "`--reasoning-effort`, or reduce the included source text."
+        )
+    return (
+        f"{base} This run already used `--max-output-tokens "
+        f"{failed_max_output_tokens}`. Lower `--reasoning-effort`, reduce the "
+        "included source text, or use a prompt that asks for a shorter visible memo."
+    )
 
 
 def _response_incomplete_reason(response: Any) -> str | None:
@@ -1197,6 +1231,28 @@ def _response_usage(response: Any) -> LLMEvalUsage:
         output_tokens=_int_field(usage, "output_tokens"),
         total_tokens=_int_field(usage, "total_tokens"),
     )
+
+
+def _aggregate_usages(usages: Sequence[LLMEvalUsage]) -> LLMEvalUsage:
+    if not usages:
+        return LLMEvalUsage()
+    if len(usages) == 1:
+        return usages[0]
+    return LLMEvalUsage(
+        input_tokens=_sum_known_tokens(usage.input_tokens for usage in usages),
+        output_tokens=_sum_known_tokens(usage.output_tokens for usage in usages),
+        total_tokens=_sum_known_tokens(usage.total_tokens for usage in usages),
+        attempt_count=len(usages),
+    )
+
+
+def _sum_known_tokens(values: Iterable[int | None]) -> int | None:
+    total = 0
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
 
 
 def _object_field(value: Any, field_name: str) -> Any:

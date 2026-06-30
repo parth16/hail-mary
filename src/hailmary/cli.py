@@ -2693,6 +2693,7 @@ def _print_llm_eval_usage(result: LLMEvalResult) -> None:
         usage.input_tokens is None
         and usage.output_tokens is None
         and usage.total_tokens is None
+        and usage.attempt_count <= 1
     ):
         return
     typer.echo(
