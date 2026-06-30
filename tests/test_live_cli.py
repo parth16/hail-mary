@@ -17,7 +17,7 @@ def test_live_evaluate_deal_cli_smoke_uses_real_wrapper() -> None:
 
     config_dir = repo_root / ".hailmary"
     exclude_path = _git_exclude_path(repo_root)
-    original_exclude = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else None
+    original_exclude = _read_optional_text(exclude_path)
 
     with tempfile.TemporaryDirectory(
         prefix="evaluate-deal-",
@@ -98,6 +98,7 @@ def test_live_evaluate_deal_cli_smoke_uses_real_wrapper() -> None:
             assert export["deal"]["evaluation_mode"] == "local-only"
             assert export["privacy"]["contains_raw_evidence_text"] is False
             assert export["privacy"]["contains_model_excerpts"] is False
+            assert _read_optional_text(exclude_path) == original_exclude
         finally:
             try:
                 if config_was_moved:
@@ -118,6 +119,10 @@ def _git_exclude_path(repo_root: Path) -> Path:
     )
     assert result.returncode == 0, result.stderr or result.stdout
     return Path(result.stdout.strip())
+
+
+def _read_optional_text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.exists() else None
 
 
 def _restore_git_exclude(path: Path, original_text: str | None) -> None:
