@@ -833,14 +833,44 @@ def _sanitize_plain_map_summary_text(summary_text: str) -> tuple[str, int]:
 
 
 def _sanitize_json_map_summary_text(summary_text: str) -> tuple[str, int] | None:
-    try:
-        parsed_summary = json.loads(summary_text)
-    except json.JSONDecodeError:
+    parsed_summary = _parse_json_map_summary_text(summary_text)
+    if parsed_summary is None:
         return None
     sanitized_summary, removed_count = _sanitize_map_summary_json_value(parsed_summary)
     if sanitized_summary is _REMOVED_MAP_SUMMARY_VALUE:
         return _removed_map_summary_placeholder(), removed_count
     return json.dumps(sanitized_summary, ensure_ascii=True, sort_keys=True), removed_count
+
+
+def _parse_json_map_summary_text(summary_text: str) -> Any | None:
+    for candidate_text in _json_map_summary_candidates(summary_text):
+        try:
+            return json.loads(candidate_text)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _json_map_summary_candidates(summary_text: str) -> Iterable[str]:
+    stripped_text = summary_text.strip()
+    if not stripped_text:
+        return
+    yield stripped_text
+    fenced_match = re.search(
+        r"(?is)```(?:json)?\s*(?P<body>.*?)\s*```",
+        stripped_text,
+    )
+    if fenced_match is not None:
+        yield fenced_match.group("body").strip()
+    json_start = min(
+        (index for index in (stripped_text.find("{"), stripped_text.find("[")) if index >= 0),
+        default=-1,
+    )
+    if json_start < 0:
+        return
+    json_end = max(stripped_text.rfind("}"), stripped_text.rfind("]"))
+    if json_end > json_start:
+        yield stripped_text[json_start : json_end + 1].strip()
 
 
 def _sanitize_map_summary_json_value(value: Any) -> tuple[Any, int]:
@@ -1712,6 +1742,7 @@ def _source_priority_bucket(relative_path: Path) -> LLMEvalSourcePriority:
         word_haystack,
         [
             "terms summary",
+            "term sheet",
             "safe",
             "safe agreement",
             "simple agreement for future equity",
